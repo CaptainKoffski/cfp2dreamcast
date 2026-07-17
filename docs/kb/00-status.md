@@ -1,6 +1,6 @@
 # Project status
 
-**Updated:** 2026-07-18 (Phase 1, Task 6)
+**Updated:** 2026-07-18 (Phase 1, Task 7)
 
 ## What this is
 
@@ -22,8 +22,8 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
 
 ## Phases
 
-1. **Foundation — IN PROGRESS** (repo, knowledge base, tooling, boot verification)
-2. Instrumented analysis (cart-access + RAM logging via modified Flycast)
+1. **Foundation — DONE 2026-07-18** (repo, knowledge base, tooling, boot verification)
+2. **Instrumented analysis — NEXT** (cart-access + RAM logging via modified Flycast)
 3. Reverse engineering (Ghidra on the 1 MB boot binary)
 4. Conversion (loader + shims + patches → bootable GDI)
 5. Fit & polish (RAM/asset cuts if measurements demand, hardware testing)
@@ -40,7 +40,7 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
 
 ## Next step
 
-Execute the Phase 1 plan: `docs/superpowers/plans/2026-07-17-phase1-foundation.md`.
+Brainstorm and spec Phase 2 (instrumented analysis): cart-access and RAM logging via a modified Flycast source build.
 
 ## Key facts so far
 
