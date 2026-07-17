@@ -41,13 +41,15 @@ to `~/Library/Application Support/Flycast/data/naomi.zip`.
 `epr-21576d.ic27`, `epr-21578g.ic27`, `sp5001-b.bin`, and all expected
 variant ROMs.
 
-**Launch command (working — opens Flycast with ROM):**
+**Launch command (opens Flycast with ROM):**
 ```
-/Applications/Flycast.app/Contents/MacOS/Flycast "Cleopatra Fortune Plus.dat"
+/Applications/Flycast.app/Contents/MacOS/Flycast "/Users/captainkoffski/AntigravityProjects/cleopatra/Cleopatra Fortune Plus.dat"
 ```
-Run from the repo root. Flycast v2.6 (universal binary, arm64 + x86_64)
-launches successfully. The `.dat` extension is accepted directly — no
-rename to `.bin` was needed (fallback chain rung 1 not required).
+Use an ABSOLUTE ROM path — a relative path fails with `Cannot stat
+Cleopatra Fortune Plus.dat` because Flycast's working directory is not the
+repo root. Flycast v2.6 (universal binary, arm64 + x86_64). The `.dat`
+extension is accepted directly — no rename to `.bin` needed (fallback
+chain rung 1 not required).
 
 **Autonomous screenshot:** not obtained. `screencapture -x` returned
 `could not create image from display` — the terminal process lacks macOS

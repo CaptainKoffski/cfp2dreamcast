@@ -20,8 +20,9 @@ The environment must be rebuildable from scratch from this file.
 - **Gatekeeper:** after install, macOS may block launch ("Flycast cannot be opened").
   Clear the quarantine once: `xattr -dr com.apple.quarantine /Applications/Flycast.app`
   (app is validly signed as `com.flyinghead.Flycast`).
-- Run: `/Applications/Flycast.app/Contents/MacOS/Flycast "<rom path>"`
-  (from repo root: `/Applications/Flycast.app/Contents/MacOS/Flycast "Cleopatra Fortune Plus.dat"`)
+- Run (use an ABSOLUTE ROM path — a relative path fails with
+  `Cannot stat ...` because Flycast's CWD is not the repo root):
+  `/Applications/Flycast.app/Contents/MacOS/Flycast "/Users/captainkoffski/AntigravityProjects/cleopatra/Cleopatra Fortune Plus.dat"`
 - Emulates both Naomi and Dreamcast. Open source (github.com/flyinghead/flycast);
   Phase 2 instruments a source build — this is the release build.
 - **BIOS path (working):** `~/Library/Application Support/Flycast/data/naomi.zip`
