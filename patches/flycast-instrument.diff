@@ -1,0 +1,233 @@
+# Cleopatra Phase 2 - Instrumented Flycast patch
+# Apply from tools/flycast-src/ with: git apply patches/flycast-instrument.diff
+# (Syphon submodule hunk applies inside core/deps/Syphon/ - see marker below.)
+#
+# --- Flycast top-level tree ---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 19bdfee..37cb109 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -47,6 +47,13 @@ else()
+ 	project(flycast)
+ endif()
+ 
++# Local build fix (Cleopatra Phase 2, not upstream): SDL2's subproject compiles
++# .m files but never enable_language(OBJC); force it so CMAKE_OBJC_COMPILE_OBJECT
++# is populated under command-line-tools + cmake 3.31.
++if(APPLE AND NOT LIBRETRO)
++	enable_language(OBJC)
++endif()
++
+ option(FLYCAST_PRESEED_DARWIN_XCODE_CHECKS "Pre-seed stable macOS feature checks for faster Xcode generation" ON)
+ if(FLYCAST_PRESEED_DARWIN_XCODE_CHECKS)
+ 	include(DarwinXcodeProbeCache)
+@@ -1416,9 +1423,14 @@ if(NOT LIBRETRO)
+ 				${IOSURFACE_LIBRARY}
+ 				${MULTITOUCH_SUPPORT_LIBRARY})
+ 
+-			add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+-				COMMAND ${CMAKE_COMMAND} -E copy "$ENV{VULKAN_SDK}/lib/libMoltenVK.dylib"
+-				$<TARGET_FILE_DIR:flycast>/../Frameworks/libvulkan.dylib)
++			# Local build fix (Cleopatra Phase 2, not upstream): only bundle
++			# MoltenVK when Vulkan is enabled and a Vulkan SDK is present. The
++			# headless instrumentation build uses OpenGL, so skip it otherwise.
++			if(USE_VULKAN AND EXISTS "$ENV{VULKAN_SDK}/lib/libMoltenVK.dylib")
++				add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
++					COMMAND ${CMAKE_COMMAND} -E copy "$ENV{VULKAN_SDK}/lib/libMoltenVK.dylib"
++					$<TARGET_FILE_DIR:flycast>/../Frameworks/libvulkan.dylib)
++			endif()
+ 		endif()
+ 	elseif(UNIX)
+ 		if(NOT BUILD_TESTING)
+diff --git a/core/hw/maple/maple_jvs.cpp b/core/hw/maple/maple_jvs.cpp
+index d01240f..3c8deec 100644
+--- a/core/hw/maple/maple_jvs.cpp
++++ b/core/hw/maple/maple_jvs.cpp
+@@ -19,6 +19,7 @@
+ #include "maple_devs.h"
+ #include "maple_if.h"
+ #include "hw/naomi/naomi_cart.h"
++#include "hw/naomi/cartlog.h"
+ #include <xxhash.h>
+ #include "oslib/oslib.h"
+ #include "oslib/i18n.h"
+@@ -2225,6 +2226,7 @@ u32 jvs_io_board::handle_jvs_message(const u8 *buffer_in, u32 length_in, u8 *buf
+ 
+ 						u32 inputs[4];
+ 						read_digital_in(buttons, inputs);
++						cartlog("JVSREPORT buttons=%04x\n", inputs[0] & 0xffff);   // P1 JVS digital word
+ 						JVS_OUT((inputs[0] & NAOMI_TEST_KEY) ? 0x80 : 0x00); // test, tilt1, tilt2, tilt3, unused, unused, unused, unused
+ 						LOGJVS("btns ");
+ 						for (int player = 0; player < buffer_in[cmdi + 1]; player++)
+diff --git a/core/hw/naomi/CMakeLists.txt b/core/hw/naomi/CMakeLists.txt
+index d9f2051..8994318 100644
+--- a/core/hw/naomi/CMakeLists.txt
++++ b/core/hw/naomi/CMakeLists.txt
+@@ -1,4 +1,6 @@
+ target_sources(${PROJECT_NAME} PRIVATE
++        cartlog.cpp
++        cartlog.h
+         atomiswave.cpp
+         atomiswave.h
+         awave_regs.h
+diff --git a/core/hw/naomi/cartlog.cpp b/core/hw/naomi/cartlog.cpp
+new file mode 100644
+index 0000000..52f3c59
+--- /dev/null
++++ b/core/hw/naomi/cartlog.cpp
+@@ -0,0 +1,23 @@
++// core/hw/naomi/cartlog.cpp
++// Phase 2 instrumentation (Cleopatra Naomi->DC port). Not upstream.
++#include "cartlog.h"
++#include <cstdio>
++#include <cstdlib>
++#include <cstdarg>
++
++void cartlog(const char *fmt, ...)
++{
++	static FILE *f = nullptr;
++	if (f == nullptr)
++	{
++		const char *path = getenv("FLYCAST_CARTLOG");
++		f = fopen(path != nullptr ? path : "flycast-cartlog.txt", "w");
++		if (f == nullptr)
++			return; // ponytail: if the log file won't open, stay silent rather than crash the emu
++	}
++	va_list ap;
++	va_start(ap, fmt);
++	vfprintf(f, fmt, ap);
++	va_end(ap);
++	fflush(f);
++}
+diff --git a/core/hw/naomi/cartlog.h b/core/hw/naomi/cartlog.h
+new file mode 100644
+index 0000000..e2c7ef6
+--- /dev/null
++++ b/core/hw/naomi/cartlog.h
+@@ -0,0 +1,4 @@
++// core/hw/naomi/cartlog.h
++// Phase 2 instrumentation (Cleopatra Naomi->DC port). Not upstream.
++#pragma once
++void cartlog(const char *fmt, ...);
+diff --git a/core/hw/naomi/naomi.cpp b/core/hw/naomi/naomi.cpp
+index 45005d7..dac07b3 100644
+--- a/core/hw/naomi/naomi.cpp
++++ b/core/hw/naomi/naomi.cpp
+@@ -35,6 +35,12 @@
+ #include "midiffb.h"
+ #include "atomiswave.h"
+ #include "oslib/i18n.h"
++#include "cartlog.h"
++// Phase 2 instrumentation: RAM buffers for watermark scans.
++// mem_b/RAM_SIZE = main system RAM (sh4_mem.h, already included); vram/VRAM_SIZE
++// (pvr_mem.h); aica::aica_ram/ARAM_SIZE (aica_if.h). Sizes are macros in types.h.
++#include "hw/pvr/pvr_mem.h"
++#include "hw/aica/aica_if.h"
+ 
+ #include <memory>
+ #include <algorithm>
+@@ -106,6 +112,8 @@ void WriteMem_naomi(u32 address, u32 data, u32 size)
+ 		INFO_LOG(NAOMI, "called without cartridge");
+ 		return;
+ 	}
++	if (address >= NAOMI_COMM_CTRL_addr && address <= NAOMI_COMM_STATUS2_addr)
++		cartlog("SERIALPOKE addr=%08x data=%08x\n", address, data);
+ 	if (!settings.naomi.slave && m3comm != nullptr && address >= NAOMI_COMM_CTRL_addr && address <= NAOMI_COMM_STATUS2_addr) {
+ 		m3comm->WriteMem(address, data, size);
+ 		return;
+@@ -148,6 +156,24 @@ static int naomiDmaSched(int tag, int sch_cycl, int jitter, void *arg)
+ 	}
+ }
+ 
++// Phase 2 instrumentation: highest non-zero byte in a buffer (backwards scan,
++// stops at the water line). ponytail: over-reports if stale non-zero data sits
++// high in the region — a conservative upper bound, fine for the cut decision.
++static u32 cartlog_high(const u8 *buf, u32 size)
++{
++	for (u32 i = size; i-- > 0; )
++		if (buf[i] != 0)
++			return i + 1;
++	return 0;
++}
++
++static void cartlog_watermarks()
++{
++	cartlog("WATERMARK region=main used=%x size=%x\n", cartlog_high(&mem_b[0], RAM_SIZE), RAM_SIZE);
++	cartlog("WATERMARK region=vram used=%x size=%x\n", cartlog_high(&vram[0], VRAM_SIZE), VRAM_SIZE);
++	cartlog("WATERMARK region=aram used=%x size=%x\n", cartlog_high(&aica::aica_ram[0], ARAM_SIZE), ARAM_SIZE);
++}
++
+ //Dma Start
+ static void Naomi_DmaStart(u32 addr, u32 data)
+ {
+@@ -165,6 +191,11 @@ static void Naomi_DmaStart(u32 addr, u32 data)
+ 	else if ((m3comm == nullptr || !m3comm->DmaStart(addr, data)) && CurrentCartridge != nullptr)
+ 	{
+ 		DEBUG_LOG(NAOMI, "NAOMI-DMA start addr %08X len %x", SB_GDSTAR, SB_GDLEN);
++		cartlog("CARTDMA src=%08x dest=%08x len=%x\n",
++				CurrentCartridge->GetDmaSrcOffset(), SB_GDSTAR & 0x1FFFFFE0, SB_GDLEN);
++		static u32 cartlog_dma_count = 0;
++		if ((cartlog_dma_count++ & 63) == 0)   // ponytail: every 64th DMA; the scan is cheap but not free
++			cartlog_watermarks();
+ 		verify(1 == SB_GDDIR);
+ 		SB_GDST = 1;
+ 		SB_GDSTARD = SB_GDSTAR & 0x1FFFFFE0;
+diff --git a/core/hw/naomi/naomi_cart.cpp b/core/hw/naomi/naomi_cart.cpp
+index 85fda83..dd8d5a4 100644
+--- a/core/hw/naomi/naomi_cart.cpp
++++ b/core/hw/naomi/naomi_cart.cpp
+@@ -20,6 +20,7 @@
+ // copyright-holders:MetalliC
+ 
+ #include <memory>
++#include "cartlog.h"
+ #include "naomi_cart.h"
+ #include "naomi_regs.h"
+ #include "naomi.h"
+@@ -1015,6 +1016,7 @@ void NaomiCartridge::WriteMem(u32 address, u32 data, u32 size)
+ 	case NAOMI_ROM_OFFSETL_addr:
+ 		RomPioOffset &= 0xffff0000;
+ 		RomPioOffset |= data;
++		cartlog("CARTPIO offset=%08x\n", RomPioOffset & 0x1fffffff);
+ 		PioOffsetChanged(RomPioOffset);
+ 		return;
+ 
+diff --git a/core/hw/naomi/naomi_cart.h b/core/hw/naomi/naomi_cart.h
+index 4011837..0d2f910 100644
+--- a/core/hw/naomi/naomi_cart.h
++++ b/core/hw/naomi/naomi_cart.h
+@@ -64,6 +64,8 @@ public:
+ 	virtual bool Write(u32 offset, u32 size, u32 data);
+ 	virtual void* GetPtr(u32 offset, u32& size);
+ 	virtual void* GetDmaPtr(u32 &size) = 0;
++	// Phase 2 instrumentation: current cart byte offset for a DMA read (0 if N/A)
++	virtual u32 GetDmaSrcOffset() const { return 0; }
+ 	virtual void AdvancePtr(u32 size) = 0;
+ 	virtual void Serialize(Serializer& ser) const {}
+ 	virtual void Deserialize(Deserializer& deser) {}
+@@ -87,6 +89,7 @@ public:
+ 	u32 ReadMem(u32 address, u32 size) override;
+ 	void WriteMem(u32 address, u32 data, u32 size) override;
+ 	void* GetDmaPtr(u32 &size) override;
++	u32 GetDmaSrcOffset() const override { return DmaOffset & 0x1fffffff; }
+ 	void AdvancePtr(u32 size) override {
+ 		DmaOffset += size;
+ 	}
+#
+# --- core/deps/Syphon submodule (apply inside core/deps/Syphon/) ---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1cd5694..aa4dc13 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -111,7 +111,10 @@ endif()
+ 
+ target_compile_options(Syphon PRIVATE "-fobjc-arc")
+ 
+-target_precompile_headers(Syphon PUBLIC "Syphon_Prefix.pch")
++# Local build fix (Cleopatra Phase 2, not upstream): PRIVATE so Syphon's ObjC
++# prefix-header PCH does not propagate to the flycast target, whose .mm OBJC++
++# sources clash with a C++-compiled PCH ("Objective-C was disabled in PCH").
++target_precompile_headers(Syphon PRIVATE "Syphon_Prefix.pch")
+ 
+ target_include_directories(Syphon PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>")
+ target_compile_definitions(Syphon PRIVATE SYPHON_CORE_SHARE)
