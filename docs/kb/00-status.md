@@ -36,7 +36,7 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
 - [x] atomiswave-method.md — AW conversion playbook
 - [x] Tools installed: Flycast, Ghidra, entrypoint sanity check
 - [x] Game boots & plays in Flycast (user-confirmed 2026-07-18: attract mode, free-play + coin, test menu)
-- [ ] Exit audit + fresh-agent test
+- [x] Exit audit + fresh-agent test (passed 2026-07-18 — clean-context agent identified project, state, next step from CLAUDE.md + this doc alone)
 
 ## Next step
 
