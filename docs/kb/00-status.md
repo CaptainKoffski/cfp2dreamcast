@@ -1,6 +1,6 @@
 # Project status
 
-**Updated:** 2026-07-17 (Phase 1, Task 5)
+**Updated:** 2026-07-18 (Phase 1, Task 6)
 
 ## What this is
 
@@ -35,7 +35,7 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
 - [x] naomi-vs-dreamcast.md — architecture delta
 - [x] atomiswave-method.md — AW conversion playbook
 - [x] Tools installed: Flycast, Ghidra, entrypoint sanity check
-- [ ] Game boots & plays in Flycast (blocked on user bios/naomi.zip)
+- [x] Game boots & plays in Flycast (user-confirmed 2026-07-18: attract mode, free-play + coin, test menu)
 - [ ] Exit audit + fresh-agent test
 
 ## Next step

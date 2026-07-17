@@ -51,13 +51,30 @@ repo root. Flycast v2.6 (universal binary, arm64 + x86_64). The `.dat`
 extension is accepted directly — no rename to `.bin` needed (fallback
 chain rung 1 not required).
 
+**Boot CONFIRMED — user, interactive test 2026-07-18.** The game reaches
+attract mode and plays. Verified working in both **free-play** and **coin**
+modes. The operator **Test/Service** menu opens and its screens respond.
+No glitches, audio, or frame-rate problems reported.
+
+**Confirmed controls (Flycast keyboard, Naomi player 1):**
+
+| Action | Key | Notes |
+|--------|-----|-------|
+| Start | Enter | |
+| Up / Down / Left / Right | Arrow keys | Mapped as the **digital** direction inputs, NOT the analog thumbstick — Cleopatra Fortune is a digital-input puzzle game |
+| Button 1 | X | Rotate piece counter-clockwise; also confirms/selects in menus |
+| Button 2 | C | Rotate piece clockwise |
+
+Coin insertion and Test/Service were both exercised successfully; their
+specific key bindings were not enumerated (not needed for gameplay). Only
+Start, 4 directions, and 2 buttons are used in play — a small input surface,
+which simplifies the JVS→Maple input mapping in Phase 4.
+
 **Autonomous screenshot:** not obtained. `screencapture -x` returned
 `could not create image from display` — the terminal process lacks macOS
 Screen Recording permission (the user declined the prompt). This is a
-macOS permission wall, not an emulator failure. Flycast launched (PID
-confirmed) and exited cleanly when killed; no crash reports observed. Boot
-confirmation requires the user to launch Flycast interactively and report
-what they see.
+macOS permission wall, not an emulator failure; boot was instead confirmed
+by the user interactively (above).
 
 **Gatekeeper:** the Homebrew-installed `Flycast.app` was quarantined and
 macOS blocked launch ("cannot be opened"). Cleared once with
@@ -69,8 +86,9 @@ Export/Korea title slots in the header are all SAMPLE GAME placeholders).
 Not yet persisted: no `emu.cfg` has been written, so the user sets this on
 first interactive launch.
 
-**Screenshot:** `docs/kb/img/flycast-attract.png` — to be captured by the
-user once interactive acceptance test is run.
+**Screenshot:** none committed — autonomous capture was blocked by the
+Screen Recording permission wall and the interactive test confirmed boot
+without one. Optional future step if screen recording is granted.
 
 ## Open questions
 

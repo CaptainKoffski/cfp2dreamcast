@@ -32,20 +32,18 @@ The environment must be rebuildable from scratch from this file.
 - **Settings to apply on first launch:**
   - System → Region: **Japan** (game is Japan-only)
   - Platform: auto-detected as Naomi
-- **Control mapping (to be set/confirmed by user in GUI — Settings → Controls):**
-  Map keyboard as Naomi player-1 device:
+- **Control mapping (confirmed by user, Flycast v2.6, keyboard as Naomi P1):**
 
-  | Action         | Recommended key |
-  |----------------|----------------|
-  | Up / Down / Left / Right | Arrow keys |
-  | Button 1       | Z |
-  | Button 2       | X |
-  | Start          | Enter |
-  | Coin (Insert)  | 5 |
-  | Test / Service | F2 |
+  | Action | Key |
+  |--------|-----|
+  | Start | Enter |
+  | Up / Down / Left / Right | Arrow keys (digital directions, not thumbstick) |
+  | Button 1 (rotate CCW / select) | X |
+  | Button 2 (rotate CW) | C |
 
-  *These are Flycast v2.6 defaults for Naomi; confirm in the Controls UI
-  and update this table with the actual assigned keys.*
+  Coin insert and Test/Service both work (verified in coin mode and the
+  operator menu); their specific keys were not enumerated. Gameplay uses
+  only Start + 4 directions + 2 buttons.
 
 ### Ghidra — 12.1.2 (20260605)
 
