@@ -16,6 +16,8 @@ def print_entries(hdr, off, label):
     print(f"- **{label} load entries:**")
     for i in range(8):
         rom, ram, n = struct.unpack_from("<III", hdr, off + 12 * i)
+        # ponytail: also stop on an all-zero slot; netboot stops only on
+        # 0xFFFFFFFF (rom.py:497). Safe here — a real entry has n != 0.
         if rom == 0xFFFFFFFF or (rom == 0 and n == 0):
             break
         print(f"  - ROM 0x{rom:08x} -> RAM 0x{ram:08x}, 0x{n:x} bytes")

@@ -18,7 +18,7 @@ exists it is cited by URL. Unresolved items are in §8, never guessed.
 
 | Component | Naomi | Dreamcast | Port impact |
 |---|---|---|---|
-| **CPU** | Hitachi SH-4 (HD6417091) @ 200 MHz | Hitachi SH-4 @ 200 MHz | None. Identical ISA and clock — game code runs unmodified. `naomi.cpp:62`, `naomi.cpp:140`; DC clock: [dreamcast.wiki hardware](https://dreamcast.wiki/Hardware_overview) |
+| **CPU** | Hitachi SH-4 (HD6417091) @ 200 MHz | Hitachi SH-4 @ 200 MHz | None. Identical ISA and clock — game code runs unmodified. `naomi.cpp:62` (chip), `naomi.cpp:1205` (`#define CPU_CLOCK (200000000)`); DC clock: [dreamcast.wiki hardware](https://dreamcast.wiki/Hardware_overview) |
 | **GPU** | PowerVR2 / CLX2 "Holly" @ 100 MHz | PowerVR2 / CLX2 "Holly" @ 100 MHz | None. Same TA/ISP/DAC register block, mapped identically (`0x5f7c00`, `0x5f8000`). `naomi.cpp:63`, `naomi.cpp:1301-1302`; `dccons.cpp:153-154` |
 | **Sound** | Yamaha AICA (315-6232) + ARM7 @ 45 MHz | Yamaha AICA + ARM7 @ 45 MHz | None. Same SPU; AICA reg block at `0x00700000` on both. `naomi.cpp:74`, `naomi.cpp:1304`; `dccons.cpp:156` |
 | **Main RAM** | 32 MB @ `0x0c000000-0x0dffffff` | 16 MB @ `0x0c000000-0x0cffffff` (upper 16 MB are mirrors) | **Half the RAM.** Game may assume 32 MB. Must confirm its working-set fits 16 MB (Phase 2 measures). `naomi.cpp:1319`; `dccons.cpp:170-173` |
