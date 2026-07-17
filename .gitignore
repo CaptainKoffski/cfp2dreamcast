@@ -1,3 +1,6 @@
 *.dat
 tools/
 .DS_Store
+.superpowers/
+bios/
+.venv/
