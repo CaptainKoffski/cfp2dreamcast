@@ -32,9 +32,9 @@ The environment must be rebuildable from scratch from this file.
 - Headless: `"$GHIDRA_HOME/support/analyzeHeadless"` — see
   `scripts/ghidra/DisasmEntry.java` for the working import invocation
   (processor `SuperH4:LE:32:default`, BinaryLoader, base 0x8c020000).
-- Note: Ghidra 12 dropped Jython headless support; `.py` scripts now require PyGhidra
-  (CPython + JPype). `disasm_entry.py` is kept as the Jython-API reference;
-  `DisasmEntry.java` is the working headless script.
+- Note: Ghidra 12 dropped Jython headless support (a `.py` post-script would need
+  PyGhidra / CPython + JPype). `DisasmEntry.java` is the headless script; write any
+  future headless scripts in Java, not Jython.
 - Verified: entrypoint 0x8c04ae2c disassembles to plausible SH-4 (5-instruction
   dispatch trampoline: `mov.l`, `mov #0`, `mov.l`, `jmp @r1`, delay-slot `mov.l`).
   Entry is a boot stub that loads the real start address from a literal pool and jumps.
