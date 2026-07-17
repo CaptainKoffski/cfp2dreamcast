@@ -14,6 +14,31 @@ The environment must be rebuildable from scratch from this file.
   map, EEPROM/MIE/JVS access, header load table) — a primary source for
   `naomi-vs-dreamcast.md`.
 
+### Flycast — 2.6
+
+- Install: `brew install --cask flycast` (deprecated cask, still installs; fallback: https://github.com/flyinghead/flycast/releases)
+- Run: `open -a Flycast` or `/Applications/Flycast.app/Contents/MacOS/Flycast "<rom path>"`
+- Emulates both Naomi and Dreamcast. Open source (github.com/flyinghead/flycast);
+  Phase 2 instruments a source build — this is the release build.
+
+### Ghidra — 12.1.2 (20260605)
+
+- Install: `brew install --cask ghidra` unavailable in Homebrew; direct download used:
+  `curl -L https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip`
+  extracted to `tools/ghidra_12.1.2_PUBLIC/` (gitignored).
+- Java: `brew install openjdk` (formula, no sudo needed) → OpenJDK 26.0.1.
+  `export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"` before running analyzeHeadless.
+- GHIDRA_HOME: `tools/ghidra_12.1.2_PUBLIC`
+- Headless: `"$GHIDRA_HOME/support/analyzeHeadless"` — see
+  `scripts/ghidra/DisasmEntry.java` for the working import invocation
+  (processor `SuperH4:LE:32:default`, BinaryLoader, base 0x8c020000).
+- Note: Ghidra 12 dropped Jython headless support; `.py` scripts now require PyGhidra
+  (CPython + JPype). `disasm_entry.py` is kept as the Jython-API reference;
+  `DisasmEntry.java` is the working headless script.
+- Verified: entrypoint 0x8c04ae2c disassembles to plausible SH-4 (5-instruction
+  dispatch trampoline: `mov.l`, `mov #0`, `mov.l`, `jmp @r1`, delay-slot `mov.l`).
+  Entry is a boot stub that loads the real start address from a literal pool and jumps.
+
 ### MAME source (reference only — never built, never run)
 
 - Install: `git clone --depth 1 --filter=blob:none --sparse https://github.com/mamedev/mame.git tools/mame`
