@@ -29,7 +29,7 @@ The environment must be rebuildable from scratch from this file.
   Source: `bios/naomi.zip` in the repo. Copy with:
   `cp bios/naomi.zip ~/Library/Application\ Support/Flycast/data/`
 - **ROM format:** `.dat` is accepted directly (no rename to `.bin` needed).
-- **Settings to apply on first launch:**
+- **Settings to apply on first launch** (recommended; not yet confirmed persisted):
   - System → Region: **Japan** (game is Japan-only)
   - Platform: auto-detected as Naomi
 - **Control mapping (confirmed by user, Flycast v2.6, keyboard as Naomi P1):**

@@ -54,7 +54,9 @@ chain rung 1 not required).
 **Boot CONFIRMED — user, interactive test 2026-07-18.** The game reaches
 attract mode and plays. Verified working in both **free-play** and **coin**
 modes. The operator **Test/Service** menu opens and its screens respond.
-No glitches, audio, or frame-rate problems reported.
+No problems reported during the interactive test. (Audio and frame rate
+were not specifically evaluated — a full-speed/audio pass is a Phase 2/5
+measurement task, not part of this boot check.)
 
 **Confirmed controls (Flycast keyboard, Naomi player 1):**
 
