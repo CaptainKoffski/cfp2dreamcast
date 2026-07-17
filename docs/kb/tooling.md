@@ -17,9 +17,34 @@ The environment must be rebuildable from scratch from this file.
 ### Flycast — 2.6
 
 - Install: `brew install --cask flycast` (deprecated cask, still installs; fallback: https://github.com/flyinghead/flycast/releases)
-- Run: `open -a Flycast` or `/Applications/Flycast.app/Contents/MacOS/Flycast "<rom path>"`
+- **Gatekeeper:** after install, macOS may block launch ("Flycast cannot be opened").
+  Clear the quarantine once: `xattr -dr com.apple.quarantine /Applications/Flycast.app`
+  (app is validly signed as `com.flyinghead.Flycast`).
+- Run: `/Applications/Flycast.app/Contents/MacOS/Flycast "<rom path>"`
+  (from repo root: `/Applications/Flycast.app/Contents/MacOS/Flycast "Cleopatra Fortune Plus.dat"`)
 - Emulates both Naomi and Dreamcast. Open source (github.com/flyinghead/flycast);
   Phase 2 instruments a source build — this is the release build.
+- **BIOS path (working):** `~/Library/Application Support/Flycast/data/naomi.zip`
+  Source: `bios/naomi.zip` in the repo. Copy with:
+  `cp bios/naomi.zip ~/Library/Application\ Support/Flycast/data/`
+- **ROM format:** `.dat` is accepted directly (no rename to `.bin` needed).
+- **Settings to apply on first launch:**
+  - System → Region: **Japan** (game is Japan-only)
+  - Platform: auto-detected as Naomi
+- **Control mapping (to be set/confirmed by user in GUI — Settings → Controls):**
+  Map keyboard as Naomi player-1 device:
+
+  | Action         | Recommended key |
+  |----------------|----------------|
+  | Up / Down / Left / Right | Arrow keys |
+  | Button 1       | Z |
+  | Button 2       | X |
+  | Start          | Enter |
+  | Coin (Insert)  | 5 |
+  | Test / Service | F2 |
+
+  *These are Flycast v2.6 defaults for Naomi; confirm in the Controls UI
+  and update this table with the actual assigned keys.*
 
 ### Ghidra — 12.1.2 (20260605)
 

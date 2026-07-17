@@ -34,7 +34,41 @@ streaming / RAM preload on Dreamcast.
 
 ## Runtime observations
 
-Filled in when the game first boots (Phase 1, boot verification task).
+**BIOS:** `bios/naomi.zip` (8.1 MB MAME-format Naomi BIOS set) — installed
+to `~/Library/Application Support/Flycast/data/naomi.zip`.
+
+**BIOS contents verified:** standard MAME Naomi set including
+`epr-21576d.ic27`, `epr-21578g.ic27`, `sp5001-b.bin`, and all expected
+variant ROMs.
+
+**Launch command (working — opens Flycast with ROM):**
+```
+/Applications/Flycast.app/Contents/MacOS/Flycast "Cleopatra Fortune Plus.dat"
+```
+Run from the repo root. Flycast v2.6 (universal binary, arm64 + x86_64)
+launches successfully. The `.dat` extension is accepted directly — no
+rename to `.bin` was needed (fallback chain rung 1 not required).
+
+**Autonomous screenshot:** not obtained. `screencapture -x` returned
+`could not create image from display` — the terminal process lacks macOS
+Screen Recording permission (the user declined the prompt). This is a
+macOS permission wall, not an emulator failure. Flycast launched (PID
+confirmed) and exited cleanly when killed; no crash reports observed. Boot
+confirmation requires the user to launch Flycast interactively and report
+what they see.
+
+**Gatekeeper:** the Homebrew-installed `Flycast.app` was quarantined and
+macOS blocked launch ("cannot be opened"). Cleared once with
+`xattr -dr com.apple.quarantine /Applications/Flycast.app` (the app is
+validly signed as `com.flyinghead.Flycast`). Required before it will run.
+
+**Region:** must be set to Japan in Flycast (game is Japan-only — USA/
+Export/Korea title slots in the header are all SAMPLE GAME placeholders).
+Not yet persisted: no `emu.cfg` has been written, so the user sets this on
+first interactive launch.
+
+**Screenshot:** `docs/kb/img/flycast-attract.png` — to be captured by the
+user once interactive acceptance test is run.
 
 ## Open questions
 
