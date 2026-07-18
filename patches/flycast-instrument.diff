@@ -1,8 +1,3 @@
-# Cleopatra Phase 2 - Instrumented Flycast patch
-# Apply from tools/flycast-src/ with: git apply patches/flycast-instrument.diff
-# (Syphon submodule hunk applies inside core/deps/Syphon/ - see marker below.)
-#
-# --- Flycast top-level tree ---
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 19bdfee..37cb109 100644
 --- a/CMakeLists.txt
@@ -213,21 +208,3 @@ index 4011837..0d2f910 100644
  	void AdvancePtr(u32 size) override {
  		DmaOffset += size;
  	}
-#
-# --- core/deps/Syphon submodule (apply inside core/deps/Syphon/) ---
-diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 1cd5694..aa4dc13 100644
---- a/CMakeLists.txt
-+++ b/CMakeLists.txt
-@@ -111,7 +111,10 @@ endif()
- 
- target_compile_options(Syphon PRIVATE "-fobjc-arc")
- 
--target_precompile_headers(Syphon PUBLIC "Syphon_Prefix.pch")
-+# Local build fix (Cleopatra Phase 2, not upstream): PRIVATE so Syphon's ObjC
-+# prefix-header PCH does not propagate to the flycast target, whose .mm OBJC++
-+# sources clash with a C++-compiled PCH ("Objective-C was disabled in PCH").
-+target_precompile_headers(Syphon PRIVATE "Syphon_Prefix.pch")
- 
- target_include_directories(Syphon PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>")
- target_compile_definitions(Syphon PRIVATE SYPHON_CORE_SHARE)
