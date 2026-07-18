@@ -1,11 +1,14 @@
 # Phase 2 measurements — RAM footprint and serial/watchdog
 
 Measured from the instrumented Flycast (`patches/flycast-instrument.diff`) over
-the attract + extended-demo capture (`capture-attract.log`,
-`capture-demo-extended.log`). **Coverage caveat:** this is attract + demo, not
-a full hands-on playthrough — peak usage may rise with real gameplay (a play
-pass is the pending top-up; see `00-status.md`). Numbers here are a first,
-conservative read.
+three merged passes: attract (`capture-attract.log`), extended demo
+(`capture-demo-extended.log`), and a **hands-on play pass reaching a game-over**
+(`capture-play.log`). **Coverage note:** the play pass barely moved the numbers
+— it added 5 new DMA requests and did **not** raise any region's peak (main-RAM
+high-water, VRAM, and ARAM scans are all unchanged from attract+demo). That the
+peaks held across real gameplay including a game-over strengthens these figures
+from "first conservative read" toward "representative." The one residual gap is
+the un-streamed top ~12 MB of the cart (see `cart-streaming-map.md`).
 
 ## RAM footprint vs Dreamcast capacity
 
@@ -26,8 +29,8 @@ possible high-address stack must be pinned down (Phase 3) before declaring main
 RAM safe. VRAM looks ~1 MB over 8 MB → plan for texture reduction. Sound RAM is
 unmeasured by this method → needs a targeted measurement. This refines
 `naomi-vs-dreamcast.md §1` (turns the RAM-size deltas from assumption toward
-measurement) but does not yet close it — the play-pass top-up and the sound/VRAM
-confirmations remain.
+measurement). The play-pass top-up is now done (peaks held), so what remains to
+fully close §1 is the Phase 3 stack question and the sound/VRAM confirmations.
 
 ## Serial / watchdog (resolves §8-4)
 

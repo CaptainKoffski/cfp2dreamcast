@@ -91,8 +91,10 @@ def write_summary(result):
                      f"..0x{max(d['src'] + d['len'] for d in result['dma']):08x}")
         main_hi = max((d["dest"] + d["len"] for d in result["dma"]
                        if MAIN_RAM_LO <= d["dest"] < MAIN_RAM_HI), default=0)
+        # report bytes used above the RAM base, not the absolute address / 1 MB
+        main_used = main_hi - MAIN_RAM_LO if main_hi else 0
         lines.append(f"main-RAM DMA high-water (dest+len): 0x{main_hi:08x} "
-                     f"({main_hi / 1048576:.1f} MB) vs DC 16 MB")
+                     f"({main_used / 1048576:.1f} MB above base) vs DC 16 MB")
     for region in ("main", "vram", "aram"):
         if region in result["watermarks"]:
             lines.append(f"WATERMARK {region}: 0x{result['watermarks'][region]:08x} "

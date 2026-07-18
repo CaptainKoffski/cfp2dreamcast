@@ -39,6 +39,13 @@ fi
 
 echo "Pass: $PASS  Log: $LOG"
 
+# ponytail: a killed/crashed run makes macOS show a modal "reopen windows?" on the
+# NEXT launch, which blocks boot forever (process alive, guest never runs — 0 cartlog
+# lines). This was the mysterious "post-sleep launch fails" blocker. Suppress it so
+# captures are launch-safe regardless of how the prior run ended.
+defaults write com.flyinghead.Flycast ApplePersistenceIgnoreState -bool YES 2>/dev/null || true
+defaults write com.flyinghead.Flycast NSQuitAlwaysKeepsWindows -bool false 2>/dev/null || true
+
 # ponytail: transient vsync=no prevents emu-thread deadlock on unfocused window (Task 1 finding).
 # -config is a built-in Flycast flag; value is not written to emu.cfg.
 FLYCAST_CARTLOG="$LOG" "$BIN" -config config:rend.vsync=no "$ROM" &

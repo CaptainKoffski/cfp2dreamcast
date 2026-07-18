@@ -9,20 +9,27 @@ the ROM_DATA port (length not tracked).
 
 ## Coverage (iterative — see `00-status.md`)
 
-- **Captured so far:** the attract-mode loop (`capture-attract.log`) plus an
-  extended unattended demo-mode run (`capture-demo-extended.log`, ~overnight).
-  Demo mode replays gameplay, so it exercises real gameplay asset streaming.
-- **Pending top-up:** a hands-on play pass reaching a **game-over** and any
-  late stages the demo doesn't show. Deferred because the emulator hit
-  post-sleep memory instability (a reboot fixes it — see
-  `.superpowers/sdd/progress.md`). The capture is cumulative: replay with
-  logging on and re-run the parser; the CSV dedups on merge.
+- **Captured:** three passes, merged (the parser dedups on merge):
+  1. attract-mode loop (`capture-attract.log`),
+  2. an extended unattended demo-mode run (`capture-demo-extended.log`, ~overnight),
+  3. a **hands-on play pass reaching a game-over** (`capture-play.log`,
+     user-driven — real gameplay across multiple stages).
+- **Play pass added only 5 new unique DMA requests** over attract+demo (383 →
+  388) — i.e. demo mode already exercised nearly all of gameplay's asset
+  streaming; real play mostly re-reads the same assets. The 5 new reads land at
+  cart `0x044e2000`..`0x04b84000` (~68–75 MB), staged to the same buffer
+  (`0x0ca378e0`) — stage assets the demo doesn't show.
+- **Known remaining gap:** the **top ~12 MB of the cart**
+  (`0x0609c000`..`0x06d00000`, ~96.6→109 MB) was never streamed by any pass —
+  could be padding, unreferenced data, or content past where play reached. Top
+  up the same way (replay with logging on; the CSV dedups on merge) if Phase 4
+  needs it.
 - **Boot load** (from the header, not the runtime log): cart `0x0` → RAM
   `0x8c020000`, `0x100000` bytes (`docs/kb/game.md`).
 
 ## What we have
 
-- **383 unique DMA requests.**
+- **388 unique DMA requests.**
 - **Cart offset range touched:** `0x00800000`..`0x0609c000` — i.e. runtime
   streaming spans ~8 MB to ~96 MB into the 109 MB cart. Notably the lowest
   runtime DMA source is `0x800000` (8 MB); nothing between the 1 MB boot image
@@ -36,14 +43,14 @@ the ROM_DATA port (length not tracked).
     streaming, not just boot).
 
 Parser summary (`scripts/parse_cart_log.py capture-attract.log
-capture-demo-extended.log`):
+capture-demo-extended.log capture-play.log`):
 
 ```
-DMA requests (unique): 383
+DMA requests (unique): 388
 PIO seeks (unique): 1
 cart offset range: 0x00800000..0x0609c000
-main-RAM DMA high-water (dest+len): 0x0cb378e0  ( = 0xb378e0 above RAM base = 11.2 MB )
-WATERMARK main: 0x01fff60b (near top of Naomi 32 MB — see phase2-measurements.md)
+main-RAM DMA high-water (dest+len): 0x0cb378e0 (11.2 MB above base) vs DC 16 MB
+WATERMARK main: 0x01fff60b (32.0 MB — see phase2-measurements.md)
 WATERMARK vram: 0x0093e738 (9.2 MB)
 WATERMARK aram: 0x00800000 (8.0 MB — scan artifact, see phase2-measurements.md)
 serial/network pokes: 0
@@ -51,11 +58,6 @@ CHECK dest_in_ram: PASS
 CHECK len_aligned_32: PASS
 CHECK beyond_boot_read: PASS
 ```
-
-> Note: the parser's "main-RAM DMA high-water … 203.2 MB" printed line divides
-> the absolute address by 1 MB; the meaningful figure is the offset above the
-> RAM base (`0x0cb378e0 - 0x0c000000 = 11.2 MB`). Tracked as a Minor parser
-> summary fix for the final review.
 
 This resolves `naomi-vs-dreamcast.md §8-1` (the cart-streaming request pattern)
 for the captured coverage; RAM/serial findings are in
