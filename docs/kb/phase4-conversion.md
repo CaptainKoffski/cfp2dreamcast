@@ -255,8 +255,8 @@ resp 0x87 = MDRS_JVSReply):
 |---|---|---|
 | 0x01 | `87002001 02000000 …` | 1-word ack, payload `02 00 00 00` (EEPROM ready/status) |
 | 0x03 | `87002020 50cb1042 45532009 101a0101` | 32-word EEPROM read: two identical 16-byte halves (`50cb…1111` ×2) — the classic Naomi dual-copy EEPROM image |
-| 0x15 | `87002009 16ffffff 00ffffff 00000000` | 9-word input poll: status `0x16`, button words `ffffff` (active-low idle) |
-| 0x33 | `87002005 32ffffff 00ffffff 00000000` | 5-word input poll (the steady-state per-frame variant) |
+| 0x15 | `87002009 16ffffff 00ffffff 00000000` | 9-word **boot JVS-handshake reply** (F1 set-address ack; JVS body `e0 00 04 01 01 05 0b`; the `ff` bytes are maple sub-header placeholders and **byte 0x20 = 0x0b is the JVS checksum, not a button word** — see §input-ABI) |
+| 0x33 | `87002005 32ffffff 00ffffff 00000000` | cold/empty receive (subresp `0x32` = no JVS data yet; the steady-state has-data 0x33 frame is `0x0f` words — see §input-ABI) |
 
 Counts: sub 0x15 ×376 (all in the first boot phase), sub 0x33 ×34,991 (the
 per-frame steady-state poll — **the input shim must serve sub 0x33, not just
@@ -333,13 +333,14 @@ Reply templates are `build/mie_subXX.bin` (V4). Full evidence chain:
 | Subcommand src | descriptor word3 low byte = `[cmdblk+0xc]`, cmdblk=`*0x8c0e6400` | descriptor word3 (input slot's frame) |
 | Reply-addr src | descriptor word1 = `[cmdblk+0x4]` (= `0x0c296220`) | word1 = `FUN_8c030fba([base+0x10a8+idx*4])` → `[desc+0x04]` @`0x8c03c3d6` (double buf `0x0c0fd8e0`/`0x0c1038e0`) |
 | Completion | maple DMA-done (SB_MDST reads 0); reply at recvaddr | `[desc+0x18]` bit0 pending flag; next call returns -1 while set |
-| BTN_OFF | **0x20** (16-bit big-endian JVS word) | **0x20** (same) |
+| BTN_OFF | **0x20/0x21** P1 word big-endian (P2 @0x22/0x23; JVS checksum @0x3a recomputed) | same |
 | EE_OFF | **4** (128-B EEPROM after 1-word header) | n/a |
 
 Both routines build the **same 8-word Maple transfer descriptor** (word0
 control, word1 recv-addr, word2 frame-header `cmd 0x86`/`dev 0x20`, word3
-subcommand, word4-7 payload). One shared reply-synthesis body serves both; only
-the entry hook differs.
+subcommand, word4-7 payload). One shared reply-synthesis body serves both;
+the per-site differences are the entry hook **and the completion action**
+(see contract box).
 
 ### Crown jewel — 0x33 vs 0x15 vs 0x27
 
@@ -430,21 +431,67 @@ word4+ payload[1..]      JVS command bytes (transmit subs)
 
 ### Reply offsets + per-sub actions
 
-**BTN_OFF = 0x20** (16-bit **big-endian** JVS word). Has-data input reply
-(`receive_jvs_messages` has-data branch, maple_jvs.cpp `:1712-1743`, wrapping
-`jvs_io_board::handle_jvs_message` `:2084-2086` digital-input `:2225-2244`),
-header cross-checked vs `build/mie_sub15.bin`:
-`87 00 20 NN | 16 | ff ff ff | 00 ff ff ff | 00×8 | 00 ch 8e | 01 00 olen |
-E0 00 len 01 01 TEST BTN_HI BTN_LO sum`. The JVS `E0` sync sits at 0x1a ⇒
-`BTN_HI@0x20, BTN_LO@0x21` (`JVS_OUT(inputs>>8)` then `JVS_OUT(inputs)`
-`:2237,2241`). Active-high, idle `0x0000` (`input-map.md`). This game's 7
-controls are all in bits 8-15 ⇒ **all in the single high byte at 0x20**
-(0x21 = 0 for P1). Same for 0x15 and 0x33.
-*Caveat:* the game's exact parser load of `recvaddr+0x20` was not pinned (generic
-24-slot maple engine `FUN_8c03c1c2`); BTN_OFF=0x20 is derived from the byte
-stream the game already parses correctly in Flycast and is airtight for a
-**format-compatible** shim. One-line M4 check: press a control, watch which
-`recvaddr` byte flips → expect 0x20.
+**BTN_OFF = 0x20** (P1 button-word hi byte; the word is big-endian at
+0x20/0x21, P2 at 0x22/0x23; **JVS checksum at 0x3a — must be recomputed
+whenever a button byte changes**).
+
+*Authoritative frame — the steady-state has-data reply itself.*
+`capture-attract.log` carries **34,990 byte-identical** sub-0x33 has-data
+replies (all inputs idle); decoded byte-for-byte against the Flycast emitter
+that produced them (`tools/flycast-src/core/hw/maple/maple_jvs.cpp`):
+
+| off | bytes (observed) | meaning | emitter |
+|---|---|---|---|
+| 0x00 | `87 00 20 0f` | maple header, 0x0f words | `reply()` `:1716` |
+| 0x04 | `16` | subresp 0x16 = has JVS data | `:1717` |
+| 0x05 | `ff ff ff` | placeholder | `:1719-1721` |
+| 0x08 | `00 ff ff ff` | `w32(0xffffff00)` | `:1722` |
+| 0x0c | `00 ×8` | `w32(0) ×2` | `:1723-1724` |
+| 0x14 | `00 00 8e` | 0, channel, sense line | `:1732-1737` |
+| 0x17 | `01 00 21` | node 1, status ok, out_len 0x21 | `:1663-1665` |
+| 0x1a | `e0 00 1e` | JVS sync, master node, len 0x1e | `:2084-2086`, len fill `:2474` |
+| 0x1d | `01` | overall status | `:2220` |
+| 0x1e | `01` | report — cmd 0x20 digital read | `:2227` |
+| 0x1f | `00` | TEST byte | `:2232` |
+| **0x20** | `00 00` | **P1 buttons hi, lo** (`inputs[0]>>8`, `inputs[0]`) | `:2237`, `:2241` |
+| 0x22 | `00 00` | P2 buttons hi, lo | same loop, player 2 |
+| 0x24 | `01` + `00 ×4` | report + 2 coin slots (cmd 0x21) | `:2248-2267` |
+| 0x29 | `01` + `80 00 ×8` | report + 8 analog ch, idle 0x8000 (cmd 0x22) | `:2273`, `:2370-2371` |
+| 0x3a | `22` | **JVS checksum** | `:2476-2480` |
+
+Checksum formula (`:2476-2478`, `calc_crc` sums `buffer_out[1..]`, i.e.
+everything after the `E0` sync): `[0x3a] = (Σ bytes [0x1b..0x39]) & 0xff`.
+Verified on the observed frame: constant bytes sum to `0x22` = the logged
+checksum. The three report blocks also decode the game's boot-stored JVS
+repeat request (sub 0x13, stored len 7): `20 02 02 | 21 02 | 22 08` —
+digital 2 players × 2 bytes, coins 2 slots, analog 8 channels.
+
+⇒ **BTN_OFF = 0x20/0x21, P1 word big-endian** (`JVS_OUT(inputs[player]>>8)`
+then `JVS_OUT(inputs[player])`, `:2237`/`:2241`); P2 = 0x22/0x23. Active-high,
+idle `0x0000` (`input-map.md`); this game's 7 controls are all bits 8-15 ⇒
+presses land in byte 0x20 (P1) / 0x22 (P2). Same frame for steady 0x15 and
+0x33 replies (361 identical 0x15 frames in the same capture).
+
+**Template-file corrections (supersedes earlier annotations).**
+`build/mie_sub15.bin` is a **boot JVS-handshake reply, not a digital read**:
+its JVS body `e0 00 04 01 01 05 0b` is the F1 set-address ack (`JVS_OUT(5)`
+`:2093`) and **its byte 0x20 = 0x0b is the JVS checksum**
+(`(0x00+0x04+0x01+0x01+0x05)&0xff`), not a button word. Other boot 0x15
+replies in the capture carry the board-ID string
+`SEGA ENTERPRISES,LTD.;I/O BD JVS;` (cmd 0x10, `:2097-2102`).
+`build/mie_sub33.bin` is the cold/empty variant (subresp 0x32, no completed
+scan yet, `:1711-1713`) — its `00` at 0x20 is padding, not an idle button
+word. **Neither file is a valid button-read template**; the shim's 0x15/0x33
+template is the 34,990× frame above.
+
+*Caveats:* (a) the game's parser load of `recvaddr+0x20` was not pinned to an
+instruction (generic 24-slot maple engine `FUN_8c03c1c2`); BTN_OFF is
+source-derived from the emitter whose byte stream the game demonstrably
+parses correctly. (b) No capture contains a pressed button inside a MIERESP
+frame (the attract capture is 100% idle; the Phase-2 press captures predate
+MIERESP logging), so the bit placement at 0x20 rests on `input-map.md` +
+`:2237`, not an observed pressed frame. **M4 gate: press a control and
+confirm byte recvaddr+0x20 flips.**
 
 **EE_OFF = 4.** `0x03` reply = 1-word header + 128-B EEPROM (`:1925-1929`);
 `build/mie_sub03.bin` header `87 00 20 20` (0x20 words) then EEPROM at 0x04-0x83;
@@ -456,7 +503,7 @@ free-play + correct serial → shim may **replay `mie_sub03.bin` verbatim**
 
 | sub | meaning (maple_jvs.cpp) | shim action |
 |---|---|---|
-| 0x15, 0x33 | Receive (+kick) JVS input | **real GetCondition translate** → JVS word big-endian @0x20 in a subresp-0x16 reply |
+| 0x15, 0x33 | Receive (+kick) JVS input | **real GetCondition translate** → has-data template, P1 word big-endian @0x20/0x21, checksum recomputed @0x3a |
 | 0x03 | EEPROM read 128 B (`:1920`) | **baked free-play EEPROM** @+4 (or replay `mie_sub03.bin`) |
 | 0x01 | status / schedule EEPROM read | replay `mie_sub01.bin` (ready ACK) |
 | 0x27 | kick scan (`:1854`) | verbatim ACK `8700 2001 26 00 8e00` |
@@ -479,19 +526,31 @@ Entry: two hooks — 0x8c0315ce (boot) and 0x8c03c2c6 (steady) — OR one hook o
 Dispatch on sub:
   0x15,0x33 -> real DC GetCondition (per frame); translate DC pad -> JVS bits
                (Start 0x8000, Up 0x2000, Down 0x1000, Left 0x0800, Right 0x0400,
-                B1 0x0200, B2 0x0100); write has-data reply at recvaddr:
-                [0x00]=87 00 20 09, [0x04]=16, JVS word big-endian @[0x20..0x21],
-                zero-fill the rest.
+                B1 0x0200, B2 0x0100). Copy the baked 0x3b-byte has-data
+               template (the 34,990x frame in the BTN_OFF table; maple header
+               87 00 20 0f) to recvaddr, then:
+                 [0x20..0x21] = P1 JVS word big-endian ([0x22..0x23] = P2);
+                 [0x3a] = (sum of bytes [0x1b..0x39]) & 0xff   (JVS checksum;
+                          for this template all variable bytes are 0, so
+                          = (0x22 + [0x1f] + [0x20]+[0x21]+[0x22]+[0x23]) & 0xff).
+               Do NOT zero-fill inside the frame — bytes 0x04..0x3a are
+               structural (maple sub-header, E0 sync @0x1a, len @0x1c,
+               status/report bytes, coin/analog blocks); only 0x3b.. is padding.
   0x03      -> baked 128-B free-play EEPROM @recvaddr+4 (or replay mie_sub03.bin).
   0x01      -> replay mie_sub01.bin (status/ready ACK).
   0x13,0x17,0x21,0x27,0x31,0xff -> replay mie_subXX.bin verbatim.
-Completion state on return:
-  - reply bytes present at recvaddr (= descriptor word1).
+Completion state on return (DIFFERS per site):
+  - both:   reply bytes present at recvaddr (= descriptor word1).
   - steady: clear [desc+0x18] bit0 ,  desc = [ *0x8c0e8410 + 0x10f4 ].
-  - boot:   leave maple DMA-done true (SB_MDST reads 0); reply at [ *0x8c0e6400 + 0x4 ].
-ONE shim body serves BOTH sites (identical descriptor + reply format); the two
-entry hooks are the only per-site difference. 0x33 is per-frame, so do a real
-GetCondition on every 0x33 — no caching.
+  - boot:   leave maple DMA-done observable (SB_MDST reads 0); reply at
+            [ *0x8c0e6400 + 0x4 ].  NOTE: the boot-side completion poll is
+            inferred from the shared maple driver's SB_MDST semantics
+            (naomi.md:138), NOT pinned to a caller instruction — verify in M4.
+ONE shim body serves BOTH sites (same descriptor + reply format); per-site
+differences = the entry hook AND the completion action above. 0x33 is
+per-frame, so do a real GetCondition on every 0x33 — no caching.
+M4 gate: BTN_OFF is source-derived (maple_jvs.cpp:2237) — confirm live by
+pressing a control and watching recvaddr+0x20 flip.
 ```
 
 ### Reproduction
@@ -502,4 +561,6 @@ scripts/ghidra/run.sh script DisasmRange.java 0x8c0315ce 0x8c03161c   # boot bui
 scripts/ghidra/run.sh script DisasmRange.java 0x8c03c2c6 0x8c03c4a1   # steady builder
 scripts/ghidra/run.sh script DisasmRange.java 0x8c02ecf0 0x8c02ed2c   # steady call site
 xxd build/mie_sub15.bin ; xxd build/mie_sub33.bin ; xxd build/mie_sub03.bin
+# the authoritative has-data frame (34,990 identical occurrences):
+grep '^MIERESP sub=33' capture-attract.log | sed 's/.*data=//' | sort | uniq -c
 ```
