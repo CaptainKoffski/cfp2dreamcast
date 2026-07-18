@@ -133,6 +133,68 @@ input, and serial pokes. Distinct from the release Flycast above.
   `ScanBiosTargets.java`, `DumpEntryChain.java`, `WhichFunc.java`.
   `tools/boot.bin` = first 1 MB of `Cleopatra Fortune Plus.dat` (gitignored).
 
+### KallistiOS (KOS) + sh-elf toolchain
+
+Dreamcast SDK for Phase 4 (loader, shims). Provides `kos-cc` and the KOS
+environment every Phase 4 build task sources.
+
+- **Clone:** `git clone --recursive https://github.com/KallistiOS/KallistiOS.git tools/kos`
+  (gitignored). Cloned commit: `705c862957b2f6091a6ce4784943744daecc3e2b`.
+  Note: this revision has no submodules (`--recursive` is a harmless no-op).
+- **Prefix (requires sudo, one-time):**
+  ```sh
+  sudo mkdir -p /opt/toolchains/dc && sudo chown "$(whoami)" /opt/toolchains/dc
+  ```
+  Everything after this is sudo-free. Do NOT relocate — KOS defaults and all
+  Phase 4 tasks assume `/opt/toolchains/dc`.
+- **Homebrew prereqs:**
+  `brew install gmp mpfr libmpc gettext texinfo wget libelf jpeg-turbo libpng`
+  (versions used: gmp 6.3.0, mpfr 4.2.2, libmpc 1.4.1, gettext 1.0,
+  texinfo 7.3, wget 1.25.0, libelf 0.8.13_1, jpeg-turbo 3.2.0, libpng 1.6.58).
+  jpeg-turbo/libpng are needed by the KOS `dcbumpgen` util, not the toolchain.
+- **Toolchain build — the builder is `utils/kos-chain`, NOT `utils/dc-chain`**
+  (upstream renamed/reworked dc-chain; config is now `Makefile.cfg` copied from
+  a per-platform sample, not `config/config.mk.stable.sample`):
+  ```sh
+  cd tools/kos/utils/kos-chain
+  cp Makefile.dreamcast.cfg Makefile.cfg   # stable profile, prefix /opt/toolchains/dc/sh-elf
+  make                                     # LONG (~20 min on M1); resumable — re-run same cmd on timeout
+  ```
+  Built: binutils 2.45.1, GCC 15.2.0 (2-pass, c/c++/objc), newlib 4.6.0.20260123.
+  - **Flake hit:** pass-1 GCC died once with
+    `fatal error: libgcc_tm.h: No such file or directory` — a parallel-make
+    race on a generated header. Recovery: just re-run the same `make`; it
+    resumed and completed. If it recurs, set `makejobs=1` in `Makefile.cfg`.
+  - **Harmless noise** in the log: `clang++: error: unsupported option
+    '-print-multi-os-directory'` — GCC configure probing the host compiler.
+- **arm-eabi (AICA) toolchain: deliberately NOT built.** Optional in this KOS
+  revision — `kernel/arch/dreamcast/sound/arm/Makefile` falls back to the
+  shipped `stream.drv.prebuilt` when `DC_ARM_CC` is absent (confirmed used in
+  our build log). Build it only if a custom AICA driver is ever needed
+  (`cp Makefile.aica.cfg Makefile.cfg && make` in kos-chain).
+- **KOS environment + library build:**
+  ```sh
+  cd tools/kos
+  cp doc/environ.sh.sample environ.sh
+  # edit environ.sh: KOS_BASE="/Users/captainkoffski/AntigravityProjects/cleopatra/tools/kos"
+  # (absolute path; all other settings left at defaults — KOS_SUBARCH stays
+  #  commented = "pristine" Dreamcast; the loader targets a stock DC)
+  source environ.sh
+  export CPATH=/opt/homebrew/include LIBRARY_PATH=/opt/homebrew/lib  # see below
+  make
+  ```
+  - **macOS/arm64 deviation:** without CPATH/LIBRARY_PATH the build dies at
+    `utils/dcbumpgen` with `jpeglib.h: file not found` — its Makefile
+    hardcodes `-I/usr/local/include` (Intel-mac Homebrew path; arm64 brew is
+    `/opt/homebrew`). The two exports fix it; no file edits needed.
+  - Output: `tools/kos/lib/dreamcast/libkallisti.a` (5.8 MB).
+- **Verify:**
+  - `/opt/toolchains/dc/sh-elf/bin/sh-elf-gcc --version` → `sh-elf-gcc (GCC) 15.2.0`
+  - hello example: `source environ.sh && cd examples/dreamcast/hello && make`
+    → `hello.elf` (ELF 32-bit LSB, Renesas SH, statically linked).
+- **Every later build shell must `source tools/kos/environ.sh` first** (gives
+  `kos-cc`, `KOS_BASE`, flags).
+
 ### MAME source (reference only — never built, never run)
 
 - Install: `git clone --depth 1 --filter=blob:none --sparse https://github.com/mamedev/mame.git tools/mame`

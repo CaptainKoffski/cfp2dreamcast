@@ -6,3 +6,5 @@ bios/
 .venv/
 /capture-*.log
 __pycache__/
+build/
+shims/data/
