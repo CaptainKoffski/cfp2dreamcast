@@ -28,9 +28,10 @@ case "${1:-}" in
       -loader BinaryLoader -loader-baseAddr 0x8c020000
     ;;
   script)
-    [ -n "${2:-}" ] || { echo "usage: $0 script NAME.java" >&2; exit 1; }
+    [ -n "${2:-}" ] || { echo "usage: $0 script NAME.java [args...]" >&2; exit 1; }
+    SCRIPT="$2"; shift 2
     "$HL" "$PROJ" "$NAME" -process boot.bin -noanalysis \
-      -scriptPath "$REPO/scripts/ghidra" -postScript "$2"
+      -scriptPath "$REPO/scripts/ghidra" -postScript "$SCRIPT" "$@"
     ;;
   *) echo "usage: $0 import | script NAME.java" >&2; exit 1 ;;
 esac
