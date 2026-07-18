@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Parse Phase 2/3 cartlog files into the cart-streaming map + RAM/serial verdicts.
+"""Parse Phase 2/3/4 cartlog files into the cart-streaming map + RAM/serial verdicts.
 
-Line formats (from the instrumented Flycast, see the Phase 2/3 plan):
+Line formats (from the instrumented Flycast, see the Phase 2/3/4 plans):
   CARTDMA src=%08x dest=%08x len=%x
   CARTDMAPC pc=%08x sp=%08x
   CARTPIO offset=%08x
@@ -10,7 +10,10 @@ Line formats (from the instrumented Flycast, see the Phase 2/3 plan):
   WATERMARK region=%s used=%x size=%x
   JVSREPORT buttons=%04x         (read by hand for the input map; ignored here)
   SERIALPOKE addr=%08x data=%08x
+  SHIMWATCH addr=%08x                       (Phase 4: write seen in planned shim home)
+  MIERESP sub=%02x addr=%08x data=<hex>      (Phase 4: MIE reply bytes + recv addr)
 """
+import os
 import re
 import sys
 
@@ -24,6 +27,8 @@ _BIOS  = re.compile(r"^BIOSEXEC pc=([0-9a-fA-F]+)")
 _PIO  = re.compile(r"^CARTPIO offset=([0-9a-fA-F]+)")
 _WM   = re.compile(r"^WATERMARK region=(\w+) used=([0-9a-fA-F]+) size=([0-9a-fA-F]+)")
 _SER  = re.compile(r"^SERIALPOKE addr=([0-9a-fA-F]+) data=([0-9a-fA-F]+)")
+_SHIM = re.compile(r"^SHIMWATCH addr=([0-9a-fA-F]+)")
+_MIE  = re.compile(r"^MIERESP sub=([0-9a-fA-F]+) addr=([0-9a-fA-F]+) data=([0-9a-fA-F]+)")
 
 
 def parse_text(text, cart_fn=None, input_fn=None, eeprom_fn=None):
@@ -32,6 +37,8 @@ def parse_text(text, cart_fn=None, input_fn=None, eeprom_fn=None):
     watermarks = {}
     serial = []
     cartdma_pc, maple_pc, bios_exec = [], [], []
+    shimwatch = []
+    mieresp = []
     for line in text.splitlines():
         m = _DMA.match(line)
         if m:
@@ -65,12 +72,23 @@ def parse_text(text, cart_fn=None, input_fn=None, eeprom_fn=None):
         m = _SER.match(line)
         if m:
             serial.append({"addr": int(m.group(1), 16), "data": int(m.group(2), 16)})
+            continue
+        m = _SHIM.match(line)
+        if m:
+            shimwatch.append(int(m.group(1), 16))
+            continue
+        m = _MIE.match(line)
+        if m:
+            mieresp.append({"sub": int(m.group(1), 16), "addr": int(m.group(2), 16),
+                             "data": bytes.fromhex(m.group(3))})
     dma.sort(key=lambda d: (d["src"], d["dest"]))
     return {
         "dma": dma, "pio": sorted(pio), "watermarks": watermarks, "serial": serial,
         "cartdma_pc": cartdma_pc, "maple_pc": maple_pc, "bios_exec": bios_exec,
+        "shimwatch": shimwatch, "mieresp": mieresp,
         "checks": _checks(dma) + _pc_checks(cartdma_pc, maple_pc, bios_exec,
-                                             cart_fn, input_fn, eeprom_fn),
+                                             cart_fn, input_fn, eeprom_fn)
+                  + _shim_checks(shimwatch),
     }
 
 
@@ -85,6 +103,11 @@ def _checks(dma):
     checks.append(("beyond_boot_read", beyond,
                    "at least one cart read with src >= 0x100000 (runtime streaming)"))
     return checks
+
+
+def _shim_checks(shimwatch):
+    return [("shim_home_clean", len(shimwatch) == 0,
+             "zero SHIMWATCH lines (game never writes the planned shim home 0x0cfc0000+)")]
 
 
 def _in(ranges, pc):
@@ -144,6 +167,21 @@ def write_csv(result, path):
             f.write(f"0x{off:08x},0x0,0x00000000,PIO\n")
 
 
+def write_mie_dumps(result, out_dir):
+    """Write mie_subXX.bin (first occurrence per sub) into out_dir; return the
+    {sub: entry} map actually written. Prints one "addr=" line per sub."""
+    os.makedirs(out_dir, exist_ok=True)
+    first = {}
+    for m in result["mieresp"]:
+        first.setdefault(m["sub"], m)
+    for sub, m in sorted(first.items()):
+        path = os.path.join(out_dir, f"mie_sub{sub:02x}.bin")
+        with open(path, "wb") as f:
+            f.write(m["data"])
+        print(f"MIE sub={sub:02x} addr={m['addr']:08x} len={len(m['data'])} -> {path}")
+    return first
+
+
 def write_summary(result):
     lines = [f"DMA requests (unique): {len(result['dma'])}",
              f"PIO seeks (unique): {len(result['pio'])}"]
@@ -171,6 +209,10 @@ def write_summary(result):
         subs = sorted(set(m["sub"] for m in result["maple_pc"]))
         lines.append("MIE 0x86 subcommands seen: " + ", ".join(f"0x{s:02x}" for s in subs))
     lines.append(f"BIOSEXEC lines: {len(result.get('bios_exec', []))}")
+    lines.append(f"SHIMWATCH lines: {len(result.get('shimwatch', []))}")
+    if result.get("mieresp"):
+        subs = sorted(set(m["sub"] for m in result["mieresp"]))
+        lines.append("MIERESP subcommands seen: " + ", ".join(f"0x{s:02x}" for s in subs))
     for name, ok, detail in result["checks"]:
         lines.append(f"CHECK {name}: {'PASS' if ok else 'FAIL'} — {detail}")
     return "\n".join(lines)
@@ -187,12 +229,14 @@ def _range(s):
 
 
 def main(argv):
-    paths, csv_out = [], None
+    paths, csv_out, dump_mie_dir = [], None, None
     ranges = {}
     i = 0
     while i < len(argv):
         if argv[i] == "--csv":
             csv_out = argv[i + 1]; i += 2
+        elif argv[i] == "--dump-mie":
+            dump_mie_dir = argv[i + 1]; i += 2
         elif argv[i] == "--cart-fn":
             ranges["cart_fn"] = _range(argv[i + 1]); i += 2
         elif argv[i] == "--input-fn":
@@ -203,12 +247,15 @@ def main(argv):
             paths.append(argv[i]); i += 1
     if not paths:
         print("usage: parse_cart_log.py LOG [LOG ...] [--cart-fn LO-HI[,LO-HI]] "
-              "[--input-fn LO-HI[,LO-HI]] [--eeprom-fn LO-HI[,LO-HI]] [--csv OUT.csv]",
+              "[--input-fn LO-HI[,LO-HI]] [--eeprom-fn LO-HI[,LO-HI]] [--csv OUT.csv] "
+              "[--dump-mie DIR]",
               file=sys.stderr)
         return 2
     result = parse_files(paths, **ranges)
     if csv_out:
         write_csv(result, csv_out)
+    if dump_mie_dir:
+        write_mie_dumps(result, dump_mie_dir)
     print(write_summary(result))
     return 0
 

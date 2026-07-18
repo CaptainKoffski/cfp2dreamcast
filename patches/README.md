@@ -19,7 +19,8 @@ git -C tools/flycast-src apply "$PWD/patches/flycast-instrument.diff"
 
 Covers: `CMakeLists.txt`, `core/hw/naomi/cartlog.{cpp,h}` (new files),
 `core/hw/naomi/CMakeLists.txt`, `core/hw/naomi/naomi.cpp`,
-`core/hw/naomi/naomi_cart.{cpp,h}`, `core/hw/maple/maple_jvs.cpp`.
+`core/hw/naomi/naomi_cart.{cpp,h}`, `core/hw/maple/maple_jvs.cpp`,
+`core/hw/maple/maple_if.cpp` (Phase 4 Task 4: SHIMWATCH + MIERESP).
 
 ## 3. Apply Syphon submodule patch
 

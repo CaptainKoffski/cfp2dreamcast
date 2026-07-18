@@ -164,3 +164,123 @@ DC syscall vector citations:
 grep -n 'VEC_MISC_GDROM\|VEC_SYSINFO' tools/kos/kernel/arch/dreamcast/hardware/syscalls.c
 grep -n 'dc_bios_syscall_gd\|setup_syscall(0x8C0010' tools/flycast-src/core/reios/reios.cpp
 ```
+
+---
+
+## V2 — shim-home write-watch (dynamic, whole-run)
+
+**Question (task brief):** V1 proved *init* never touches the planned shim home
+phys `0x0cfc0000`–`0x0cffffff` (P1 `0x8cfc0000+`). Does the *running game* ever
+write there? If yes, the shim home must move.
+
+### Method
+
+Instrumented Flycast (`patches/flycast-instrument.diff`,
+`core/hw/naomi/naomi.cpp` `cartlog_shimwatch()`): a content scan of mem_b
+offsets `0x00fc0000`–`0x00ffffff`, sampled at the same every-64th-cart-DMA
+cadence as the `WATERMARK` scan, emitting `SHIMWATCH addr=` on the first
+non-zero byte found. A **content scan, not a write-intercept**, because the
+arm64 dynarec's fast path (`core/rec-ARM64/rec_arm64.cpp`
+`GenWriteMemoryFast`/`GenWriteMemoryImmediate`) stores straight into host RAM,
+bypassing every C-level write function — a `WriteMem` hook would miss most
+game writes with the dynarec on. mem_b is zeroed on hard reset
+(`core/hw/sh4/sh4_mem.cpp` `mem_Reset` → `mem_b.zero()`), so any non-zero byte
+must have been written during the run. Parser check: `shim_home_clean`
+(PASS iff zero `SHIMWATCH` lines).
+
+### Capture
+
+`scripts/capture.sh attract 600` — one unattended 600 s Naomi-mode run
+(dynarec ON), **coverage = boot + attract + demo mode (unattended)**; no human
+play this pass. Demo mode exercises gameplay (Phase 2: demo covered ~99% of
+streaming; hands-on play added only 5 DMAs). Log `capture-attract.log`
+(repo root, untracked): 108,648 lines — 865 CARTDMA, 35,759 MIERESP,
+35,758 MAPLEPC, 35,355 JVSREPORT, 42 WATERMARK (= 14 scan samples × 3
+regions), **0 SHIMWATCH**.
+
+### Verdict
+
+**`CHECK shim_home_clean: PASS` — zero SHIMWATCH lines across the run.**
+The game never left a non-zero byte in `0x0cfc0000`–`0x0cffffff`
+(scanned 14 times through boot → attract → demo). Shim home stands;
+no relocation of `shim_iface.h`'s choice needed.
+
+Margin note (honest caveat, not a trip): this run's main-RAM watermark
+reached `0x00f80040` (15.5 MB — higher than Phase 2's 11.2 MB DMA high-water;
+the game does write above the asset region), which is only 0x3ffc0 (~256 KB)
+below the shim window base `0x00fc0000`. The window itself stayed all-zero.
+Sampling caveat: a write that was fully re-zeroed between two 64-DMA samples
+would evade the scan — same accepted trade-off as the WATERMARK scan.
+
+### Reproduction
+
+```sh
+scripts/capture.sh attract 600
+python3 scripts/parse_cart_log.py capture-attract.log   # -> CHECK shim_home_clean: PASS
+```
+
+---
+
+## V4 — MIE response templates + response buffer address
+
+**Question (task brief):** the input/EEPROM shim replaces the MIE (Maple cmd
+0x86) transactions. It needs (a) byte-exact reply templates to write, and
+(b) where to write them.
+
+### Method
+
+Instrumented Flycast, `core/hw/maple/maple_if.cpp` `maple_DoDma()` (MP_Start
+case): after `pDevice->RawDma()` produces the reply and after the `swap_msb`
+byte-order fixup — i.e. byte-identical to what the emulator then copies to
+guest RAM — log `MIERESP sub=%02x addr=%08x data=<64 bytes hex>` for every
+cmd-0x86 transaction. `addr` is the Maple transfer descriptor's second word
+(the receive/response address, `header_2`), `sub` is the JVS subcommand
+(first payload byte after the frame header). **Direction: these are the MIE's
+reply frames (device → host), NOT the game's request** — the dump is taken
+from the out-buffer after the reply is built, and its first byte 0x87
+(MDRS_JVSReply) confirms it. Extracted with
+`python3 scripts/parse_cart_log.py capture-attract.log --dump-mie build/`
+(first occurrence per sub → `build/mie_subXX.bin`, ROM-derived, gitignored).
+
+### Results (same 600 s boot+attract+demo capture as V2)
+
+Subcommands captured: 0x01, 0x03, 0x13, 0x15, 0x17, 0x21, 0x27, 0x31, 0x33,
+0xff. Templates written: `build/mie_sub01.bin` … `mie_subff.bin` (64 bytes
+each, zero-padded past the true reply length).
+
+First bytes (little-endian reply header `[resp][sender][reci][n_words]`,
+resp 0x87 = MDRS_JVSReply):
+
+| sub | first 16 bytes | reads as |
+|---|---|---|
+| 0x01 | `87002001 02000000 …` | 1-word ack, payload `02 00 00 00` (EEPROM ready/status) |
+| 0x03 | `87002020 50cb1042 45532009 101a0101` | 32-word EEPROM read: two identical 16-byte halves (`50cb…1111` ×2) — the classic Naomi dual-copy EEPROM image |
+| 0x15 | `87002009 16ffffff 00ffffff 00000000` | 9-word input poll: status `0x16`, button words `ffffff` (active-low idle) |
+| 0x33 | `87002005 32ffffff 00ffffff 00000000` | 5-word input poll (the steady-state per-frame variant) |
+
+Counts: sub 0x15 ×376 (all in the first boot phase), sub 0x33 ×34,991 (the
+per-frame steady-state poll — **the input shim must serve sub 0x33, not just
+0x15**), sub 0x27 ×360, sub 0x01/0x03 ×2 each (boot-time EEPROM), rest <20.
+
+### Response buffer address
+
+**Not a single constant.** Three receive buffers observed:
+
+| buffer (phys) | used by |
+|---|---|
+| `0x0c296220` | boot-phase transactions: sub 0x15 (369/376), 0x01, 0x03, 0x13, 0x17, 0x21, **0x27 (all 360)**, 0x31 |
+| `0x0c0fd8e0` / `0x0c1038e0` | steady-state sub 0x33 stream, strictly alternating (17,495 / 17,496× — a double buffer); also the minority boot occurrences of 0x15/0x17 etc. |
+| `0x0c1c99a0` | the single sub 0xff (reset broadcast) |
+
+→ **The input shim must take the response address from the Maple transfer
+descriptor's second word per-transaction** (as the real hardware does), not
+hardcode one. `0x0c296220` is the observed boot/EEPROM buffer;
+`0x0c0fd8e0`/`0x0c1038e0` is the per-frame input double buffer. These are
+inside the game's own RAM image — no conflict with the shim home.
+
+### Reproduction
+
+```sh
+python3 scripts/parse_cart_log.py capture-attract.log --dump-mie build/
+grep -oE '^MIERESP sub=[0-9a-f]+ addr=[0-9a-f]+' capture-attract.log | sort | uniq -c
+```

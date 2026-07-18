@@ -40,6 +40,52 @@ diff --git a/core/deps/Syphon b/core/deps/Syphon
 @@ -1 +1 @@
 -Subproject commit 53ec412a78b246c84cedcb4a2a5b92852704d61d
 +Subproject commit 53ec412a78b246c84cedcb4a2a5b92852704d61d-dirty
+diff --git a/core/hw/maple/maple_if.cpp b/core/hw/maple/maple_if.cpp
+index 0cade32..a918428 100644
+--- a/core/hw/maple/maple_if.cpp
++++ b/core/hw/maple/maple_if.cpp
+@@ -7,8 +7,10 @@
+ #include "hw/sh4/sh4_sched.h"
+ #include "network/ggpo.h"
+ #include "hw/naomi/card_reader.h"
++#include "hw/naomi/cartlog.h"   // Phase 4 (Task 4, V4) instrumentation
+ 
+ #include <memory>
++#include <cstring>
+ 
+ enum MaplePattern
+ {
+@@ -237,6 +239,9 @@ static void maple_DoDma()
+ 					p_data = maple_in_buf;
+ 				}
+ 				u32 outbuf[1024 / sizeof(u32)];
++				// Phase 4 (Task 4, V4): zero first so the fixed 0x40-byte MIERESP dump
++				// below never exposes uninitialized stack bytes past outlen.
++				memset(outbuf, 0, sizeof(outbuf));
+ 				u32 outlen = pDevice->RawDma(&p_data[0], plen * sizeof(u32), outbuf);
+ 				xferIn += plen * sizeof(u32) + 3; // start, parity and stop bytes
+ 				xferOut += outlen + 3;
+@@ -252,6 +257,20 @@ static void maple_DoDma()
+ 				if (swap_msb)
+ 					for (u32 i = 0; i < outlen / 4; i++)
+ 						outbuf[i] = SWAP32(outbuf[i]);
++				// Phase 4 (Task 4, V4) instrumentation: dump the MIE's actual reply
++				// bytes + destination (recv) address for JVS I/O transactions (cmd
++				// 0x86), read AFTER RawDma has produced the response (and after the
++				// swap_msb fixup above) so this is byte-identical to what gets
++				// written to guest RAM at header_2 below -- response, not request.
++				if (command == MDC_JVSCommand && outlen > 0)
++				{
++					u8 sub = ((const u8 *)p_data)[4];
++					cartlog("MIERESP sub=%02x addr=%08x data=", sub, header_2);
++					const u8 *resp = (const u8 *)outbuf;
++					for (int i = 0; i < 0x40; i++)
++						cartlog("%02x", resp[i]);
++					cartlog("\n");
++				}
+ 				mapleDmaOut.emplace_back(header_2, std::vector<u32>(outbuf, outbuf + outlen / 4));
+ 			}
+ 			else
 diff --git a/core/hw/maple/maple_jvs.cpp b/core/hw/maple/maple_jvs.cpp
 index d01240f..cf0b4a6 100644
 --- a/core/hw/maple/maple_jvs.cpp
@@ -120,7 +166,7 @@ index 0000000..e2c7ef6
 +#pragma once
 +void cartlog(const char *fmt, ...);
 diff --git a/core/hw/naomi/naomi.cpp b/core/hw/naomi/naomi.cpp
-index 45005d7..3e251a8 100644
+index 45005d7..d2dfef7 100644
 --- a/core/hw/naomi/naomi.cpp
 +++ b/core/hw/naomi/naomi.cpp
 @@ -35,6 +35,13 @@
@@ -146,7 +192,7 @@ index 45005d7..3e251a8 100644
  	if (!settings.naomi.slave && m3comm != nullptr && address >= NAOMI_COMM_CTRL_addr && address <= NAOMI_COMM_STATUS2_addr) {
  		m3comm->WriteMem(address, data, size);
  		return;
-@@ -148,6 +157,24 @@ static int naomiDmaSched(int tag, int sch_cycl, int jitter, void *arg)
+@@ -148,6 +157,55 @@ static int naomiDmaSched(int tag, int sch_cycl, int jitter, void *arg)
  	}
  }
  
@@ -168,10 +214,41 @@ index 45005d7..3e251a8 100644
 +	cartlog("WATERMARK region=aram used=%x size=%x\n", cartlog_high(&aica::aica_ram[0], ARAM_SIZE), ARAM_SIZE);
 +}
 +
++// Phase 4 (Task 4, V2) instrumentation: any-write detector for the planned shim
++// home, phys 0x0cfc0000-0x0cffffff (== mem_b offset 0x00fc0000-0x00ffffff).
++// ponytail: this is a content scan, not a live write-intercept -- the arm64
++// dynarec's fast memory path (core/rec-ARM64/rec_arm64.cpp GenWriteMemoryFast /
++// GenWriteMemoryImmediate) stores directly into the host-mapped RAM array
++// whenever addrspace::virtmemEnabled(), bypassing every C-level write function
++// for register-indirect stores (the common case for game code) -- so a hook on
++// WriteMem/addrspace::write* would silently miss most writes with dynarec on.
++// Scanning actual RAM content (same trick as cartlog_watermarks/cartlog_high
++// above) sees the result of a write regardless of which path produced it
++// (interpreter, dynarec fast/slow path, or cart DMA memcpy). Sampled at the
++// same cadence as the watermark scan; like that scan, a write immediately
++// zeroed again before the next sample would be missed -- an accepted,
++// pre-existing trade-off in this instrumentation, not a new one.
++static void cartlog_shimwatch()
++{
++	static bool tripped = false;
++	if (tripped)
++		return;
++	const u32 SHIM_LO = 0x00fc0000, SHIM_HI = 0x00ffffff;	// mem_b offset; phys 0x0cfc0000-0x0cffffff
++	for (u32 i = SHIM_LO; i <= SHIM_HI; i++)
++	{
++		if (mem_b[i] != 0)
++		{
++			cartlog("SHIMWATCH addr=%08x\n", 0x0c000000 + i);
++			tripped = true;
++			break;
++		}
++	}
++}
++
  //Dma Start
  static void Naomi_DmaStart(u32 addr, u32 data)
  {
-@@ -165,6 +192,12 @@ static void Naomi_DmaStart(u32 addr, u32 data)
+@@ -165,6 +223,15 @@ static void Naomi_DmaStart(u32 addr, u32 data)
  	else if ((m3comm == nullptr || !m3comm->DmaStart(addr, data)) && CurrentCartridge != nullptr)
  	{
  		DEBUG_LOG(NAOMI, "NAOMI-DMA start addr %08X len %x", SB_GDSTAR, SB_GDLEN);
@@ -180,7 +257,10 @@ index 45005d7..3e251a8 100644
 +		cartlog("CARTDMAPC pc=%08x sp=%08x\n", Sh4cntx.pc, Sh4cntx.r[15]);   // Phase 3: guest PC/SP at DMA kick
 +		static u32 cartlog_dma_count = 0;
 +		if ((cartlog_dma_count++ & 63) == 0)   // ponytail: every 64th DMA; the scan is cheap but not free
++		{
 +			cartlog_watermarks();
++			cartlog_shimwatch();   // Phase 4 (Task 4, V2): shim-home content scan, same cadence
++		}
  		verify(1 == SB_GDDIR);
  		SB_GDST = 1;
  		SB_GDSTARD = SB_GDSTAR & 0x1FFFFFE0;

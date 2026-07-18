@@ -58,6 +58,11 @@ input, and serial pokes. Distinct from the release Flycast above.
 - **Build prereqs (macOS/arm64, this box):**
   - Standalone **CMake 3.31.6** (Kitware universal binary). **NOT** Homebrew
     cmake 4.x — 4.x breaks this Flycast commit at generate (cmrc/OBJC).
+    Download (the binary is not preserved between scratchpad sessions —
+    re-fetch it whenever it's missing, it's gitignored/not committed):
+    `curl -L -o cmake-3.31.6-macos-universal.tar.gz https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-macos-universal.tar.gz && tar xzf cmake-3.31.6-macos-universal.tar.gz`
+    → `cmake-3.31.6-macos-universal/CMake.app/Contents/bin/cmake` (confirmed
+    `cmake version 3.31.6`, re-verified Phase 4 Task 4).
   - Full Xcode reachable via `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`
     (cmake's OBJC ABI detection needs `xcodebuild`; CommandLineTools alone fails).
   - No extra `brew install` needed (zlib/png already present).
@@ -105,7 +110,29 @@ input, and serial pokes. Distinct from the release Flycast above.
   CARTDMAPC pc=%08x sp=%08x              # Phase 3: guest PC at SB_GDST store + stack pointer
   MAPLEPC cmd=86 sub=%02x pc=%08x        # Phase 3: guest PC at Maple DMA store (cmd 0x86)
   BIOSEXEC pc=%08x                        # Phase 3: any guest insn in BIOS ROM range (phys 0x0–0x1fffff)
+  SHIMWATCH addr=%08x                     # Phase 4: RAM content scan found a non-zero byte in the
+                                           #   planned shim home 0x0cfc0000-0x0cffffff (first occurrence only)
+  MIERESP sub=%02x addr=%08x data=<128 hex chars>   # Phase 4: MIE's actual reply bytes (0x40
+                                           #   bytes, zero-padded) + guest recv address, for cmd 0x86
   ```
+  **SHIMWATCH is a content scan, not a write intercept** (`core/hw/naomi/naomi.cpp`
+  `cartlog_shimwatch()`, sampled at the same 64-DMA cadence as `WATERMARK`): the
+  arm64 dynarec's fast memory path (`core/rec-ARM64/rec_arm64.cpp`
+  `GenWriteMemoryFast`/`GenWriteMemoryImmediate`) stores directly into the
+  host-mapped RAM array when `addrspace::virtmemEnabled()` (true on this build),
+  bypassing every C-level write function for register-indirect stores — the
+  common case for game code. A live hook on `WriteMem`/`addrspace::write*` would
+  silently miss most writes with the dynarec on, so this instrumentation instead
+  scans actual RAM content (same technique as the pre-existing
+  `cartlog_watermarks`/`cartlog_high`). Caveat: a write immediately zeroed again
+  before the next 64-DMA sample would be missed — the same accepted trade-off as
+  the WATERMARK high-water scan, not a new one.
+  **MIERESP** is logged from `core/hw/maple/maple_if.cpp` `maple_DoDma()`
+  (`MP_Start` case), right after `RawDma()` returns and after the `swap_msb`
+  byte-order fixup — i.e. byte-identical to what the emulator writes to guest
+  RAM at `addr=` (the Maple DMA descriptor's second word, masked). `outbuf` is
+  zeroed before the call so the fixed 64-byte dump never exposes uninitialized
+  stack bytes past the actual reply length.
 
 ### Ghidra — 12.1.2 (20260605)
 
