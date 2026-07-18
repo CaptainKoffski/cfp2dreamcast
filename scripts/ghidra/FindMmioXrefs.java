@@ -51,8 +51,18 @@ public class FindMmioXrefs extends GhidraScript {
             long phys = v & 0x1fffffffL;
             for (int b = 0; b < BLOCKS.length; b++)
                 if (phys >= BLOCKS[b][0] && phys <= BLOCKS[b][1]) {
-                    println(String.format("POOL  block=%s const=0x%08x at=%s",
-                            LABELS[b], phys, d.getAddress()));
+                    Function pf = getFunctionContaining(d.getAddress());
+                    if (pf == null) {
+                        for (ghidra.program.model.symbol.Reference ref :
+                                 currentProgram.getReferenceManager().getReferencesTo(d.getAddress())) {
+                            pf = getFunctionContaining(ref.getFromAddress());
+                            if (pf != null) break;
+                        }
+                    }
+                    println(String.format("POOL  block=%s const=0x%08x at=%s fn=%s@%s",
+                            LABELS[b], phys, d.getAddress(),
+                            pf == null ? "?" : pf.getName(),
+                            pf == null ? "?" : pf.getEntryPoint().toString()));
                     hits++;
                 }
         }
