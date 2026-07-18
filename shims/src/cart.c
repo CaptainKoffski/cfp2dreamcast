@@ -76,8 +76,12 @@ void shim_cart_service(void) {
     u32 dest = m[0x404/4] & 0x1fffffff; /* SB_GDSTAR mirror; game programs it
                                          * P1-aliased (0x8c..) -- mask P0/P1/P2
                                          * region bits to physical 0x0c.. */
-    if (!len || off + len > CART_SIZE ||
-        (dest & 0x1f000000) != 0x0c000000 || dest + len > 0x0d000000)
+    /* len sanity (>16MB is impossible for a legit cart read) BEFORE the +len
+     * comparisons so an absurd SB_GDLEN can't u32-wrap past them. Upper bound is
+     * fenced to shim home (SHIM_BASE phys 0x0cfc0000): a DMA reaching there would
+     * clobber the running shim / BIOS-data blocks -- last line protecting it. */
+    if (!len || len > 0x01000000 || off + len > CART_SIZE ||
+        (dest & 0x1f000000) != 0x0c000000 || dest + len > (SHIM_BASE & 0x1fffffff))
         shim_die(2, off, dest);
     scif_puts("CART off="); scif_puthex(off);
     scif_puts(" len="); scif_puthex(len);
