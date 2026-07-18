@@ -87,8 +87,20 @@ def _checks(dma):
     return checks
 
 
-def _in(rng, pc):
-    return rng is not None and rng[0] <= pc <= rng[1]
+def _in(ranges, pc):
+    # ranges is a single (lo, hi) tuple or a list of them (a fn may span
+    # more than one site — e.g. the two Maple poll routines). pc is "in" if
+    # it lands in ANY range. ponytail: a set of tight ranges, never one wide
+    # span across unrelated code — that would make the check meaningless.
+    if ranges is None:
+        return False
+    if ranges and isinstance(ranges[0], int):
+        ranges = [ranges]
+    # Compare on the 29-bit physical address: the SH-4 runs the same code via
+    # P0/P1/P2 region mirrors, so a PC logged as 0x0c03161e and a Ghidra range
+    # at 0x8c03161e are the same instruction. Mask both sides.
+    pc &= 0x1fffffff
+    return any((lo & 0x1fffffff) <= pc <= (hi & 0x1fffffff) for lo, hi in ranges)
 
 
 def _pc_checks(cartdma_pc, maple_pc, bios_exec, cart_fn, input_fn, eeprom_fn):
@@ -164,8 +176,13 @@ def write_summary(result):
 
 
 def _range(s):
-    lo, hi = s.split("-")
-    return (int(lo, 16), int(hi, 16))
+    # one "LO-HI" range, or a comma-separated set "LO-HI,LO-HI" (a fn that
+    # runs from more than one site). Always returns a list of (lo, hi) tuples.
+    out = []
+    for part in s.split(","):
+        lo, hi = part.split("-")
+        out.append((int(lo, 16), int(hi, 16)))
+    return out
 
 
 def main(argv):
@@ -184,8 +201,9 @@ def main(argv):
         else:
             paths.append(argv[i]); i += 1
     if not paths:
-        print("usage: parse_cart_log.py LOG [LOG ...] [--cart-fn LO-HI] "
-              "[--input-fn LO-HI] [--eeprom-fn LO-HI] [--csv OUT.csv]", file=sys.stderr)
+        print("usage: parse_cart_log.py LOG [LOG ...] [--cart-fn LO-HI[,LO-HI]] "
+              "[--input-fn LO-HI[,LO-HI]] [--eeprom-fn LO-HI[,LO-HI]] [--csv OUT.csv]",
+              file=sys.stderr)
         return 2
     result = parse_files(paths, **ranges)
     if csv_out:

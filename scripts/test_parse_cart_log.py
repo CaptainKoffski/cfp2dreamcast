@@ -80,6 +80,42 @@ def test_bios_exec_fails_check():
     assert d["no_bios_exec"] is False
 
 
+def test_multi_range_covers_two_sites():
+    # input/eeprom poll from two distinct Maple routines: a set of ranges must
+    # cover both; a pc outside every range must still fail.
+    text = (
+        "MAPLEPC cmd=86 sub=15 pc=8c0315fe\n"   # primary site
+        "MAPLEPC cmd=86 sub=15 pc=8c03c300\n"   # secondary site
+        "MAPLEPC cmd=86 sub=03 pc=8c0315fe\n"   # eeprom, primary
+        "MAPLEPC cmd=86 sub=03 pc=8c03c300\n"   # eeprom, secondary
+    )
+    two = [(0x8c0315ce, 0x8c03161f), (0x8c03c2c6, 0x8c03c4a1)]
+    r = p.parse_text(text, input_fn=two, eeprom_fn=two)
+    d = dict((n, ok) for n, ok, _ in r["checks"])
+    assert d["input_pc_in_input_fn"] is True     # both input sites covered by the set
+    assert d["eeprom_seen"] is True
+
+    # a single range that misses the secondary site must fail the input check
+    r2 = p.parse_text(text, input_fn=(0x8c0315ce, 0x8c03161f))
+    d2 = dict((n, ok) for n, ok, _ in r2["checks"])
+    assert d2["input_pc_in_input_fn"] is False   # 0x8c03c300 is outside the lone range
+
+
+def test_pc_mirror_normalization():
+    # a PC logged in the P0 mirror (0x0c...) matches a P1 range (0x8c...) — same
+    # physical instruction. This is the real smoke-log case: input site 0x0c03161e.
+    text = "MAPLEPC cmd=86 sub=15 pc=0c03161e\n"
+    r = p.parse_text(text, input_fn=(0x8c0315ce, 0x8c03161f))
+    d = dict((n, ok) for n, ok, _ in r["checks"])
+    assert d["input_pc_in_input_fn"] is True
+
+
+def test_range_cli_parser_single_and_set():
+    assert p._range("8c0315ce-8c03161f") == [(0x8c0315ce, 0x8c03161f)]
+    assert p._range("8c0315ce-8c03161f,8c03c2c6-8c03c4a1") == [
+        (0x8c0315ce, 0x8c03161f), (0x8c03c2c6, 0x8c03c4a1)]
+
+
 def test_cli_writes_csv(tmp_path):
     log = tmp_path / "in.log"; log.write_text(SAMPLE)
     out = tmp_path / "out.csv"
