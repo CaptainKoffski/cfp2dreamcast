@@ -21,7 +21,7 @@ exists it is cited by URL. Unresolved items are in §8, never guessed.
 | **CPU** | Hitachi SH-4 (HD6417091) @ 200 MHz | Hitachi SH-4 @ 200 MHz | None. Identical ISA and clock — game code runs unmodified. `naomi.cpp:62` (chip), `naomi.cpp:1205` (`#define CPU_CLOCK (200000000)`); DC clock: [dreamcast.wiki hardware](https://dreamcast.wiki/Hardware_overview) |
 | **GPU** | PowerVR2 / CLX2 "Holly" @ 100 MHz | PowerVR2 / CLX2 "Holly" @ 100 MHz | None. Same TA/ISP/DAC register block, mapped identically (`0x5f7c00`, `0x5f8000`). `naomi.cpp:63`, `naomi.cpp:1301-1302`; `dccons.cpp:153-154` |
 | **Sound** | Yamaha AICA (315-6232) + ARM7 @ 45 MHz | Yamaha AICA + ARM7 @ 45 MHz | None. Same SPU; AICA reg block at `0x00700000` on both. `naomi.cpp:74`, `naomi.cpp:1304`; `dccons.cpp:156` |
-| **Main RAM** | 32 MB @ `0x0c000000-0x0dffffff` | 16 MB @ `0x0c000000-0x0cffffff` (upper 16 MB are mirrors) | **Half the RAM.** Game may assume 32 MB. Must confirm its working-set fits 16 MB (Phase 2 measures). `naomi.cpp:1319`; `dccons.cpp:170-173` |
+| **Main RAM** | 32 MB @ `0x0c000000-0x0dffffff` | 16 MB @ `0x0c000000-0x0cffffff` (upper 16 MB are mirrors) | **Half the RAM.** Game may assume 32 MB. Phase 2 measured asset placement at **11.2 MB** — fits 16 MB — but a scan finds data ~1 KB below the top of 32 MB (likely a high-address stack) that must be pinned down in Phase 3. See `docs/kb/phase2-measurements.md`. `naomi.cpp:1319`; `dccons.cpp:170-173` |
 | **Video RAM** | 16 MB texture/frame RAM | 8 MB texture RAM | **Half the VRAM.** Naomi map exposes 16 MB texture area (`0x04000000-0x04ffffff` = 16 MB). DC has 8 MB. Asset/texture budget likely needs cuts (Phase 5). `naomi.cpp:1312`; DC: [dreamcast.wiki](https://dreamcast.wiki/Hardware_overview) |
 | **Sound RAM** | 8 MB @ `0x00800000-0x00ffffff` | 2 MB @ `0x00800000-0x009fffff` | **Quarter the sound RAM.** Audio-sample budget must shrink. `naomi.cpp:1306`; `dccons.cpp:158` |
 | **Game storage** | ROM cartridge on the G1 bus (this game: 109 MB image) | GD-ROM disc (~1 GB usable) | **The central port problem.** Cart streamed via ROM-board registers; on DC becomes GD-ROM streaming / RAM preload. See §2, §3. `naomibd.cpp:8-24`; GD-ROM cap: [Wikipedia GD-ROM](https://en.wikipedia.org/wiki/GD-ROM) |
@@ -352,12 +352,23 @@ DC boot structures.
    instrument the emulator to log all writes to `0x5f7000-0x5f7014` and
    `0x5f7400-0x5f74ff` while playing. Must not be guessed; Phase 4 patches
    depend on the real triples.
+   **RESOLVED Phase 2** — see `docs/kb/cart-streaming-map.md` /
+   `cart-streaming-map.csv`: 388 unique DMA `(cart offset, length, dest)`
+   triples captured over attract + demo + a hands-on play pass to game-over;
+   cart span `0x800000`..`0x609c000`; game streams almost entirely by DMA
+   (1 PIO seek). All three parser self-checks pass. Known gap: top ~12 MB of
+   cart never streamed.
 2. **JVS/MIE input bit → button mapping for this game.** The MIE `0x86`/`0x15`
    response is a 0xE-word bitmap but the per-bit meaning isn't documented at bit
    granularity. *Tried:* `tools/netboot/docs/naomi.md:190-196` (documents the
    command, explicitly says the bit map must be found empirically) and MIE
    handlers in `mie.cpp`. *Resolves in:* Phase 2/3 — log MIE responses while
    pressing known inputs, or disassemble the game's input decoder (Phase 3).
+   **RESOLVED Phase 2** (7 gameplay controls) — see `docs/kb/input-map.md`:
+   each control pressed alone flipped exactly its predicted JVS bit
+   (Start 0x8000, Up 0x2000, Down 0x1000, Left 0x0800, Right 0x0400,
+   B1 0x0200, B2 0x0100; active-high, idle 0x0000). Coin/Test live in the JVS
+   system byte outside the logged word — Phase 4 handles them separately.
 3. **Does the boot binary ever call into Naomi BIOS ROM after the entrypoint?**
    §6 argues the game is self-contained (RE describes the *common* startup as
    BIOS-independent), but this hasn't been proven for *this* binary. *Tried:*
@@ -370,6 +381,9 @@ DC boot structures.
    `naomi.cpp:163-164,172-178`; no game-specific evidence. *Resolves in:*
    Phase 2 (watch for pokes to those registers) / Phase 3. Low risk — shims can
    no-op these — but flagged so Phase 4 doesn't miss a hang-on-watchdog.
+   **RESOLVED Phase 2** — see `docs/kb/phase2-measurements.md`: 0 writes to any
+   `NAOMI_COMM_*` serial/network register across all captures, and no watchdog
+   register access observed → no serial or watchdog shim indicated.
 5. **Precise DC VRAM population (8 vs 16 MB usable).** The MAME DC map declares
    the `0x04000000-0x04ffffff` texture range as 16 MB of address space
    (`dccons.cpp:166`) but retail DC ships 8 MB

@@ -1,6 +1,6 @@
 # Project status
 
-**Updated:** 2026-07-18 (Phase 1, Task 7)
+**Updated:** 2026-07-18 (Phase 2 complete)
 
 ## What this is
 
@@ -23,8 +23,8 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
 ## Phases
 
 1. **Foundation — DONE 2026-07-18** (repo, knowledge base, tooling, boot verification)
-2. **Instrumented analysis — NEXT** (cart-access + RAM logging via modified Flycast)
-3. Reverse engineering (Ghidra on the 1 MB boot binary)
+2. **Instrumented analysis — DONE 2026-07-18** (cart-streaming map, RAM/serial measurements, input map via instrumented Flycast)
+3. **Reverse engineering — NEXT** (Ghidra on the 1 MB boot binary)
 4. Conversion (loader + shims + patches → bootable GDI)
 5. Fit & polish (RAM/asset cuts if measurements demand, hardware testing)
 
@@ -40,7 +40,10 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
 
 ## Next step
 
-Brainstorm and spec Phase 2 (instrumented analysis): cart-access and RAM logging via a modified Flycast source build.
+Brainstorm and spec Phase 3 (reverse engineering): Ghidra on the 1 MB boot
+binary — confirm no BIOS `jsr` after the entrypoint (§8-3), and locate the
+cart-read and input-decode functions the Phase 4 patches target,
+cross-referenced against the Phase 2 cart-streaming map and input map.
 
 ## Key facts so far
 
@@ -50,3 +53,17 @@ Brainstorm and spec Phase 2 (instrumented analysis): cart-access and RAM logging
   entrypoint 0x8c04ae2c (header load table).
 - The rest of the cart is read at runtime via the ROM-board interface —
   on DC this must become GD-ROM streaming / RAM preload.
+
+### Phase 2 findings (see `cart-streaming-map.md`, `phase2-measurements.md`, `input-map.md`)
+
+- **Cart streaming map:** 388 unique DMA `(cart offset, length, dest)` triples
+  captured (attract + demo + play-to-game-over), cart span
+  `0x800000`..`0x609c000`; streams almost entirely by DMA (1 PIO seek). Top
+  ~12 MB of cart never streamed (known gap). Feeds the Phase 4 GD-ROM reissue.
+- **RAM verdict:** main-RAM asset placement 11.2 MB (fits DC 16 MB), but a scan
+  hit near the top of Naomi's 32 MB (likely a high-address stack) is a **Phase 3
+  question** before main RAM is declared safe. VRAM ~9.2 MB (over DC 8 MB → likely
+  texture cuts in Phase 5). Sound RAM inconclusive (scan artifact).
+- **Input map:** all 7 gameplay controls confirmed to single JVS bits
+  (Start 0x8000, Up/Down/Left/Right 0x2000/1000/0800/0400, B1/B2 0x0200/0100).
+- **Serial/watchdog:** 0 pokes → no serial or watchdog shim needed.
