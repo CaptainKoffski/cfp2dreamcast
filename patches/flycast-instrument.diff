@@ -41,7 +41,7 @@ diff --git a/core/deps/Syphon b/core/deps/Syphon
 -Subproject commit 53ec412a78b246c84cedcb4a2a5b92852704d61d
 +Subproject commit 53ec412a78b246c84cedcb4a2a5b92852704d61d-dirty
 diff --git a/core/hw/maple/maple_if.cpp b/core/hw/maple/maple_if.cpp
-index 0cade32..a918428 100644
+index 0cade32..4cd559d 100644
 --- a/core/hw/maple/maple_if.cpp
 +++ b/core/hw/maple/maple_if.cpp
 @@ -7,8 +7,10 @@
@@ -55,17 +55,51 @@ index 0cade32..a918428 100644
  
  enum MaplePattern
  {
-@@ -237,6 +239,9 @@ static void maple_DoDma()
+@@ -168,8 +170,25 @@ static void maple_DoDma()
+ 	u32 xferOut = 0;
+ 	u32 xferIn = 0;
+ 	bool last = false;
++	// Phase 4 (Task 13): DC-mode boot-hang capture. maple_DoDma runs SYNCHRONOUSLY
++	// from the guest's SB_MDST=1 store and walks a command list from SB_MDSTAR with
++	// an unbounded `while(!last)` loop (last = command header bit31). A list whose
++	// terminator is never reached makes this loop walk RAM/MMIO forever, freezing
++	// the guest inside that single store opcode -- exactly the observed hang
++	// (fetch-path PCSAMPLE frozen, CPU burning). Log entry + guard the loop.
++	cartlog("MDODMA enter mdstar=%08x hdr0=%08x mden=%d pc=%08x\n",
++			SB_MDSTAR, ReadMem32_nommu(SB_MDSTAR), SB_MDEN & 1, Sh4cntx.pc);
++	u32 mdodma_iters = 0;
+ 	while (!last)
+ 	{
++		if (++mdodma_iters > 100000)
++		{
++			cartlog("MDODMA_RUNAWAY iters=%u addr=%08x hdr1=%08x\n",
++					mdodma_iters, addr, ReadMem32_nommu(addr));
++			SB_MDST = 0;          // escape: clear busy so the guest's poll exits; see where it goes next
++			mapleDmaOut.clear();
++			return;
++		}
+ 		u32 header_1 = ReadMem32_nommu(addr);
+ 		u32 header_2 = ReadMem32_nommu(addr + 4) & 0x1FFFFFE0;
+ 
+@@ -237,7 +256,17 @@ static void maple_DoDma()
  					p_data = maple_in_buf;
  				}
  				u32 outbuf[1024 / sizeof(u32)];
 +				// Phase 4 (Task 4, V4): zero first so the fixed 0x40-byte MIERESP dump
 +				// below never exposes uninitialized stack bytes past outlen.
 +				memset(outbuf, 0, sizeof(outbuf));
++				// Phase 4 (Task 13): bracket RawDma + the reply-vector build to pin a
++				// hang inside a single Maple frame (RawDma handler or a bogus huge
++				// outlen -> gigabyte std::vector). "call" with no "ret" => RawDma hung;
++				// "ret" with a huge outlen => the emplace_back below is the hang.
++				cartlog("MDODMA rawdma_call cmd=%02x reci=%02x bus=%d plen=%u\n",
++						frame_header & 0xFF, (frame_header >> 8) & 0xFF, bus, plen);
  				u32 outlen = pDevice->RawDma(&p_data[0], plen * sizeof(u32), outbuf);
++				cartlog("MDODMA rawdma_ret outlen=%x\n", outlen);
  				xferIn += plen * sizeof(u32) + 3; // start, parity and stop bytes
  				xferOut += outlen + 3;
-@@ -252,6 +257,20 @@ static void maple_DoDma()
+ #ifdef STRICT_MODE
+@@ -252,7 +281,22 @@ static void maple_DoDma()
  				if (swap_msb)
  					for (u32 i = 0; i < outlen / 4; i++)
  						outbuf[i] = SWAP32(outbuf[i]);
@@ -84,8 +118,10 @@ index 0cade32..a918428 100644
 +					cartlog("\n");
 +				}
  				mapleDmaOut.emplace_back(header_2, std::vector<u32>(outbuf, outbuf + outlen / 4));
++				cartlog("MDODMA frame_done outlen=%x\n", outlen);   // Phase 4 (Task 13)
  			}
  			else
+ 			{
 diff --git a/core/hw/maple/maple_jvs.cpp b/core/hw/maple/maple_jvs.cpp
 index d01240f..cf0b4a6 100644
 --- a/core/hw/maple/maple_jvs.cpp
@@ -115,6 +151,83 @@ index d01240f..cf0b4a6 100644
  						JVS_OUT((inputs[0] & NAOMI_TEST_KEY) ? 0x80 : 0x00); // test, tilt1, tilt2, tilt3, unused, unused, unused, unused
  						LOGJVS("btns ");
  						for (int player = 0; player < buffer_in[cmdi + 1]; player++)
+diff --git a/core/hw/mem/addrspace.cpp b/core/hw/mem/addrspace.cpp
+index c08cb8e..ad1bbdf 100644
+--- a/core/hw/mem/addrspace.cpp
++++ b/core/hw/mem/addrspace.cpp
+@@ -4,6 +4,7 @@
+ #include "hw/pvr/elan.h"
+ #include "hw/sh4/dyna/blockmanager.h"
+ #include "hw/sh4/sh4_mem.h"
++#include "hw/naomi/cartlog.h"   // Phase 4 (Task 13) DC-mode mirror-write instrumentation
+ #include "oslib/oslib.h"
+ #include "oslib/virtmem.h"
+ #include <cassert>
+@@ -101,11 +102,39 @@ void *writeConst(u32 addr, bool& ismem, u32 sz)
+ 	}
+ }
+ 
++// Phase 4 (Task 13): log guest accesses to hardware-register ranges whose
++// emulator handlers can loop (holly system/DMA regs, AICA/G2, SH4 on-chip DMAC).
++// If the guest is stuck inside a single MMIO opcode (fetch-path PCSAMPLE frozen,
++// CPU burning), the LAST HWWR/HWRD line before the freeze is the access that
++// entered the looping handler -- i.e. the hang site. pc-2 = the access insn PC
++// (interpreter advances ctx->pc to insn+2 before ExecuteOpcode).
++static inline void cartlog_hwaccess(char rw, u32 addr, u32 val)
++{
++	const u32 pc = Sh4cntx.pc;
++	// Only the ported game's own code (post-handoff), matched by PHYSICAL pc so
++	// both the P1 (0x8c02xxxx) and P2/uncached (0xac02xxxx) aliases count -- the
++	// game dispatches through P2. This filters the loader/KOS boot flood
++	// (0x8c00xxxx-0x8c01xxxx) so the log stays bounded and game HW is visible.
++	const u32 ppc = pc & 0x1fffffff;
++	if (ppc < 0x0c020000 || ppc >= 0x0c200000)
++		return;
++	if ((addr & 0x1c000000) == 0x0c000000)   // skip main RAM (area 3, incl P1/P2 aliases)
++		return;
++	// Collapse consecutive identical accesses (a spin logs once, not millions).
++	static u32 lpc = 0, laddr = 0; static char lrw = 0;
++	if (pc == lpc && addr == laddr && rw == lrw)
++		return;
++	lpc = pc; laddr = addr; lrw = rw;
++	cartlog("HW%c pc=%08x addr=%08x val=%08x\n", rw, pc - 2, addr, val);
++}
++
+ template<typename T>
+ T DYNACALL readt(u32 addr)
+ {
+ 	constexpr u32 sz = sizeof(T);
+ 
++	cartlog_hwaccess('R', addr, 0);
++
+ 	u32 page = addr >> 24;	//1 op, shift/extract
+ 	uintptr_t iirf = (uintptr_t)memInfo_ptr[page]; //2 ops, insert + read [vmem table will be on reg ]
+ 	void *ptr = (void *)(iirf & ~HANDLER_MAX);     //2 ops, and // 1 op insert
+@@ -150,6 +179,24 @@ void DYNACALL writet(u32 addr, T data)
+ {
+ 	constexpr u32 sz = sizeof(T);
+ 
++	// Phase 4 (Task 13) DC-mode instrumentation: log every guest store into the
++	// G1 register-mirror block (phys 0x0cfc8800-0x0cfc9000; the patched game +
++	// shim reach it via the P2 alias 0xacfc88xx). Captures the config-time
++	// cart-DMA program sequence (cart offset, GDSTAR dest, GDLEN len) and the
++	// trigger write of 1 to off 0x418. pc-2 = the store insn's PC: the
++	// interpreter advances ctx->pc to insn+2 in ReadNexOp before ExecuteOpcode.
++	// ponytail: interpreter-only in practice (dynarec's reg-indirect fast path
++	// bypasses writet, per the SHIMWATCH note in naomi.cpp); this pass forces the
++	// interpreter so every mirror store is seen. One range compare on the write
++	// path -- negligible under the interpreter.
++	{
++		u32 pa = addr & 0x1fffffff;
++		if (pa >= 0x0cfc8800 && pa < 0x0cfc9000)
++			cartlog("MIRRORWR pc=%08x off=%03x val=%08x\n",
++					Sh4cntx.pc - 2, pa - 0x0cfc8800, (u32)data);
++	}
++	cartlog_hwaccess('W', addr, (u32)data);
++
+ 	u32 page = addr>>24;
+ 	uintptr_t iirf = (uintptr_t)memInfo_ptr[page];
+ 	void *ptr = (void *)(iirf & ~HANDLER_MAX);
 diff --git a/core/hw/naomi/CMakeLists.txt b/core/hw/naomi/CMakeLists.txt
 index d9f2051..8994318 100644
 --- a/core/hw/naomi/CMakeLists.txt
@@ -306,18 +419,19 @@ index 4011837..0d2f910 100644
  		DmaOffset += size;
  	}
 diff --git a/core/hw/sh4/interpr/sh4_interpreter.cpp b/core/hw/sh4/interpr/sh4_interpreter.cpp
-index 54a2b02..667a9aa 100644
+index 54a2b02..6b99bc0 100644
 --- a/core/hw/sh4/interpr/sh4_interpreter.cpp
 +++ b/core/hw/sh4/interpr/sh4_interpreter.cpp
-@@ -3,6 +3,7 @@
+@@ -3,6 +3,8 @@
  */
  
  #include "types.h"
 +#include "hw/naomi/cartlog.h"   // Phase 3 instrumentation
++#include <ctime>                // Phase 4 (Task 13): wall-clock PC sampler
  
  #include "../sh4_interpreter.h"
  #include "../sh4_opcode_list.h"
-@@ -18,6 +19,21 @@ Sh4ICache icache;
+@@ -18,6 +20,69 @@ Sh4ICache icache;
  Sh4OCache ocache;
  Sh4Interpreter *Sh4Interpreter::Instance;
  
@@ -336,14 +450,124 @@ index 54a2b02..667a9aa 100644
 +	}
 +}
 +
++// Phase 4 (Task 13): busy-spin PC detector. If the guest stays inside a <32-byte
++// PC window for >50M consecutive instruction fetches it is busy-spinning (a
++// `bf`-to-self DMA-completion poll); emit the spin PC + the mirrored SB_GDST slot
++// mirror+0x418 (phys 0x0cfc8c18) once. 50M is far above any bounded delay/init
++// loop (biggest is ~1M iters) but is crossed near-instantly by a real busy spin.
++// A paced SLEEP/interrupt-driven idle is NOT a busy spin (fetch count barely
++// climbs) -- that case is caught by PCSAMPLE in Run() below and SLEEPWAIT.
++// ponytail: interpreter-only (pc is instruction-exact here); dynarec won't fire this.
++static void cartlog_hang_check(u32 pc)
++{
++	// Phase 4 (Task 13): wall-clock guest-PC sampler, in the instruction-fetch
++	// path. Logs the fetched PC once per real second. Placed here (not in Run()'s
++	// outer timeslice loop) because a heavily real-time-paced inner loop reaches
++	// the outer loop only rarely -- an outer-loop sampler starves. As long as any
++	// instruction is fetched each second, this pins the stuck PC regardless of
++	// pacing. gdst_mirror = mirror+0x418 at the sample.
++	{
++		static time_t last = 0;
++		time_t now = time(nullptr);
++		if (now != last)
++		{
++			last = now;
++			cartlog("PCSAMPLE pc=%08x gdst_mirror=%08x\n", pc,
++					ReadMem32_nommu(0x8cfc8c18));
++		}
++	}
++
++	static u32 win_base = 0;
++	static u64 count = 0;
++	static bool done = false;
++	if (done)
++		return;
++	if ((u32)(pc - win_base) < 32)
++	{
++		if (++count > 50000000ull)
++		{
++			cartlog("HANG pc=%08x gdst_mirror=%08x\n", pc,
++					ReadMem32_nommu(0x8cfc8c18));
++			done = true;
++		}
++	}
++	else
++	{
++		win_base = pc;
++		count = 0;
++	}
++}
++
  void Sh4Interpreter::ExecuteOpcode(u16 op)
  {
  	if (ctx->sr.FD == 1 && OpDesc[op]->IsFloatingPoint())
-@@ -29,6 +45,7 @@ void Sh4Interpreter::ExecuteOpcode(u16 op)
+@@ -29,6 +94,8 @@ void Sh4Interpreter::ExecuteOpcode(u16 op)
  u16 Sh4Interpreter::ReadNexOp()
  {
  	u32 addr = ctx->pc;
 +	cartlog_bios_check(addr);
++	cartlog_hang_check(addr);   // Phase 4 (Task 13): boot-hang spin-PC detector
  	if (!mmu_enabled() && (addr & 1))
  		// address error
  		throw SH4ThrownException(addr, Sh4Ex_AddressErrorRead);
+@@ -59,6 +126,22 @@ void Sh4Interpreter::Run()
+ 				Do_Exception(ex.epc, ex.expEvn);
+ 				// an exception requires the instruction pipeline to drain, so approx 5 cycles
+ 				sh4cycles.addCycles(5 * CPU_RATIO);
++				// Phase 4 (Task 13): an infinite exception loop (a fault taken every
++				// instruction -- e.g. before the guest's VBR handlers are installed)
++				// exits the inner loop straight to here each iteration, bypassing the
++				// PCSAMPLE above. Log the faulting PC (epc), event code (expEvn: 0x180
++				// illegal-instr, 0x1a0 slot-illegal, 0x0e0/0x100 data address error,
++				// etc.) and the vector jumped to. Wall-clock rate-limited (~1/sec).
++				{
++					static time_t last = 0;
++					time_t now = time(nullptr);
++					if (now != last)
++					{
++						last = now;
++						cartlog("EXC epc=%08x evn=%03x newpc=%08x vbr=%08x\n",
++								ex.epc, ex.expEvn, ctx->pc, ctx->vbr);
++					}
++				}
+ 			}
+ 		} while (ctx->CpuRunning);
+ 	} catch (const debugger::Stop&) {
+diff --git a/core/hw/sh4/interpr/sh4_opcodes.cpp b/core/hw/sh4/interpr/sh4_opcodes.cpp
+index 26df085..3c2f5e1 100644
+--- a/core/hw/sh4/interpr/sh4_opcodes.cpp
++++ b/core/hw/sh4/interpr/sh4_opcodes.cpp
+@@ -2,6 +2,8 @@
+ 	All non fpu opcodes
+ */
+ #include "types.h"
++#include "hw/naomi/cartlog.h"   // Phase 4 (Task 13) SLEEP-wait instrumentation
++#include <ctime>                // Phase 4 (Task 13): wall-clock rate limit for SLEEPWAIT
+ 
+ #include "hw/sh4/sh4_mem.h"
+ #include "hw/sh4/sh4_mmr.h"
+@@ -959,6 +961,24 @@ sh4op(i0100_nnnn_0000_1011)
+ //sleep
+ sh4op(i0000_0000_0001_1011)
+ {
++	// Phase 4 (Task 13): the guest spends real seconds inside each SLEEP opcode
++	// (its internal loop calls UpdateSystem_INTC up to 1001x, advancing the
++	// scheduler / emulated time, which the emulator paces to real-time). So a
++	// SLEEP boot-hang idle starves every fetch-count- and outer-loop-based
++	// detector. Log the SLEEP site directly on EVERY execution (interrupt-broken
++	// or not), wall-clock rate-limited (~1/sec). pc-2 = the sleep instruction;
++	// pr = the return address of whoever called the wait routine (its caller).
++	{
++		static time_t last = 0;
++		time_t now = time(nullptr);
++		if (now != last)
++		{
++			last = now;
++			cartlog("SLEEPWAIT pc=%08x pr=%08x gdst_mirror=%08x\n",
++					ctx->pc - 2, ctx->pr, ReadMem32_nommu(0x8cfc8c18));
++		}
++	}
++
+ 	//just wait for an Interrupt
+ 	int i = 0, s = 1;
+ 
