@@ -312,3 +312,194 @@ inside the game's own RAM image — no conflict with the shim home.
 python3 scripts/parse_cart_log.py capture-attract.log --dump-mie build/
 grep -oE '^MIERESP sub=[0-9a-f]+ addr=[0-9a-f]+' capture-attract.log | sort | uniq -c
 ```
+
+---
+
+## input-ABI — the input-shim contract (Task 5)
+
+The exact ABI Task 11 compiles into the input shim. Two MIE Maple sites are
+characterized. Every claim is cited to an instruction address or template byte.
+Pool words were read from `tools/boot.bin` (file offset = VA − `0x8c020000`,
+little-endian; a pool that is an in-image pointer is dereferenced one level).
+Reply templates are `build/mie_subXX.bin` (V4). Full evidence chain:
+`.superpowers/sdd/task-5-report.md`.
+
+### Headline
+
+| Item | Boot site `0x8c0315ce` | Steady site `FUN_8c03c2c6` |
+|---|---|---|
+| Reached via | fn-ptr `pool[0x8c027618]=0x8c0315ce`, `jsr @r3` @`0x8c0275ee` | `jsr @r1`, `pool[0x8c02ed6c]=0x8c03c2c6` @`0x8c02ed1c` |
+| Subs carried | 0x15,0x27,0x01,0x03,0x13,0x17,0x21,0x31,0xff (boot) | **0x33 per-frame** + one-off boot subs |
+| Subcommand src | descriptor word3 low byte = `[cmdblk+0xc]`, cmdblk=`*0x8c0e6400` | descriptor word3 (input slot's frame) |
+| Reply-addr src | descriptor word1 = `[cmdblk+0x4]` (= `0x0c296220`) | word1 = `FUN_8c030fba([base+0x10a8+idx*4])` → `[desc+0x04]` @`0x8c03c3d6` (double buf `0x0c0fd8e0`/`0x0c1038e0`) |
+| Completion | maple DMA-done (SB_MDST reads 0); reply at recvaddr | `[desc+0x18]` bit0 pending flag; next call returns -1 while set |
+| BTN_OFF | **0x20** (16-bit big-endian JVS word) | **0x20** (same) |
+| EE_OFF | **4** (128-B EEPROM after 1-word header) | n/a |
+
+Both routines build the **same 8-word Maple transfer descriptor** (word0
+control, word1 recv-addr, word2 frame-header `cmd 0x86`/`dev 0x20`, word3
+subcommand, word4-7 payload). One shared reply-synthesis body serves both; only
+the entry hook differs.
+
+### Crown jewel — 0x33 vs 0x15 vs 0x27
+
+From the Flycast MIE handler `tools/flycast-src/core/hw/maple/maple_jvs.cpp`
+(`MIEImpl::handle_86_subcommand`), which produces the exact byte stream the game
+parses:
+- **0x15** = *Receive JVS data* (`:1807`) — return the latest completed scan.
+- **0x27** = *Transmit with repeat* (`:1854`) — kick a JVS scan (boot two-step:
+  0x27 then 0x15).
+- **0x33** = *Receive then transmit with repeat* (`:1878`) — return the latest
+  scan **and** kick the next in one transaction: the self-sustaining
+  steady-state per-frame poll.
+
+⇒ **0x33 is "read latest input + queue next", not "kick".** The shim must do a
+**real DC `GetCondition` on every 0x33 (once per frame)** and translate to the
+JVS word at reply offset 0x20. No caching needed (0x33 = ~1×/frame). The
+`build/mie_sub33.bin` template is the *cold-start empty* variant (subresp 0x32,
+no data — captured before any scan completed); the steady-state 0x33 reply is a
+has-data reply (subresp 0x16) with the button word at 0x20, identical to 0x15.
+
+### Site A — boot builder `0x8c0315ce` (`0x8c0315ce`–`0x8c03161c`)
+
+**Linkage.** Called as a function pointer from dispatcher `FUN_8c027584`:
+`0x8c0275da mov.l 0x8c027618,r5` (`r5 = pool[0x8c027618] = 0x8c0315ce` — the
+exact u32 slot; companion param `pool[0x8c027614]=0x00080028`; slot copied at
+`0x8c0276c8`), pushed `0x8c0275e0`, popped to r3 `0x8c0275ea`, `jsr @r3`
+`0x8c0275ee`. Chosen when `(r10 & 0x20)==0` (`bt`@`0x8c0275b8`,
+`pool[0x8c0275cc]=0x20`); sibling builder `pool[0x8c0275d4]=0x8c031640` for the
+0x20 case. **Arg r4** = `pool[0x8c027624]=0x8c0e62c8` or
+`pool[0x8c027628]=0x8c0a27f4` → descriptor payload words 4-7; r5–r7 unused.
+
+**Descriptor** at `buf = *(*0x8c0e6404)` (`pool[0x8c031620]=0x8c0e6404`;
+`+0x20` then eight `mov.l r,@-r5`), with `cmdblk = *0x8c0e6400`
+(`pool[0x8c031624]=0x8c0e6400`):
+
+| word | value | site |
+|---|---|---|
+| w0 `+0x00` control | `[cmdblk+0x00]` | `0x8c03160c-0e` |
+| w1 `+0x04` **recv addr** | `[cmdblk+0x04]` (=`0x0c296220`) | `0x8c031606-08` |
+| w2 `+0x08` frame hdr | `([cmdblk+0x08] & 0x03efffff) \| 0x20000000` | `0x8c0315fa-0602` (pools `0x8c031628`/`0x8c03162c`) |
+| w3 `+0x0c` **subcommand** (low byte) | `[cmdblk+0x0c]` | `0x8c0315f2-f4` |
+| w4-7 `+0x10..1c` payload | `[arg0+0x00..0x0c]` | `0x8c0315d0-ee` |
+
+**Completion.** Routine does no Maple MMIO (`mov.l r1,@r0`@`0x8c031618` targets
+RAM `pool[0x8c031630]=0x8c0e6670`). The real DMA is the shared maple driver
+(pool-literal register writes at `0x8c080e74-90`: `0xa05f6c14` SB_MDEN,
+`0xa05f6c04` buffer, `0xa05f6c18` SB_MDST — same static/dynamic split as cart
+DMA, §boot-binary §4). Completion = SB_MDST reads 0
+(`tools/netboot/docs/naomi.md:138`); the caller polls before reading the reply
+at `[cmdblk+0x4]`.
+
+### Site B — steady builder `FUN_8c03c2c6` (`0x8c03c2c6`–`0x8c03c4a1`)
+
+`base = *0x8c0e8410` (`pool[0x8c03c300]`). Per-frame **async** poll.
+
+**Call site.** `0x8c02ed1a mov.l 0x8c02ed6c,r1` (`pool[0x8c02ed6c]=0x8c03c2c6`),
+`0x8c02ed1c jsr @r1`, then `mov r0,r12; cmp/pz r12; bf 0x8c02ed70` — caller
+treats **return ≥ 0 as OK**, < 0 as retry / reuse-last-frame. Returns `-3`
+not-ready (`0x8c03c2e2`), `-1` pending (`0x8c03c312`), `-2` lock (`0x8c03c326`),
+`0` success (`0x8c03c490`). No meaningful register args (reads `base`).
+
+**Flow.** (1) `[base+0x0fc0]==1`? else -3 (`0x8c03c2d6-da`, `hwpool
+0x8c03c2e8=0x0fc0`). (2) `desc=[base+0x10f4]` (`hwpool 0x8c03c42a=0x10f4`); if
+`[desc+0x18]&1` → -1 (`0x8c03c30a-0c`) — **`[desc+0x18]` bit0 = completion
+flag**. (3) `tas.b @([pool 0x8c03c444=0x8c03c864]=0x8c03c868)` else -2. (4) frame
+build via pump `bsr 0x8c03c1c2`@`0x8c03c396`. (5) **recv addr**:
+`FUN_8c030fba([base+0x10a8 + idx*4])` (`idx=[base+0x10b8]`) → `[desc+0x04]`
+@`0x8c03c3d6`; `FUN_8c030fba = ptr & 0x0fffffff` (`pool[0x8c030fe8]`, P1→phys);
+idx toggled `xor`@`0x8c03c3f6` → alternating `0x0c0fd8e0`/`0x0c1038e0`. (6)
+`mov.l r12,@(0x18,r2)`@`0x8c03c3e2` **sets `[desc+0x18]=1`** (pending); return 0.
+(pc `8c03c3d6`/`8c03c3e4` = the V4/Phase-3 logged PCs.)
+
+**Completion (async).** The maple completion path (pump / maple-end IRQ) clears
+`[desc+0x18]` and copies the reply into game input state; the next frame's call
+reads it. **Shim (synchronous): on return, `recvaddr`(=`[desc+0x04]`) must hold
+a valid reply and `[desc+0x18]` bit0 must be 0**, else the routine returns -1
+forever.
+
+### Shared descriptor (Naomi/DC maple, `tools/netboot/docs/naomi.md:135-142,151`)
+
+```
+word0  transfer control (end bit | length)
+word1  RECV ADDRESS      <- reply DMA'd here     (shim writes here)
+word2  frame header      cmd 0x86, recipient 0x20 = MIE
+word3  payload[0]        low byte = SUBCOMMAND   (shim dispatches on this)
+word4+ payload[1..]      JVS command bytes (transmit subs)
+```
+
+### Reply offsets + per-sub actions
+
+**BTN_OFF = 0x20** (16-bit **big-endian** JVS word). Has-data input reply
+(`receive_jvs_messages` has-data branch, maple_jvs.cpp `:1712-1743`, wrapping
+`jvs_io_board::handle_jvs_message` `:2084-2086` digital-input `:2225-2244`),
+header cross-checked vs `build/mie_sub15.bin`:
+`87 00 20 NN | 16 | ff ff ff | 00 ff ff ff | 00×8 | 00 ch 8e | 01 00 olen |
+E0 00 len 01 01 TEST BTN_HI BTN_LO sum`. The JVS `E0` sync sits at 0x1a ⇒
+`BTN_HI@0x20, BTN_LO@0x21` (`JVS_OUT(inputs>>8)` then `JVS_OUT(inputs)`
+`:2237,2241`). Active-high, idle `0x0000` (`input-map.md`). This game's 7
+controls are all in bits 8-15 ⇒ **all in the single high byte at 0x20**
+(0x21 = 0 for P1). Same for 0x15 and 0x33.
+*Caveat:* the game's exact parser load of `recvaddr+0x20` was not pinned (generic
+24-slot maple engine `FUN_8c03c1c2`); BTN_OFF=0x20 is derived from the byte
+stream the game already parses correctly in Flycast and is airtight for a
+**format-compatible** shim. One-line M4 check: press a control, watch which
+`recvaddr` byte flips → expect 0x20.
+
+**EE_OFF = 4.** `0x03` reply = 1-word header + 128-B EEPROM (`:1925-1929`);
+`build/mie_sub03.bin` header `87 00 20 20` (0x20 words) then EEPROM at 0x04-0x83;
+two identical 18-B system copies at 0x04 and 0x16 (dual CRC copy,
+`naomi-vs-dreamcast.md` §5 / `naomi.md:174-181`). Coin byte at reply 0x0d & 0x1f
+= `0x1a` = **free-play** (`naomi.md:180`). The template is already valid
+free-play + correct serial → shim may **replay `mie_sub03.bin` verbatim**
+(and `mie_sub01.bin` for 0x01), or bake fresh via `naomi/eeprom.py`.
+
+| sub | meaning (maple_jvs.cpp) | shim action |
+|---|---|---|
+| 0x15, 0x33 | Receive (+kick) JVS input | **real GetCondition translate** → JVS word big-endian @0x20 in a subresp-0x16 reply |
+| 0x03 | EEPROM read 128 B (`:1920`) | **baked free-play EEPROM** @+4 (or replay `mie_sub03.bin`) |
+| 0x01 | status / schedule EEPROM read | replay `mie_sub01.bin` (ready ACK) |
+| 0x27 | kick scan (`:1854`) | verbatim ACK `8700 2001 26 00 8e00` |
+| 0x17 | transmit no-repeat (`:1820`) | verbatim ACK `8700 2001 18 00 8e00` |
+| 0x21 | transmit repeat (`:1840`) | verbatim ACK `8700 2001 18 00 8e00` |
+| 0x13 | store repeated request (`:1793`) | verbatim ACK `8700 2001 14 00 0800` |
+| 0x31 | DIP switches (`:1933`) | verbatim `8700 2005 32 ffffff 00 ff f9 ff` |
+| 0xff | broadcast reset / dev req | verbatim ACK `8700 2000` |
+
+Only 0x15/0x33 carry live input; the rest are fixed/near-fixed ACKs replayed
+verbatim (the shim synthesizes input directly, so a real JVS scan `0x27` is a
+no-op ACK).
+
+### Shim contract (boxed — Task 11 implements this)
+
+```
+Entry: two hooks — 0x8c0315ce (boot) and 0x8c03c2c6 (steady) — OR one hook on
+       the shared SB_MDST store (0xa05f6c18). Both hand off a finished 8-word
+       maple descriptor; read:  recvaddr = word1 ;  sub = word3 & 0xff.
+Dispatch on sub:
+  0x15,0x33 -> real DC GetCondition (per frame); translate DC pad -> JVS bits
+               (Start 0x8000, Up 0x2000, Down 0x1000, Left 0x0800, Right 0x0400,
+                B1 0x0200, B2 0x0100); write has-data reply at recvaddr:
+                [0x00]=87 00 20 09, [0x04]=16, JVS word big-endian @[0x20..0x21],
+                zero-fill the rest.
+  0x03      -> baked 128-B free-play EEPROM @recvaddr+4 (or replay mie_sub03.bin).
+  0x01      -> replay mie_sub01.bin (status/ready ACK).
+  0x13,0x17,0x21,0x27,0x31,0xff -> replay mie_subXX.bin verbatim.
+Completion state on return:
+  - reply bytes present at recvaddr (= descriptor word1).
+  - steady: clear [desc+0x18] bit0 ,  desc = [ *0x8c0e8410 + 0x10f4 ].
+  - boot:   leave maple DMA-done true (SB_MDST reads 0); reply at [ *0x8c0e6400 + 0x4 ].
+ONE shim body serves BOTH sites (identical descriptor + reply format); the two
+entry hooks are the only per-site difference. 0x33 is per-frame, so do a real
+GetCondition on every 0x33 — no caching.
+```
+
+### Reproduction
+
+```sh
+scripts/ghidra/run.sh script DisasmRange.java 0x8c027584 0x8c027612   # dispatcher
+scripts/ghidra/run.sh script DisasmRange.java 0x8c0315ce 0x8c03161c   # boot builder
+scripts/ghidra/run.sh script DisasmRange.java 0x8c03c2c6 0x8c03c4a1   # steady builder
+scripts/ghidra/run.sh script DisasmRange.java 0x8c02ecf0 0x8c02ed2c   # steady call site
+xxd build/mie_sub15.bin ; xxd build/mie_sub33.bin ; xxd build/mie_sub03.bin
+```
