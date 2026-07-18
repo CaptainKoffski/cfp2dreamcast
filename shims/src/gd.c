@@ -10,8 +10,10 @@
  *   CMD_PIOREAD=16 (include/dc/syscalls.h:256)
  *   param block {start_sec,num_sec,buffer,is_test} (include/dc/syscalls.h:290-295)
  *   status: FAILED=-1, NOT_FOUND=0, PROCESSING=1, COMPLETED=2, STREAMING=3,
- *     BUSY=4 (include/dc/syscalls.h:439-444); done = COMPLETED||NOT_FOUND,
- *     error = <=FAILED (matches cdrom.c:138,141).
+ *     BUSY=4 (include/dc/syscalls.h:439-444). done = COMPLETED only; NOT_FOUND
+ *     and <=FAILED are errors -- matches KOS's read path (cdrom.c:124-132 done
+ *     predicate + :197-198 which maps a bare NOT_FOUND to ERR_NO_ACTIVE).
+ *     safe: COMPLETE precedes any NOT_FOUND on both flycast and real BIOS.
  * ponytail: PIO read speed is fine under emulation; DMAREAD is the Phase 5
  * upgrade path if real-hardware streaming stutters (it would then need a
  * dcache_inval on the dest, see cart.c cart_read). */
@@ -36,8 +38,8 @@ int gd_read_sectors(void *dst, u32 fad, u32 n) {
     for (;;) {
         GDC(0, 0, 0, GD_EXEC);               /* pump the drive state machine */
         int s = GDC((u32)req, (u32)stat, 0, GD_CHECK);
-        if (s == GD_COMPLETED || s == GD_NOT_FOUND) return 0;
-        if (s <= GD_FAILED) return -2;       /* FAILED or worse */
+        if (s == GD_COMPLETED) return 0;
+        if (s == GD_NOT_FOUND || s <= GD_FAILED) return -2;  /* not busy, no completion */
         /* PROCESSING(1)/STREAMING(3)/BUSY(4): keep polling */
     }
 }

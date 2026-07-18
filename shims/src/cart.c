@@ -65,18 +65,18 @@ void cart_read(u32 off, u32 len, u32 dest_phys) {
  * via Task 12). Reads the mirrored register values the game already wrote
  * (KB §patch-sites: MIRROR+0xYYY stands in for cart/G1 reg 0x5f7YYY).
  *   off  = DMA_OFFSETH(0x700c)<<16 | DMA_OFFSETL(0x7010), cart-relative bytes
- *   len  = SB_GDLEN(0x7408) bytes ; cnt = DMA_COUNT(0x7014) * 0x20 -- must agree
+ *   len  = SB_GDLEN(0x7408) bytes (sole length source; DMA_COUNT unwritten here)
  *   dest = SB_GDSTAR(0x7404) phys ; SB_GDST(0x7418) cleared => game's poll exits */
 void shim_cart_service(void) {
     volatile u32 *m = P2(G1_MIRROR);
     u32 off = (((m[0x0c/4] & 0xffff) << 16) | (m[0x10/4] & 0xffff)) & 0x0fffffff;
-    u32 len = m[0x408/4];               /* SB_GDLEN mirror (bytes) */
-    u32 cnt = m[0x14/4] * 32;           /* DMA_COUNT mirror (0x20 units) */
-    if (!len) len = cnt;
-    else if (cnt && cnt != len) shim_die(1, cnt, len);
+    u32 len = m[0x408/4];               /* SB_GDLEN mirror (bytes), sole length */
+    /* ponytail: length is SB_GDLEN; DMA_COUNT (mirror+0x14) is never written by
+     * this game's arm path (FUN_8c03b81a) -- cross-check dropped */
     u32 dest = m[0x404/4];              /* SB_GDSTAR mirror (phys dest) */
-    if (!len || off + len > CART_SIZE || (dest & 0x1f000000) != 0x0c000000)
-        shim_die(2, off, len ? dest : 0);
+    if (!len || off + len > CART_SIZE ||
+        (dest & 0x1f000000) != 0x0c000000 || dest + len > 0x0d000000)
+        shim_die(2, off, dest);
     scif_puts("CART off="); scif_puthex(off);
     scif_puts(" len="); scif_puthex(len);
     scif_puts(" dst="); scif_puthex(dest); scif_puts("\n");
