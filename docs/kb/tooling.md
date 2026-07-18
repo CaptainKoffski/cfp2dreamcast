@@ -90,6 +90,11 @@ input, and serial pokes. Distinct from the release Flycast above.
     *next* launch that silently blocks boot (process alive at ~0% CPU, guest
     never runs, zero cartlog). This was the mysterious "post-sleep launch fails"
     blocker; a reboot does **not** fix it — this key does.
+- **Phase 3 interpreter-mode capture:** to log every guest PC/SP (required for
+  `CARTDMAPC`/`MAPLEPC`/`BIOSEXEC` lines), the dynarec must be off:
+  add `Dynarec.Enabled=no` under `[config]` in `emu.cfg` (or set it in the
+  Flycast GUI: Settings → General → CPU → Interpreter). Re-enable after
+  capture (interpreter is ~10× slower). Capture command: `scripts/capture.sh pc [seconds]`.
 - **Log line formats** (parsed by `scripts/parse_cart_log.py`):
   ```
   CARTDMA src=%08x dest=%08x len=%x      # cart→RAM DMA: cart byte offset, phys RAM dest, bytes
@@ -97,6 +102,9 @@ input, and serial pokes. Distinct from the release Flycast above.
   WATERMARK region=%s used=%x size=%x     # region in {main,vram,aram}; highest non-zero byte+1
   JVSREPORT buttons=%04x                  # P1 JVS word (active-high: set bit = pressed)
   SERIALPOKE addr=%08x data=%08x          # write to a NAOMI_COMM_* serial/network register
+  CARTDMAPC pc=%08x sp=%08x              # Phase 3: guest PC at SB_GDST store + stack pointer
+  MAPLEPC cmd=86 sub=%02x pc=%08x        # Phase 3: guest PC at Maple DMA store (cmd 0x86)
+  BIOSEXEC pc=%08x                        # Phase 3: any guest insn in BIOS ROM range (phys 0x0–0x1fffff)
   ```
 
 ### Ghidra — 12.1.2 (20260605)
@@ -116,6 +124,14 @@ input, and serial pokes. Distinct from the release Flycast above.
 - Verified: entrypoint 0x8c04ae2c disassembles to plausible SH-4 (5-instruction
   dispatch trampoline: `mov.l`, `mov #0`, `mov.l`, `jmp @r1`, delay-slot `mov.l`).
   Entry is a boot stub that loads the real start address from a literal pool and jumps.
+- **Phase 3 harness (`scripts/ghidra/run.sh`):** re-runnable wrapper. Two subcommands:
+  ```sh
+  scripts/ghidra/run.sh import              # import tools/boot.bin, full auto-analysis (once)
+  scripts/ghidra/run.sh script NAME.java    # run scripts/ghidra/NAME.java (-noanalysis)
+  ```
+  Project dir: `tools/ghidra-proj/` (gitignored). Scripts: `FindMmioXrefs.java`,
+  `ScanBiosTargets.java`, `DumpEntryChain.java`, `WhichFunc.java`.
+  `tools/boot.bin` = first 1 MB of `Cleopatra Fortune Plus.dat` (gitignored).
 
 ### MAME source (reference only — never built, never run)
 

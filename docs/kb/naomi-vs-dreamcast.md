@@ -278,11 +278,13 @@ a Naomi syscall table — we only have to (a) reproduce the header-driven load
 direct hardware pokes (redirect cart DMA to GD-ROM, MIE input to Maple, EEPROM
 to forced defaults).
 
-*Caveat / open question §8-3:* whether the game's boot binary ever calls a
-Naomi BIOS routine (e.g. a font/print helper or a system function left resident
-at a fixed low address) has not been proven from the binary — RE only asserts
-the *common* startup pattern. Phase 3 disassembly must confirm the game makes
-no `jsr` into BIOS ROM (`0x00000000-0x001fffff`) after the entrypoint.
+**RESOLVED Phase 3** (`docs/kb/boot-binary.md` §7): the game's boot binary
+makes no calls into Naomi BIOS ROM after the entrypoint. Static
+`ScanBiosTargets.java` found zero flow references into BIOS ROM (`BIOSREF=0`);
+dynamic logging found zero BIOS-range executions across both captures
+(`BIOSEXEC=0`, `no_bios_exec` PASS). Six pool constants in the BIOS address
+range are exception-vector offsets (VBR setup) and two potential BIOS data-read
+pointers — not call targets. No BIOS-call shim is needed in Phase 4.
 
 ### Dreamcast boot sequence
 
@@ -376,6 +378,13 @@ DC boot structures.
    Phase 3 — check the disassembly for any `jsr`/`jmp` targeting
    `0x00000000-0x001fffff` (BIOS ROM) after `0x8c04ae2c`. If it does call BIOS,
    those routines must be reimplemented in the loader.
+   **RESOLVED Phase 3** — see `docs/kb/boot-binary.md` §7: `BIOSREF=0`
+   (Ghidra `ScanBiosTargets.java` found zero flow references into BIOS ROM) +
+   `BIOSEXEC=0` (dynamic `no_bios_exec` PASS across both captures). No BIOS-call
+   dependency, statically or dynamically. Six pool words in BIOS address range
+   (`POOLBIOS=6`) are SH-4 exception-vector constants (game's own VBR setup) and
+   two P2-uncached BIOS-ROM data pointers — NOT call targets; low-risk Phase 4
+   watch item only. **No BIOS shim needed in Phase 4.**
 4. **Watchdog / serial / network usage.** Unknown whether the game kicks the
    MB3773 watchdog or probes the serial/ARCNET hardware. *Tried:* board notes in
    `naomi.cpp:163-164,172-178`; no game-specific evidence. *Resolves in:*
