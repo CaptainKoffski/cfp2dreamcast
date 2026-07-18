@@ -1072,3 +1072,278 @@ PY
 grep -c 'sub=0b' capture-*.log   # -> 0
 ```
 
+---
+
+## M2 boot-hang — Naomi BIOS-data dependency + fix design (Task 13b)
+
+The M2 DC-mode instrumented run (`.superpowers/sdd/task-13-hang-confirmation.md`)
+pinned the boot hang to two config-time consumers that read **Naomi BIOS-ROM
+data** (phys `0x60000` and `0x1ffd00`) which Flycast maps as *unused* on
+Dreamcast (`addrspace.cpp`: `{0x00000000, 0x00800000, …, false} // Area 0 ->
+unused`). On DC both reads return `0`. This section disassembles both consumers,
+bounds the exact extents, identifies the BIOS data, and specifies the fix. It
+promotes the boot-binary §7 "low-risk watch item" (`0xa0060000` / `0xa01ffd00`)
+to a **confirmed required dependency**.
+
+**Both consumers exit early on DC (they do *not* self-hang):** each reads zeros,
+fails its check, and returns "not found". The hang is *downstream* — the
+unpopulated vtable and the cleared flag drive the terminal RAM-side loop
+task-13 §4 could not pin to one instruction. Supplying the BIOS data makes both
+checks pass, which is the fix.
+
+### Consumer 1 — `FUN_8c0803a4`: verify-then-copy of a BIOS code+vtable library
+
+Disassembly (`DisasmRange.java 0x8c080380 0x8c0804e0`); pool words read from
+`tools/boot.bin`:
+
+```
+8c0803a4 mov.l 0x8c0804d0,r2   ; r2 = &object      (*0x8c0804d0 = 0x8c1c9764)
+8c0803a6 mov #0x8,r7           ; r7 = 8            (verify count)
+8c0803a8 mov.l 0x8c0804cc,r3   ; r3 = 0xac018000   (vtable value = phys 0x0c018000, main RAM)
+8c0803aa mov #0x0,r5           ; r5 = 0            (verify index)
+8c0803ac mov.l 0x8c0804d8,r0   ; r0 = 0x0c010000   (signature target)
+8c0803ae mov.l 0x8c0804dc,r6   ; r6 = 0x0fff0000   (signature mask)
+8c0803b0 mov.l 0x8c0804d4,r1   ; r1 = 0xa0060000   (SOURCE, BIOS phys 0x60000)   <-- patch site
+8c0803b2 mov.l r3,@r2          ; object->vtptr = 0xac018000
+8c0803b4 mov.l @r1+,r4         ; r4 = *r1; r1+=4   <-- BIOS read (hang fingerprint)
+8c0803b6 and r6,r4             ; r4 &= 0x0fff0000
+8c0803b8 cmp/eq r0,r4          ; (word & 0x0fff0000) == 0x0c010000 ?
+8c0803ba bf 0x8c0803d8         ; MISMATCH -> rts (returns, no copy)   << taken on DC (0!=target)
+8c0803bc add #0x1,r5
+8c0803be cmp/ge r7,r5
+8c0803c0 bf 0x8c0803b4         ; verify up to 8 words
+8c0803c2 mov.l 0x8c0804cc,r5   ; r5 = 0xac018000   (copy dest)
+8c0803c4 mov.l 0x8c0804d4,r6   ; r6 = 0xa0060000   (copy source, reset)          <-- patch site (2nd ref)
+8c0803c6 mov.w 0x8c0804c8,r4   ; r4 = 0x1c00 = 7168 (copy count N, signed word)
+8c0803c8 bra 0x8c0803d2
+8c0803cc mov.l @r6+,r3         ; copy loop body: read word from BIOS, r6+=4
+8c0803ce mov.l r3,@r5          ; store to 0x0c018000.., r5+=4
+8c0803d0 add #0x4,r5
+8c0803d2 tst r4,r4             ; loop while r4 != 0  (runs N=7168 iterations)
+8c0803d4 bf/s 0x8c0803cc
+8c0803d6 _add #-0x1,r4
+8c0803d8 rts
+```
+
+Pool table (`tools/boot.bin`, LE):
+`0x8c0804c8=0x1c00`(word) `0x8c0804cc=0xac018000` `0x8c0804d0=0x8c1c9764`
+`0x8c0804d4=0xa0060000` `0x8c0804d8=0x0c010000` `0x8c0804dc=0x0fff0000`
+`0x8c0804e0=0xa0000000`.
+
+**What it reads / for what:** a **verify-then-copy** of a BIOS-resident
+code+vtable library. First it verifies 8 longwords at `0x60000` each satisfy
+`(word & 0x0fff0000) == 0x0c010000` (i.e. look like `0x?c01????` pointers). If
+all 8 pass, it copies **N = 0x1c00 = 7168 longwords = `0x7000` bytes** from
+`0x60000` to `0xac018000` (phys `0x0c018000`). The library's own vtable is the
+first 14 longwords (`0x0c018374, 0x0c01837a, …` — pointers back into the copied
+`0x0c018xxx` block); the bytes at each target decode as SH-4 code (blob off
+`0x374`: `d306 000b f038 6643 …` = `mov.l @(disp,pc),r3; rts; …`). It is
+**position-dependent** (absolute `0x0c018xxx` pointers), so it must land at
+`0x0c018000` — which the game's own copy guarantees.
+
+The C++ vtable-dispatch family then calls into it:
+`FUN_8c0803f8 / 0x8c080418 / 0x8c080426 / 0x8c080446 / 0x8c080456 / 0x8c080464 /
+0x8c080484 / 0x8c080492 / 0x8c0804a0` all do
+`mov.l @object,r2 (=0x0c018000); mov.l @(disp,r2),r3; jmp @r3` — reading a method
+pointer from the copied vtable and jumping to it (`0x8c0804a0` OR-s
+`0xa0000000` from pool `0x8c0804e0` to jump the uncached alias).
+
+**Reconciles Task 7's "bounded 8-iter search":** the *verify* is the bounded
+8-iter search (it reads its own signature check). The *copy* it gates is the real
+extent — **`0x7000` bytes, deterministic** (fixed count at `0x8c0804c8`), not
+data-dependent. On DC the verify fails on word 0 (`0 != 0x0c010000`) → `rts`, no
+copy → `0x0c018000` stays garbage → the later vtable `jmp` dispatches into
+garbage. That is the hang, not this function looping.
+
+**Extent read from `0x60000`: `0x7000` bytes** (`0x60000`–`0x67000`).
+
+### Consumer 2 — `FUN_8c081438`: validate the BIOS copyright string
+
+Disassembly (`DisasmRange.java 0x8c081400 0x8c0814e0`):
+
+```
+8c081438 mov.l 0x8c0814c8,r3   ; r3 = &flag        (*0x8c0814c8 = 0x8c1c9768)
+8c08143a mov #0x0,r4           ; r4 = i = 0
+8c08143c mov.l 0x8c0814cc,r5   ; r5 = 0x8c0d7ed9   (game's expected string, in-image)
+8c08143e mov #0x70,r7          ; r7 = 0x70 = 112   (compare length)
+8c081440 mov.l 0x8c0814d0,r6   ; r6 = 0xa01ffd00   (SOURCE, BIOS phys 0x1ffd00)   <-- patch site
+8c081442 mov.l r4,@r3          ; flag = 0
+8c081444 mov r4,r0             ; loop: r0 = i
+8c081446 cmp/pz r0             ; i >= 0 (always, for 0..0x6f)
+8c081448 bf/s 0x8c081450       ; (neg-i path unused here)
+8c08144a _mov.b @r5,r2         ;   r2 = (s8) game[i]
+8c08144c bra 0x8c08145a
+8c08144e _and #0x7,r0          ;   r0 = i & 7
+8c08145a mov.b @r6,r1          ; r1 = (s8) bios[0x1ffd00 + i]   <-- BIOS read (hang fingerprint)
+8c08145c sub r0,r2             ; r2 = game[i] - (i & 7)
+8c08145e cmp/eq r1,r2          ; bios[i] == game[i] - (i & 7) ?
+8c081460 bf 0x8c081472         ; MISMATCH -> rts (flag stays 0)   << taken on DC (byte 0)
+8c081462 add #0x1,r4           ; i++
+8c081464 cmp/ge r7,r4          ; i >= 0x70 ?
+8c081466 add #0x1,r5
+8c081468 bf/s 0x8c081444       ; loop for 112 bytes
+8c08146a _add #0x1,r6
+8c08146c mov.l 0x8c0814c8,r2
+8c08146e mov #0x1,r3
+8c081470 mov.l r3,@r2          ; flag = 1  (validation OK)
+8c081472 rts
+```
+
+Pool: `0x8c0814c8=0x8c1c9768`(flag) `0x8c0814cc=0x8c0d7ed9`(expected string)
+`0x8c0814d0=0xa01ffd00`(BIOS source).
+
+**What it reads / for what:** a **byte-compare** of the NAOMI BIOS copyright
+string against an obfuscated in-image copy — `bios[i] == game[i] - (i & 7)` for
+`i = 0..0x6f`. All-match sets `flag (0x8c1c9768) = 1`; any mismatch leaves it 0.
+Cross-check against `tools/boot.bin @0x8c0d7ed9` and `epr-21576h @0x1ffd00`:
+**0 mismatches — the loop terminates and sets flag=1.** On DC (zeros) it fails at
+byte 0 and leaves flag=0.
+
+**Extent read from `0x1ffd00`: max `0x70` = 112 bytes** (`0x1ffd00`–`0x1ffd70`),
+bounded by `r7 = 0x70`; deterministic.
+
+### BIOS data identity + extents
+
+BIOS ROM used: **`epr-21576h.ic27`** — Flycast's default Japan BIOS
+(`naomi_roms.cpp:89` `ROM_SYSTEM_BIOS(0,"bios0","epr-21576h (Japan)")`), and
+Cleopatra Fortune Plus is Japan region. 2 MB ROM, `0x0`–`0x1fffff` = phys
+`0x0`–`0x1fffff`.
+
+| slice | phys | size | identity | md5 (epr-21576h) |
+|---|---|---|---|---|
+| BIOS_DATA_60000 | `0x60000` | `0x7000` | BIOS code+vtable library (14-ptr vtable @ `+0` → `0x0c018374…`, then SH-4 code; last non-zero at `+0x6ff5`) | `d818d07251906e4529e58713e1ad3549` |
+| BIOS_DATA_1FFD00 | `0x1ffd00` | `0x70` | `"COPYRIGHT (C)SEGA ENTERPRISES,LTD.\0…NAOMI BOOT ROM\0\0"` | `7b5dbe6d88a81fc947c0357fff56427a` |
+
+Cross-revision check (`epr-2157[6-9]*.ic27`, all 20 present):
+- `0x1ffd00` `0x70` is **byte-identical across every revision & region** (the
+  copyright/ID string). Any dump yields the same bytes.
+- `0x60000` `0x7000` **differs per revision** (it embeds absolute `0x0c018xxx`
+  code pointers; layout shifts across BIOS builds) — but every revision passes
+  Consumer 1's 8-word verify, and the game never compares `0x60000` to a fixed
+  expected value. Use the project's canonical **epr-21576h** slice so the
+  supplied library matches the BIOS the M2 boot runs under.
+
+### The fix
+
+**1 — RAM region (in shim home, spec §1, V2-verified clean `0x8cfc0000+`).**
+Shim code+data tops out at `SHIM_BASE + 0xa800`; place a contiguous BIOS-data
+block above it (single memcpy + single purge):
+
+```
+BIOS_DATA_60000   = SHIM_BASE + 0xb000  = 0x8cfcb000   size 0x7000  (ends 0x8cfd2000)
+BIOS_DATA_1FFD00  = SHIM_BASE + 0x12000 = 0x8cfd2000   size 0x70    (ends 0x8cfd2070)
+```
+
+Both under `0x8d000000` (KOS stack top); ≥ `0x800` clear of the shim; loader
+already writes only `SHIM_BASE`..`+0x9000` + this new block. No shim-layout move.
+(The copy *dest* `0x0c018000` is the game's own hardcoded, unpatched address —
+below the game image, in the dead loader region post-handoff — same as on Naomi;
+runtime watch item, not blocking.)
+
+**2 — Two new pool patches** (append to `scripts/build_patch_table.py`; both
+current values verified from `tools/boot.bin`, so the old-byte assertion passes).
+Keep **P2 uncached** to match the original access semantics (game reads these via
+`mov.l @r1+` / `mov.b @r6`; the copy dest is uncached too):
+
+```python
+# §M2 BIOS-data: redirect the two BIOS-ROM data pointers to the loader's RAM copies.
+pool(0x8C0804D4, 0xA0060000, BIOS_60000_P2,  "#14 BIOS 0x60000 lib   -> shim-home copy")
+pool(0x8C0814D0, 0xA01FFD00, BIOS_1FFD00_P2, "#15 BIOS 0x1ffd00 str  -> shim-home copy")
+```
+where (parse from `shim_iface.h` like `G1_MIRROR`, do not hardcode):
+```python
+def _sb_off(name):  # "#define NAME (SHIM_BASE + 0xNNNN)"
+    m = re.search(rf"#define\s+{name}\s+\(SHIM_BASE\s*\+\s*(0x[0-9a-fA-F]+)\)", iface)
+    return SHIM_BASE + int(m.group(1), 16)
+BIOS_60000_P2  = _sb_off("BIOS_DATA_60000")  | 0xA0000000   # 0xacfcb000
+BIOS_1FFD00_P2 = _sb_off("BIOS_DATA_1FFD00") | 0xA0000000   # 0xacfd2000
+```
+Net: 17 patches (1 hook, 15 pool, 2 ptr). Old→new:
+`*0x8c0804d4: 0xa0060000 → 0xacfcb000`; `*0x8c0814d0: 0xa01ffd00 → 0xacfd2000`.
+
+**3 — `shim_iface.h`** (single source of truth):
+```c
+#define BIOS_DATA_60000   (SHIM_BASE + 0xb000)   /* 0x7000: Naomi BIOS 0x60000 lib (FUN_8c0803a4 copies it) */
+#define BIOS_DATA_1FFD00  (SHIM_BASE + 0x12000)  /* 0x70:   Naomi BIOS 0x1ffd00 copyright (FUN_8c081438 validates it) */
+#define BIOS_DATA_LEN     0x7070                  /* contiguous: 0x7000 + 0x70 */
+```
+
+**4 — Loader** (`loader/main.c`, after the `shim_bin` copy, before the purges):
+```c
+extern uint8 bios_data[];   /* build/bios_data.bin = [0x7000 @0x60000][0x70 @0x1ffd00] */
+memcpy((void *)BIOS_DATA_60000, bios_data, BIOS_DATA_LEN);   /* one contiguous copy */
+dcache_purge_range(BIOS_DATA_60000, BIOS_DATA_LEN);          /* game reads it via P2 uncached */
+```
+
+**5 — Embedded slice** (gitignored ROM bytes, extract-at-build like the
+`mie_*`/eeprom blobs). Add to `loader/Makefile`: a `bios_data.o` objcopy blob
+(same pattern as `shim_blob.o`) from `../build/bios_data.bin`, generated by a
+small extractor that `dd`s the two slices from `bios/naomi/epr-21576h.ic27` and
+concatenates them (slice sizes `0x7000` + `0x70`). Add `bios_data.o` to `OBJS`.
+`build/` and `bios/` are already gitignored — no ROM bytes enter git.
+
+### Any other BIOS reads? — NO, only these two
+
+`ListPoolWords.java 0x00000000 0x00200000` returns a large list, but it scans
+*raw 4-aligned words* and cannot tell code from data: the SH-4 `bra` opcode is
+`0xaXXX`, so **every `bra`/`bt` target whose code starts with a branch decodes as
+a fake `0xa0XXYYZZ` "pointer"** with phys `< 0x200000`. Verified by disassembly:
+`0x8c02929c` (val `a013dc15`) is the target of `8c0291c6 bra 0x8c02929c` /
+`8c029216 bt 0x8c02929c` — its bytes are `bra …; mov.l @(disp,pc),r12` code, not
+a pool word; `0x8c0263c8` (val `a00b9324`, 4-aligned) is likewise the target of
+`8c0263aa bt 0x8c0263c8`. These are false positives, not dereferenced pointers.
+
+Genuine BIOS-data pool words are those loaded by `mov.l @(disp,pc),rN` and then
+**dereferenced** — exactly the 6 `POOLBIOS` from boot-binary §7:
+
+| pool word | value | phys | kind | read? |
+|---|---|---|---|---|
+| `0x8c02e9f0` | `0x80000200` | `0x200` | VBR general-exc vector const (written to VBR setup) | no |
+| `0x8c04afbc` | `0x80000038` | `0x038` | VBR TLB-miss vector const | no |
+| `0x8c04b37c` | `0x80000038` | `0x038` | same | no |
+| `0x8c080e94` | `0x80000300` | `0x300` | VBR interrupt vector const | no |
+| **`0x8c0804d4`** | **`0xa0060000`** | **`0x60000`** | **Consumer 1 source** | **YES → fixed** |
+| **`0x8c0814d0`** | **`0xa01ffd00`** | **`0x1ffd00`** | **Consumer 2 source** | **YES → fixed** |
+
+(`0x8c0804e0=0xa0000000` and the many `0x8c……=0xa0000000/0x80000000` hits are
+uncached/cached base OR-masks, not reads — e.g. `0x8c0804e0` converts a vtable
+pointer to its P2 alias at `0x8c0804a4`.) The M2 DC-mode run corroborates
+dynamically: the only area-0 `HWR` lines it logged are `a0060000` and
+`a01ffd00`. **These two are the complete set of BIOS data reads.**
+
+### Runtime confirmation (what the M2 re-boot must show)
+
+After the fix, the config init should: pass Consumer 1's verify at `0x8c0803b4`,
+run the `0x7000` copy to `0x0c018000`, set `flag (0x8c1c9768) = 1` at Consumer 2,
+and proceed past the config-init hang (no terminal RAM-side loop). Residual risk:
+the copied library is BIOS *code* the game `jmp`s into via its vtable; if that
+code itself touches further BIOS ROM/hardware absent on DC, a **new** hang would
+surface at a `0x0c018xxx` (`0xac018xxx`) PC — the next iteration's target. The
+blob is self-contained (vtable + code, all within `0x0c018000`–`0x0c01f000`), so
+this is unlikely but must be re-instrumented on the M2 re-boot to confirm.
+
+### Reproduction
+
+```sh
+# Consumers (Ghidra headless; project cleo3 already imported):
+scripts/ghidra/run.sh script DisasmRange.java 0x8c080380 0x8c0804e0   # Consumer 1
+scripts/ghidra/run.sh script DisasmRange.java 0x8c081400 0x8c0814e0   # Consumer 2
+
+# Pool words + cross-checks + slice extraction (bios/ gitignored):
+python3 - <<'PY'
+import struct
+b=open('tools/boot.bin','rb').read(); BASE=0x8c020000
+rom=open('bios/naomi/epr-21576h.ic27','rb').read()
+# extents
+assert struct.unpack('<h', b[0x8c0804c8-BASE:0x8c0804c8-BASE+2])[0]==0x1c00     # N=7168 -> 0x7000 B
+assert struct.unpack('<I', b[0x8c0804d4-BASE:0x8c0804d4-BASE+4])[0]==0xa0060000 # patch #14 old
+assert struct.unpack('<I', b[0x8c0814d0-BASE:0x8c0814d0-BASE+4])[0]==0xa01ffd00 # patch #15 old
+# Consumer 1 verify passes on the BIOS blob
+w=struct.unpack('<8I', rom[0x60000:0x60000+32]); assert all((x&0x0fff0000)==0x0c010000 for x in w)
+# Consumer 2 string matches game's obfuscated copy -> flag=1
+loc=0x8c0d7ed9-BASE
+assert all(rom[0x1ffd00+i]==((b[loc+i]-(i&7))&0xff) for i in range(0x70))
+print("OK: extent 0x7000 + 0x70; verify passes; string matches (0 mismatches)")
+PY
+```
+
