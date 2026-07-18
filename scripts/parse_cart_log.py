@@ -88,7 +88,8 @@ def _checks(dma):
 
 
 def _in(ranges, pc):
-    # ranges is a single (lo, hi) tuple or a list of them (a fn may span
+    # ranges: None | (lo, hi) | [(lo, hi), ...]   (all ints, hex addresses)
+    # A single (lo, hi) tuple or a list of them (a fn may span
     # more than one site — e.g. the two Maple poll routines). pc is "in" if
     # it lands in ANY range. ponytail: a set of tight ranges, never one wide
     # span across unrelated code — that would make the check meaningless.

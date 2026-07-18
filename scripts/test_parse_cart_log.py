@@ -95,10 +95,14 @@ def test_multi_range_covers_two_sites():
     assert d["input_pc_in_input_fn"] is True     # both input sites covered by the set
     assert d["eeprom_seen"] is True
 
-    # a single range that misses the secondary site must fail the input check
-    r2 = p.parse_text(text, input_fn=(0x8c0315ce, 0x8c03161f))
+    # a single range that misses the secondary site must fail BOTH the input
+    # check and eeprom_seen (eeprom_seen folds the PC-in-range test when a
+    # range is given, so the uncovered secondary eeprom PC must flip it False).
+    r2 = p.parse_text(text, input_fn=(0x8c0315ce, 0x8c03161f),
+                      eeprom_fn=(0x8c0315ce, 0x8c03161f))
     d2 = dict((n, ok) for n, ok, _ in r2["checks"])
     assert d2["input_pc_in_input_fn"] is False   # 0x8c03c300 is outside the lone range
+    assert d2["eeprom_seen"] is False            # secondary eeprom PC also outside
 
 
 def test_pc_mirror_normalization():
