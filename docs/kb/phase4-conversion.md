@@ -324,7 +324,8 @@ A ≥ `0x500`-byte (round to `0x800`) block in shim home
 stands in for register `0x5f7YYY`**. Repoint values use the **P2-uncached**
 alias (`0xA0000000 | mirror_phys`, written `MIRROR_P2` below) to match the
 game's original `0xa05f7xxx` accesses and to keep shim/game views coherent
-without cache flushes. Offsets actually used span `0x00c`–`0x4b8`.
+without cache flushes. Offsets actually used span `0x00c`–`0x4f8` (the V3 wait
+reads `base+0x4f8` at `0x8c03bc4a`); sizing unaffected — still ≥ `0x500`.
 
 ### Method
 
@@ -410,22 +411,36 @@ statically-reachable code that would read real GD-ROM ATA on DC.
 
 ### Flagged — NOT mirror-repointable (findings)
 
-1. **Generic hardware-register tables** (`0x8c0a39a0`+ and `0x8c0a3fb8`+). These
-   are data tables listing DMA-start / Holly registers across **all** channels,
-   not cart/G1-exclusive pool literals: e.g. `0x8c0a39a0..` = `{reg, 0}` pairs
-   `0x5f6808, 0x5f6820, 0x5f6c18 (SB_MDST maple), 0x5f7418 (SB_GDST), 0x5f7818
-   (AICA), 0x5f7838}`; `0x8c0a3fb8..` = a run `0x5f6800/04/10/14, 0x5f6c04/10,
-   0x5f7404/08/40c, 0x5f7800/04/08/0c/10`. They hold the G1 regs `0x5f7418`
-   (`0x8c0a39b8`) and `0x5f7404/08/40c` (`0x8c0a3fd0/d4/d8`) **among unrelated
-   Maple/AICA/PVR regs**, so the G1 entries cannot be blindly repointed without
-   desyncing any routine that walks the whole table. `getReferencesTo` returns
-   **zero** for every entry (and the neighborhood), so no analyzed code indexes
-   them — they are either dead or reached only by a computed-access routine
-   Ghidra did not resolve. **If** M2/M3 testing shows a fault touching real
-   GD-ROM around a multi-channel DMA quiesce/reset, this needs an
-   *instruction-level* patch on that routine, **not** a mirror repoint. LOW
-   risk: unreferenced + the dynamic capture (boot→attract→demo→play) never
-   triggered a cart DMA outside `FUN_8c03bd08`.
+1. **Generic multi-channel HW register tables** — hold G1 regs among unrelated
+   SH4/Maple/AICA/PVR regs, so the G1 entries cannot be blindly repointed (that
+   would desync a routine that walks the whole table). Two distinct tables:
+
+   - **Table 1 — `0x8c0a3980`–`0x8c0a39ec`**: `{register, value}` pairs, incl.
+     SB_GDST `0x5f7418` at `0x8c0a39b8` (also SB_MDST `0x5f6c18` @`0x8c0a39b0`,
+     AICA `0x5f7818` @`0x8c0a39c0`, G2 `0x5f7c0c/10/14` @`0x8c0a3980..`).
+     `getReferencesTo` = **zero** for every entry **and** no incoming pointer to
+     the table base → **genuinely dead**. No action.
+   - **Table 2 — `0x8c0a3f78`–`0x8c0a3fxx`**: a contiguous array of register
+     *addresses* — SH4 core `0xff0000xx`/`0xffa000xx` from `0x8c0a3f78`, then
+     the Holly run from `0x8c0a3fb8` (`0xa05f6800`…), incl. G1 `0x5f7404/08/40c`
+     at `0x8c0a3fd0/d4/d8`. `getReferencesTo` = zero **only because access is
+     computed** (base+index): it is walked by **`FUN_8c0467f4`** — table base
+     `pool[0x8c046a8c]=0x8c0a3f78` loaded at `0x8c0469ae`, `base + r12*4` at
+     `0x8c0469b0`–`b4`, register **address** read at `0x8c0469b8 mov.l @r10,r4`,
+     register **value** read at `0x8c0469c0 mov.l @r10,r4; 0x8c0469c4
+     mov.l @r4,r4`, both printed via `jsr @r13`/`@r14` — a **read-only
+     register-dump/log** routine. Caller: `pool[0x8c03b1b8]=0x8c0467f4`, called
+     at `0x8c03b104`, mode-gated. Because it only READS it cannot corrupt the
+     drive; on DC the G1 dereferences read real GD-ROM ATA regs and log
+     garbage — harmless.
+
+   **Neither table is mirror-repointable** (mixed-channel; Table 2's G1 entries
+   are reached by computed index, not a per-instruction pool load). If a fault
+   or bad log surfaces here, the fix is an *instruction-level* patch on
+   `FUN_8c0467f4` (or its mode-gate), **not** a blind repoint. **Task 12 / M2:**
+   confirm `FUN_8c0467f4` is read-only and whether its mode-gate is reachable in
+   retail. LOW risk: Table 1 dead; Table 2 read-only + the dynamic capture
+   (boot→attract→demo→play) never triggered a cart DMA outside `FUN_8c03bd08`.
 
 2. **Dead pool slots** holding cart/G1 addresses but with **zero** references
    (confirmed `FindRefs`; not even Ghidra-defined data — raw literal-pool
