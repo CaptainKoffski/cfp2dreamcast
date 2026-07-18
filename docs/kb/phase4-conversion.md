@@ -262,6 +262,34 @@ Counts: sub 0x15 ×376 (all in the first boot phase), sub 0x33 ×34,991 (the
 per-frame steady-state poll — **the input shim must serve sub 0x33, not just
 0x15**), sub 0x27 ×360, sub 0x01/0x03 ×2 each (boot-time EEPROM), rest <20.
 
+### Issuing sites per sub (MAPLEPC cross-reference)
+
+This capture ran dynarec ON, so its `MAPLEPC pc=` values are block-granular
+(Sh4cntx.pc updates at block boundaries), not instruction-exact; Phase 3's
+interpreter capture `capture-pc.log` is the instruction-exact reference.
+Both agree on the function attribution:
+
+| sub | this capture (dynarec, block PC) | Phase 3 `capture-pc.log` (interpreter, exact PC) | issuing site |
+|---|---|---|---|
+| 0x33 | **34,991× pc=8c03c3d6** (100%) | **23,762× pc=8c03c3e4** (100%) | **`FUN_8c03c2c6`** (`0x8c03c2c6`–`0x8c03c4a1`) |
+| 0x15 | 359× pc=0c0227a8, 7× 0c0315ca, 7× 8c03c3d6, rest 1–2× | 369× pc=0c03161e, 7× 8c03c3e4 | `0x8c0315ce` routine (369) + `FUN_8c03c2c6` (7) |
+| 0x27 | 359× pc=0c02283c | 360× pc=0c03161e | `0x8c0315ce` routine |
+| 0x01/0x03 | 1× 0c031570 + 1× 8c03c3d6 each | 1× 0c03161e + 1× 8c03c3e4 each | both sites, boot only |
+| 0x13/0x17/0x21/0x31 | ≤9× each, split across both | ≤9× each, split across both | both sites, boot only |
+
+(The dynarec-run sub-15/27 PCs `0c0227a8`/`0c02283c` are caller-side block
+entries — `FUN_8c027584` dispatches `0x8c0315ce` as a fn-ptr callback,
+`boot-binary.md` §5 — of the same interpreter-exact site `0c03161e`. Both
+`8c03c3d6` and `8c03c3e4` fall inside `FUN_8c03c2c6`.)
+
+**Primary/secondary inversion (supersedes the framing in `boot-binary.md` §5;
+dated addendum added there):** Phase 3's "primary 369× / minor 7×" counted
+only sub-0x15 traffic. The steady-state per-frame input poll is **sub 0x33
+from `FUN_8c03c2c6`** (34,991× this capture; 23,762× in Phase 3's own log);
+the `0x8c0315ce` site carries the **boot phase** (subs 0x15/0x27, one-off
+EEPROM 0x01/0x03). **Task 5 must disassemble BOTH sites**, and the input shim
+must answer sub 0x33 with the `mie_sub33.bin` template shape.
+
 ### Response buffer address
 
 **Not a single constant.** Three receive buffers observed:

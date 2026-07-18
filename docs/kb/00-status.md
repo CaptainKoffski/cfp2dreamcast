@@ -46,9 +46,12 @@ the concrete patch targets:
 
 - **Cart DMA intercept:** patch `FUN_8c03bd08` (`0x8c03bd08`–`0x8c03bd4d`),
   specifically the SB_GDST store at `0x8c03bd26` — redirect to GD-ROM reads.
-- **Input shim:** patch the Maple store routine at `0x8c0315ce` (primary,
-  369× per-frame) and `FUN_8c03c2c6` (secondary, 7×) — translate to DC
-  `GetCondition`.
+- **Input shim:** patch BOTH Maple sites — `FUN_8c03c2c6` (steady-state
+  per-frame poll, **sub 0x33**, 34,991×/23,762× in the Phase 4/Phase 3
+  captures) and the store routine at `0x8c0315ce` (boot phase, subs
+  0x15/0x27 + EEPROM) — translate to DC `GetCondition`. (Phase 3's
+  "primary 369×/secondary 7×" counted sub-0x15 only; see `boot-binary.md`
+  §5 addendum + `phase4-conversion.md` §V4.)
 - **EEPROM shim:** intercept sub `0x01`/`0x03` at the same Maple sites;
   return forced free-play defaults.
 - **No SP relocation** — stack lives at `0x8c00e–fxxx`; main RAM safe.
@@ -69,7 +72,7 @@ the concrete patch targets:
 - **Entry chain:** trampoline `0x8c04ae2c` → init `0x8c021000` (resolved by `DumpEntryChain.java`).
 - **SP / main RAM:** stack at `0x8c00e6e8`–`0x8c00ef28`; Phase 2 WATERMARK hit near 32 MB was stale data; **main RAM safe on DC 16 MB, no SP relocation needed**.
 - **Cart-read fn:** `FUN_8c03bd08` (`0x8c03bd08`–`0x8c03bd4d`) — runtime DMA trigger (computed SB_GDST store); static candidate `FUN_8c08063c` is a separate config-time builder; **Phase 4 patches `FUN_8c03bd08`**.
-- **Input fn:** Maple store routine `0x8c0315ce` (primary, 369×/frame) + `FUN_8c03c2c6` (secondary, 7×); **Phase 4 shims to DC `GetCondition`**.
+- **Input fn:** Maple store routine `0x8c0315ce` + `FUN_8c03c2c6`; **Phase 4 shims BOTH to DC `GetCondition`**. (Phase 3 counted 369×/7× on sub-0x15 only — Phase 4 Task 4 showed the steady-state poll is sub 0x33 from `FUN_8c03c2c6`, 23,762× in Phase 3's own capture-pc.log; `boot-binary.md` §5 addendum.)
 - **EEPROM fn:** same two Maple sites (sub `0x01`/`0x03`); **Phase 4 forces free-play defaults**.
 - **BIOS verdict:** BIOSREF=0 + BIOSEXEC=0 across both captures; **no BIOS-call shim needed**.
 
