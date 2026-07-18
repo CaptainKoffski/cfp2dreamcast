@@ -41,7 +41,17 @@ public class DumpEntryChain extends GhidraScript {
         Address target = null;
         for (int i = 0; ins != null && i < n; i++) {
             String flag = "";
-            if (writesR15(ins)) flag = "   <== writes r15 (SP)";
+            if (writesR15(ins)) {
+                flag = "   <== writes r15 (SP)";
+                for (Reference r : ins.getReferencesFrom())
+                    if (r.getReferenceType().isData()) {
+                        try {
+                            long poolVal = ((long) currentProgram.getMemory().getInt(r.getToAddress())) & 0xffffffffL;
+                            flag += String.format(", loads 0x%08x", poolVal);
+                        } catch (Exception e) { /* no pool word readable */ }
+                        break;
+                    }
+            }
             println(String.format("%s  %-28s%s", ins.getAddress(), ins.toString(), flag));
             if (target == null)
                 for (Reference r : ins.getReferencesFrom())
@@ -69,29 +79,37 @@ public class DumpEntryChain extends GhidraScript {
             ins = ins.getNext();
         }
         if (jmpReg == null) return null;
-        // Pass 2: find mov.l <pool>,<jmpReg> and return pool value
+        // Pass 2: find the LAST mov.l <pool>,<jmpReg> before the jmp (handles two loads to same reg)
         ins = currentProgram.getListing().getInstructionAt(a);
+        Address jmpAddr = null;
+        // locate jmp address first for comparison
+        Instruction tmp = ins;
+        for (int i = 0; tmp != null && i < n; i++) {
+            if (tmp.getMnemonicString().equalsIgnoreCase("jmp")) { jmpAddr = tmp.getAddress(); break; }
+            tmp = tmp.getNext();
+        }
+        Instruction lastMovL = null;
         for (int i = 0; ins != null && i < n; i++) {
+            if (jmpAddr != null && ins.getAddress().compareTo(jmpAddr) >= 0) break;
             if (ins.getMnemonicString().equalsIgnoreCase("mov.l")) {
-                // check if destination register matches jmpReg
                 int lastOp = ins.getNumOperands() - 1;
                 boolean destMatch = false;
                 for (Object o : ins.getOpObjects(lastOp))
                     if (o instanceof ghidra.program.model.lang.Register
                             && ((ghidra.program.model.lang.Register) o).getName().equalsIgnoreCase(jmpReg))
                         destMatch = true;
-                if (destMatch) {
-                    for (Reference r : ins.getReferencesFrom())
-                        if (r.getReferenceType().isData()) {
-                            try {
-                                int w = currentProgram.getMemory().getInt(r.getToAddress());
-                                return addr(((long) w) & 0xffffffffL);
-                            } catch (Exception e) { /* skip */ }
-                        }
-                }
+                if (destMatch) lastMovL = ins;
             }
             ins = ins.getNext();
         }
+        if (lastMovL != null)
+            for (Reference r : lastMovL.getReferencesFrom())
+                if (r.getReferenceType().isData()) {
+                    try {
+                        int w = currentProgram.getMemory().getInt(r.getToAddress());
+                        return addr(((long) w) & 0xffffffffL);
+                    } catch (Exception e) { /* skip */ }
+                }
         return null;
     }
 
