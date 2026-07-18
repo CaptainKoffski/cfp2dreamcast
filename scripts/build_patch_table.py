@@ -53,6 +53,12 @@ G1_OFF = int(re.search(r"#define\s+G1_MIRROR\s+\(SHIM_BASE\s*\+\s*(0x[0-9a-fA-F]
                        iface).group(1), 16)
 MIRROR_P2 = (SHIM_BASE + G1_OFF) | 0xA0000000     # 0xacfc8800
 
+def _sb_off(name):     # "#define NAME (SHIM_BASE + 0xNNNN)" -> abs address
+    m = re.search(rf"#define\s+{name}\s+\(SHIM_BASE\s*\+\s*(0x[0-9a-fA-F]+)\)", iface)
+    return SHIM_BASE + int(m.group(1), 16)
+BIOS_60000_P2  = _sb_off("BIOS_DATA_60000")  | 0xA0000000     # 0xacfcb000
+BIOS_1FFD00_P2 = _sb_off("BIOS_DATA_1FFD00") | 0xA0000000     # 0xacfd2000
+
 def rd(addr, n):
     off = addr - BASE
     assert 0 <= off <= len(boot) - n, hex(addr)
@@ -119,6 +125,11 @@ pool(0x8C081D24, 0xA05F7418, MIRROR_P2 + 0x418, "#11 SB_GDST 0x5f7418 -> mirror"
 pool(0x8C081E90, 0xA05F7418, MIRROR_P2 + 0x418, "#12 SB_GDST 0x5f7418 -> mirror")
 pool(0x8C081FF8, 0xA05F7418, MIRROR_P2 + 0x418, "#13 SB_GDST 0x5f7418 -> mirror")
 
+# §M2 BIOS-data: redirect the two Naomi BIOS-ROM data pointers (absent on DC) to
+# the loader's shim-home RAM copies. Kept P2 uncached to match original access.
+pool(0x8C0804D4, 0xA0060000, BIOS_60000_P2,  "#14 BIOS 0x60000 lib -> shim-home copy")
+pool(0x8C0814D0, 0xA01FFD00, BIOS_1FFD00_P2, "#15 BIOS 0x1ffd00 str -> shim-home copy")
+
 # §input-ABI: MIE fn-pointer slots (game does jsr @rN, rN loaded from the pool
 # word) -> swap the slot to the shim entry (not an entry hook: the swap is the
 # whole redirect).
@@ -141,4 +152,5 @@ out.append(f"enum {{ CLEO_NPATCHES = {len(patches)} }};")
 (ROOT / "build").mkdir(exist_ok=True)
 (ROOT / "build/patch_table.h").write_text("\n".join(out) + "\n")
 print(f"OK patch_table.h: {len(patches)} patches "
-      f"(1 hook, 13 pool, 2 ptr); MIRROR_P2={MIRROR_P2:#010x}")
+      f"(1 hook, 15 pool, 2 ptr); MIRROR_P2={MIRROR_P2:#010x} "
+      f"BIOS_60000_P2={BIOS_60000_P2:#010x} BIOS_1FFD00_P2={BIOS_1FFD00_P2:#010x}")

@@ -4,6 +4,7 @@
 
 extern uint8 shim_bin[];        /* objcopy-embedded shim.bin, see Makefile */
 extern uint8 shim_bin_end[];
+extern uint8 bios_data[];       /* objcopy-embedded [0x7000 @0x60000][0x70 @0x1ffd00] */
 extern void handoff(uint32 src, uint32 dst, uint32 len, uint32 entry);
 extern uint8 handoff_end[];     /* end-of-stub label in handoff.S (stub is PIC) */
 
@@ -60,6 +61,15 @@ int main(void) {
     uint32 shim_len = (uint32)(shim_bin_end - shim_bin);
     memcpy((void *)SHIM_BASE, shim_bin, shim_len);
 
+    /* Place the two Naomi BIOS-ROM slices the game reads via patched P2 pointers
+     * (0x60000 verify+copy library, 0x1ffd00 copyright-string auth). Both absent
+     * on DC -> without this the config init fails and boot hangs downstream. */
+    memcpy((void *)BIOS_DATA_60000,  bios_data,                       BIOS_DATA_60000_LEN);
+    memcpy((void *)BIOS_DATA_1FFD00, bios_data + BIOS_DATA_60000_LEN, BIOS_DATA_1FFD00_LEN);
+    dbglog(DBG_INFO, "bios-data placed %08x/%x %08x/%x\n",
+           (unsigned)BIOS_DATA_60000, (unsigned)BIOS_DATA_60000_LEN,
+           (unsigned)BIOS_DATA_1FFD00, (unsigned)BIOS_DATA_1FFD00_LEN);
+
     /* Zero the G1 mirror block (uncached P2 -- how the patched game + shim access it)
      * so config-time SB_GDST pollers don't spin on stale RAM before the first DMA. */
     volatile uint32 *mir = (volatile uint32 *)P2ADDR(G1_MIRROR);
@@ -74,6 +84,9 @@ int main(void) {
     dcache_purge_range(STAGING_ADDR, GAME_LEN);
     dcache_purge_range(SHIM_BASE, shim_len);
     dcache_purge_range(HANDOFF_SCRATCH, ho_len);
+    /* Flush our BIOS-data writes: the game reads them via P2 uncached. */
+    dcache_purge_range(BIOS_DATA_60000,  BIOS_DATA_60000_LEN);
+    dcache_purge_range(BIOS_DATA_1FFD00, BIOS_DATA_1FFD00_LEN);
 
     dbglog(DBG_INFO, "jumping to %08x\n", GAME_ENTRY);
     irq_disable();
