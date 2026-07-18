@@ -84,8 +84,12 @@ the CCR-setup phase writing to the uncached mirror; not the definitive SP.
 
 ### Dynamic (capture-pc.log, `sp_consistent` PASS)
 
-Stack pointer range across all logged guest instructions:
-**`0x8c00e6e8`–`0x8c00ef28`** — entirely within the first 62 KB of main RAM.
+Stack pointer range across all logged cart-DMA events (460 `sp=` samples
+spanning boot + play — SP is sampled at each `CARTDMAPC`, not every
+instruction): **`0x8c00e6e8`–`0x8c00ef28`** — entirely within the first
+62 KB of main RAM. (`sp_consistent` proves the stack is *stable* to within
+1 MB; the *low* location is these observed values plus the static r15 setup
+in §3, not the check alone.)
 
 ### Verdict
 
