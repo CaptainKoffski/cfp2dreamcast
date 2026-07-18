@@ -815,3 +815,140 @@ xxd build/mie_sub15.bin ; xxd build/mie_sub33.bin ; xxd build/mie_sub03.bin
 # the authoritative has-data frame (34,990 identical occurrences):
 grep '^MIERESP sub=33' capture-attract.log | sed 's/.*data=//' | sort | uniq -c
 ```
+
+---
+
+## V5 — battery-SRAM reference scan (spec §3 out-of-scope check)
+
+**Question (task brief / spec §3):** the game uses Naomi battery SRAM
+(`0x00200000`–`0x00207fff`, 32 KB, high scores etc.; `naomi-vs-dreamcast.md`
+§2/§5). On DC that address lands on flashrom. Spec §3 declares high-score
+persistence OUT of Phase 4 scope on the assumption that the game **tolerates**
+garbage there (CRC fails → re-init defaults in RAM → continue). V5 confirms the
+game does not instead **hang/spin** waiting on an SRAM value. If it had an
+unguarded dependency, score handling would enter Phase 4 via a shim-home RAM
+mirror (same mechanic as the G1 mirror).
+
+### Method
+
+`scripts/ghidra/run.sh script ListPoolWords.java 0x00200000 0x00220000`
+(widened to `0x220000` to cover the full documented battery region; naomi.cpp
+maps only `0x00200000`–`0x00207fff` = 32 KB, so **any hit with masked phys
+≥ `0x208000` is above real SRAM**). The scanner masks *every* 4-aligned word to
+29-bit phys, so it flags code bytes and constants too; 1463 words matched but
+only ~40 are actually referenced. Each referenced site was `DisasmRange`d to
+classify the access (real SRAM pointer deref vs. coincidental constant/code),
+and every genuine SRAM function was read far enough to see its failure path.
+Pool values read from `tools/boot.bin` (offset = VA − `0x8c020000`, LE).
+
+### Reference list — only TWO code sites touch real SRAM
+
+The genuine SRAM accesses use the **P2-uncached** base `0xa0200000` (phys
+`0x00200000`) plus small constant offsets — all within the 32 KB region:
+
+| pool word | value | offset | function(s) | role |
+|---|---|---|---|---|
+| `0x8c07fb38`,`0x8c07fc6c` | `a0200000` | +0x000 | `FUN_8c07fac4`/`FUN_8c07fa66` (clear), `FUN_8c07fbd8` (validate) | SRAM base |
+| `0x8c07fc74` | `a0200008` | +0x008 | `FUN_8c07fbd8` | copy-1 stored checksum |
+| `0x8c07fc78` | `a0200100` | +0x100 | `FUN_8c07fbd8` | copy-2 stored checksum |
+| `0x8c07fe88` | `a020000c` | +0x00c | `FUN_8c07fcb0` | copy-1 valid flag |
+| `0x8c07fe8c` | `a0200104` | +0x104 | `FUN_8c07fcb0` | copy-2 valid flag |
+| `0x8c07fe90`,`0x8c07fe94*`… | `a02001f8`/`a0200208`/`a0200218` | +0x1f8… | `FUN_8c07fce8`/`d16`/`d2e`/`d46`/`d64`/`d86`/`da4`/`e5a`/`e70` | record read/write ↔ RAM work bufs |
+| `0x8c081d4c` | `a0200000` | +0x000 | `FUN_8c081bf0` | header read |
+| `0x8c081d50` | `a0200004` | +0x004 | `FUN_8c081bf0` | header mirror |
+
+(`FUN_8c07f*` is one cohesive **SRAM persistence library**; it also dereferences
+SRAM through RAM work-pointers `[0x8c1c94dc/e0/e4/e8/ec/f4/…]` that are *seeded*
+from the base pool `a0200000` + offsets above — so the direct pool scan catches
+the seed of every access and does **not** undercount.)
+
+### Access-pattern classification
+
+**1. `FUN_8c07fbd8` (`0x8c07fbd8`) — dual-copy checksum validator. BENIGN.**
+Reads two SRAM copies and their stored checksums, recomputes via `FUN_8c07fa10`
+(a bounded byte-hash, loops `cmp/hs r5,r1` over the length — no spin), then:
+- `0x8c07fc36 cmp/eq r0,r3` — stored checksum @SRAM+8 vs recomputed copy-1;
+- `0x8c07fc3c cmp/eq r5,r4` — stored checksum @SRAM+0x100 vs recomputed copy-2;
+- both match → `bra 0x8c07fc82`, return **0** (use SRAM);
+- copy-1 only → `bsr 0x8c07fb62` (repair copy-2 from copy-1), return 1;
+- copy-2 only → `bsr 0x8c07fb9c` (repair copy-1 from copy-2), return 2;
+- **both mismatch → `0x8c07fc7c bsr 0x8c07fac4`** = `FUN_8c07fac4` zero-fills the
+  entire 32 KB SRAM (`mov #0x0,r4; mov.l r4,@r6; add #0x4,r6` × `0x2000` words,
+  `0x8c07fae0`) and recomputes fresh checksums, return **3**.
+
+This is the textbook read → CRC → re-init-defaults-on-mismatch → continue path
+(mirrors the EEPROM handling). On DC the flashrom garbage fails both checksums →
+`FUN_8c07fac4` reinitializes → returns 3 → play continues. No hang.
+
+**2. `FUN_8c07fcb0`/`FUN_8c07fce8…e70` — flag reads + bounded record copies.
+BENIGN.** `FUN_8c07fcb0` reads valid-flags @SRAM+0xc / +0x104 and returns a
+plain boolean (`0`/`1`) — no spin. The `FUN_8c07fce8`/`d16`/`d2e`/`d46`/… family
+are fixed-count `mov.l @r6+,r3; mov.l r3,@r5` copy loops (counts `#0x4`, etc.)
+moving records between SRAM and RAM work buffers; `FUN_8c07fdc8`/`fe0a` stamp a
+`FUN_8c07fa10` checksum before writing back. All bounded, no value-gated wait.
+
+**3. `FUN_8c081bf0` (`0x8c081bf0`) — header read + mirror. BENIGN.**
+`0x8c081bfe mov.l @r3,r0` reads `*(0xa0200000)` (SRAM+0), `0x8c081c02 mov.l r0,@r2`
+mirrors it to `*(0xa0200004)` (SRAM+4), and hands it to `FUN_8c0803a4` (via thunk
+`FUN_8c081ae8` → `jmp @[0x8c081cd0]=0x8c0803a4`). `FUN_8c0803a4` is a **bounded**
+8-iteration table search (`cmp/ge r7,r5`, r7=8, `0x8c0803be-c0`) reading its own
+pool table — the SRAM value is not a loop key. No spin, no fallback-less
+control-flow dependency.
+
+### False positives (≈30 hits — NOT SRAM)
+
+The value-mask flags any word whose low 29 bits land in range. Verified
+non-SRAM:
+- **`0x00200000` (×18, P0)** — `0x00200000` = 2 MB. Used as a **bitmask**
+  (`FUN_8c021910 0x8c021ad4 tst r2,r1` = test bit 21) or a **comparison
+  threshold** (`FUN_8c045a24 0x8c045a2a cmp/ge`; `FUN_8c049008 0x8c049020/2a
+  cmp/gt` = bounds-check vs 2 MB). Never dereferenced.
+- **`0x00200020/70/80/b8/d8/e0`, `0x00200200`** — data-table entries in the ROM
+  image data segment (`0x8c0ab6d8`, `0x8c0b5160`, `0x8c0d52dc`, …), reached by
+  pointer-table indirection (e.g. `0x8c0527a6 mov.l 0x8c052930,r5` → r5 = table
+  base `0x8c0ab6d8`); packed dimensions/flags, not SRAM pointers.
+- **`0x20202020`** (`0x8c0c40f8`) — ASCII spaces in a string/format buffer
+  (`FUN_8c09efe4` printf-family). Not SRAM.
+- **`0x40200000`** (`0x8c08cc9c`) — IEEE-754 `2.5f`, loaded as a **float**
+  literal (`0x8c08cc34 fmov.s @r0,fr13`). Not a pointer.
+- **`0x6020d21a`,`0x6020d232`,`0xa021d20c`,`0xa02185ef`,`0xa021d410`,
+  `0x40216132`,`0xa020e200`** — **code bytes at branch targets**. Each "ref" is
+  a `bt`/`bf`/`bt.s` into that address (dispatch/jump tables: `0x8c06cefa bt
+  0x8c06cf28`; `0x8c0473f8 bt 0x8c04745c`; `0x8c073bf4 bt/s 0x8c073c88`; …); the
+  instruction bytes there just happen to mask into range. Also, all seven have
+  phys ≥ `0x208000` — **above** the mapped 32 KB SRAM — so they could not be SRAM
+  even if dereferenced.
+
+### VERDICT
+
+**Spec assumption HOLDS — no Phase 4 SRAM handling needed.** Of ~40 referenced
+pool words in the scanned range, only the `FUN_8c07f*` SRAM persistence library
+and `FUN_8c081bf0` touch real battery SRAM. The library's entry validator
+`FUN_8c07fbd8` **re-initializes the entire SRAM to defaults on checksum failure**
+(`bsr 0x8c07fac4`), and every other SRAM site is a bounded copy, a boolean flag
+read, or a one-shot header read — **none spins or blocks on an SRAM value, and
+none has a fallback-less control-flow dependency**. On DC the flashrom garbage
+at `0x00200000` fails the CRC and the game re-inits scores in RAM each boot,
+exactly as spec §3 assumes.
+
+**GATE NOT TRIPPED.** High-score persistence stays OUT of Phase 4. No shim-home
+SRAM mirror, no `§patch-sites` entry, no `0x8c02da74`-style base repoint for
+SRAM. (Low-priority future nicety, not Phase 4: if persistent high scores are
+ever wanted, redirect the SRAM base pool words `0x8c07fb38`/`0x8c07fc6c`/
+`0x8c081d4c` to a shim-owned RAM mirror + flashrom save — same mechanic as the
+G1 mirror. Not required for the playable bar.)
+
+### Reproduction
+
+```sh
+# scan (masks values to phys; only lines with non-empty refs= matter):
+scripts/ghidra/run.sh script ListPoolWords.java 0x00200000 0x00220000 2>&1 \
+  | grep POOLWORD | grep -E 'refs=[0-9a-f]'
+# the SRAM library + its validator/clear/checksum:
+scripts/ghidra/run.sh script DisasmRange.java 0x8c07fa10 0x8c07fee0 2>&1 | grep 'java> 8c07f'
+# FUN_8c081bf0 header read + its callee bound-check:
+scripts/ghidra/run.sh script DisasmRange.java 0x8c081bf0 0x8c081c1c 2>&1 | grep 'java> 8c081'
+scripts/ghidra/run.sh script DisasmRange.java 0x8c0803a4 0x8c0803da 2>&1 | grep 'java> 8c080'
+# pool values (tools/boot.bin, LE): 0x8c07fb38=a0200000  0x8c07fc74=a0200008
+#   0x8c07fc78=a0200100  0x8c081d4c=a0200000  0x8c081d50=a0200004
+```
