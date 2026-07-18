@@ -191,10 +191,11 @@ the game expects. The minor site `FUN_8c03c2c6` may need the same shim.
 
 ## 6. EEPROM/settings-parse function — Phase 4 shim target
 
-**EEPROM access shares the two Maple sites** from §5 — the same PC addresses
-(`0x8c03161e` primary, `0x8c03c3e4` secondary) carry both sub `0x15` (input)
-and sub `0x01`/`0x03` (EEPROM read) traffic. There is no PC-level distinction;
-Phase 4 must differentiate by subcommand.
+**EEPROM access shares the two Maple sites** from §5 — the same logged PCs
+(`0x8c03161e` primary, `0x8c03c3e4` secondary; these are the *post-store*
+return PCs — the routine entries are `0x8c0315ce` and `0x8c03c2c6`) carry both
+sub `0x15` (input) and sub `0x01`/`0x03` (EEPROM read) traffic. There is no
+PC-level distinction; Phase 4 must differentiate by subcommand.
 
 MIE subcommand observation (both captures, `eeprom_seen` PASS):
 - `0x01`/`0x03` (EEPROM read): 2× at each site at boot
@@ -298,7 +299,8 @@ python3 scripts/parse_cart_log.py capture-pc.log \
   --eeprom-fn 8c0315ce-8c03161f,8c03c2c6-8c03c4a1
 ```
 
-Expected output (5 Phase 3 checks + 3 Phase 2 checks):
+Expected output — the 5 Phase 3 checks below, plus the 3 Phase 2 checks
+(`dest_in_ram`, `len_aligned_32`, `beyond_boot_read`), all `PASS`:
 ```
 CHECK no_bios_exec: PASS
 CHECK dma_pc_in_cart_fn: PASS

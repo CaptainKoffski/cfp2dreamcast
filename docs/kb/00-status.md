@@ -79,10 +79,12 @@ the concrete patch targets:
   captured (attract + demo + play-to-game-over), cart span
   `0x800000`..`0x609c000`; streams almost entirely by DMA (1 PIO seek). Top
   ~12 MB of cart never streamed (known gap). Feeds the Phase 4 GD-ROM reissue.
-- **RAM verdict:** main-RAM asset placement 11.2 MB (fits DC 16 MB), but a scan
-  hit near the top of Naomi's 32 MB (likely a high-address stack) is a **Phase 3
-  question** before main RAM is declared safe. VRAM ~9.2 MB (over DC 8 MB → likely
-  texture cuts in Phase 5). Sound RAM inconclusive (scan artifact).
+- **RAM verdict:** main-RAM asset placement 11.2 MB (fits DC 16 MB). The scan
+  hit near the top of Naomi's 32 MB was **stale data, not a real stack** —
+  Phase 3 pinned the SP low in RAM (`0x8c00e6e8`..`0x8c00ef28` during play; see
+  `boot-binary.md` §3), so **main RAM is safe on DC's 16 MB with no SP
+  relocation**. VRAM ~9.2 MB (over DC 8 MB → likely texture cuts in Phase 5).
+  Sound RAM inconclusive (scan artifact).
 - **Input map:** all 7 gameplay controls confirmed to single JVS bits
   (Start 0x8000, Up/Down/Left/Right 0x2000/1000/0800/0400, B1/B2 0x0200/0100).
 - **Serial/watchdog:** 0 pokes → no serial or watchdog shim needed.
