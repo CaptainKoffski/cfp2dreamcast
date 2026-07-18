@@ -34,8 +34,10 @@ public class ScanBiosTargets extends GhidraScript {
             if (d.getLength() == 4 && d.isDefined()) {
                 try {
                     long w = ((long) d.getInt(0)) & 0xffffffffL;
-                    boolean isBiosVA = (w >= 0x8c000000L && w <= 0x8c01ffffL)   // P1 cached DC BIOS
-                                    || (w >= 0xac000000L && w <= 0xac01ffffL);   // P2 uncached DC BIOS
+                    long p = w & 0x1fffffffL;
+                    boolean isBiosVA = ((w >= 0x80000000L && w <= 0x801fffffL)    // P1 cached BIOS (phys 0x0..0x1fffff)
+                                    || (w >= 0xa0000000L && w <= 0xa01fffffL))    // P2 uncached BIOS
+                                    && p != 0;                                    // drop 0x80000000/0xa0000000 exact masks
                     if (isBiosVA) {
                         println(String.format("POOLBIOS at=%s val=0x%08x", d.getAddress(), w));
                         hits++;
