@@ -1018,10 +1018,22 @@ is exactly why the harvest (not regeneration) is authoritative.
   `0x10210000` round, trailing `0x00`).
 * **Game section: all-zero, accepted by the game as-is.** The netboot tool's
   stricter `__validate_game` flags it (`crc(b"")=0x78ac ≠ 0x0000`), but
-  Cleopatra stores nothing in the 93C46 game section: across every capture the
-  game issued **4× sub `0x03` reads and 0× sub `0x0B` writes** — it read this
-  image and never re-initialised. The empirical acceptance (game booted to
-  attract+demo, free-play) outranks the general-purpose validator.
+  Cleopatra stores nothing in the 93C46 game section: **0× sub `0x0B` (write)
+  across all five captures** (attract/demo/input/play/pc) — the game read this
+  image and never re-initialised (sub `0x03` reads: attract 4, pc 2, others 0).
+  The empirical acceptance (game booted to attract+demo, free-play) outranks
+  the general-purpose validator.
+
+**Task 11 — embed the RAW 128 bytes** (`xxd -i` / the plan's Makefile), do
+**not** route `eeprom.bin` through `naomi/eeprom.py` `NaomiEEPRom()` /
+`validate()`. That library's `__validate_game` (`eeprom.py:278-305`) requires
+the game header to be either a valid CRC or the `0xFF` blank marker; our header
+is intentionally `00 00` (offset 0x24), so `NaomiEEPRom()` would raise
+"Invalid EEPROM CRC!" on load. This is **expected and harmless** — the real
+game read that same zeroed header and never wrote (0× `0x0B`), and the part
+that must be valid, the system section, passes `__validate_system`
+(`eeprom.py:262-276`). The shim replays the 128 bytes verbatim; nothing
+re-validates them.
 
 ### First 16 bytes
 
