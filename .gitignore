@@ -4,3 +4,5 @@ tools/
 .superpowers/
 bios/
 .venv/
+/capture-*.log
+__pycache__/
