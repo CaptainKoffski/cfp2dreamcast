@@ -54,6 +54,7 @@ init (`0x8c021000`) is a standard SH-4 C-runtime startup:
 |---|---|---|---|---|
 | memset | `FUN_0x8c094a68` `0x8c094a72` | **zero** (byte) | `0x8c00fc00`–`0x8c00ffff` (1 KB) | args at `0x8c02104c`: r4=pool`0x8c021060`=`0xac00fc00`, r6=pool`0x8c021054`=`0x400`, r5=0 |
 | G | `0x8c0211f8` | copy (non-zero code stubs) | `0x8c000000`–`0x8c00001f` (32 B) | dest=pool`0x8c02133c`=`0x8c000000`, end=pool`0x8c021340`=`0x8c000020`; src table `0x8c0a20f8` |
+| G′ | stores `0x8c021218`, `0x8c02121e`, `0x8c021222` | conditional non-zero word stores | `0x8c000010`, `0x8c000018`, `0x8c00001c` (3 words) | vals `0x002b003b`/`0x402b9401`/`0x0100e501` (pools `0x8c02134c`/`0x8c021354`/`0x8c02135c`) → dests pools `0x8c021350`=`0x8c000010`, `0x8c021358`=`0x8c000018`, `0x8c021360`=`0x8c00001c` |
 | A | `0x8c02115a` | fill `0x41474553` ("SEGA") | `0x8c00c000`–`0x8c00efff` (12 KB) | start=pool`0x8c0212fc`=`0x8c00c000`, fill=pool`0x8c0212f8`=`0x41474553`, end=`*[pool 0x8c0212f4=0x8c0c44a4]`=`0x8c00f000` |
 | B | `0x8c02116c` | fill `0x41474553` ("SEGA") | `0x8c1f3480`–`0x8c1f349f` (32 B) | start=`*[pool 0x8c021304=0x8c0a1fcc]`=`0x8c1f3480`, end=`*[pool 0x8c021300=0x8c0a1fd0]`=`0x8c1f34a0` |
 | E | `0x8c0211bc` | **zero** (byte) | `0x8c0daf80`–`0x8c0fd8df` (~138 KB) | dest=`*[pool 0x8c021324=0x8c0a2028]`=`0x8c0daf80`, end=`*[pool 0x8c021320=0x8c0a2034]`=`0x8c0fd8e0` |
@@ -74,6 +75,19 @@ Notes:
   a **non-zero code write, not a zeroing loop**, and the game's VBR is
   `0x8c00f400`, so these are not the game's exception vectors — just 32 bytes the
   game parks at the base of RAM.
+- Row G′: immediately after the copy loop, three more word stores overwrite
+  three of those stub slots — but only conditionally. The guard at
+  `0x8c02120c`–`0x8c021210` loads `*[0x8c004000]` (ptr from pool `0x8c021348`)
+  and compares it to `0x000b003b` (pool `0x8c021344`); on mismatch,
+  `bf 0x8c021224` skips all three stores. Note the guard **reads** `0x8c004000`
+  — inside the syscall window — so on DC the branch outcome depends on whatever
+  the BIOS left there; the stores may or may not fire. Either way all three
+  dests stay within `0x8c000000`–`0x8c00001f`.
+- This table is the complete inventory of **crt0's own** RAM writes (init
+  through the `rts` at `0x8c021228`, plus the `FUN_0x8c094a68` call). The
+  `.init_array` walkers at `0x8c02122c`+ run application constructors via
+  function-pointer tables — out of V1 scope (they are ordinary game code, not
+  startup zeroing).
 
 ### Verdict — syscall area `0x8c000000–0x8c007fff`
 
@@ -93,23 +107,28 @@ DC BIOS GD-ROM syscall infrastructure (authoritative addresses):
 **→ Syscall area SURVIVES the zeroing. GATE NOT TRIPPED.** The BIOS GD-syscall
 plan stands; no raw ATA driver is forced by init.
 
-Caveat (watch item, not a gate trip): init's **block G writes 32 non-zero bytes
-to `0x8c000000`–`0x8c00001f`**, which lies inside the declared syscall window.
-It is *below* the syscall vector table (`0x8c0000b0`+) and below the HLE syscall
+Caveat (watch item, not a gate trip): init writes **32 non-zero bytes to
+`0x8c000000`–`0x8c00001f`**, inside the declared syscall window, from **four
+write sites**: the block G loop store (`0x8c0211fe`) plus the three conditional
+stores (`0x8c021218`, `0x8c02121e`, `0x8c021222` — row G′). All four stay
+*below* the syscall vector table (`0x8c0000b0`+) and below the HLE syscall
 stubs (`0x8c001000`+), so the GD-ROM vector `0x8c0000bc` and its handler are
-untouched — on flycast/reios this write is harmless (that region holds nothing
-the syscalls use). It could not be proven harmless on **real** BIOS statically:
-the DC boot reserves the low 64 KB (KOS loads at `0x8c010000`), and whether the
-real BIOS gdrom driver keeps state in `0x8c000000`–`0x8c00001f` cannot be
-resolved without disassembling the real BIOS. If real-hardware testing later
-shows a GD syscall fault right after init, revisit this 32-byte write; the fix
-would be a one-instruction bound/redirect patch on block G (`0x8c0211f6`), not a
-driver rewrite.
+untouched — on flycast/reios these writes are harmless (that region holds
+nothing the syscalls use). They could not be proven harmless on **real** BIOS
+statically: the DC boot reserves the low 64 KB (KOS loads at `0x8c010000`), and
+whether the real BIOS gdrom driver keeps state in `0x8c000000`–`0x8c00001f`
+cannot be resolved without disassembling the real BIOS. If real-hardware
+testing later shows a GD syscall fault right after init, revisit these writes;
+any neutralizing patch must cover **all four store sites** (patching only the
+loop store at `0x8c0211fe` would leave the three conditional stores live) —
+e.g. redirect the dest pools `0x8c02133c`/`0x8c021340` and
+`0x8c021350`/`0x8c021358`/`0x8c021360`, or branch over
+`0x8c0211f2`–`0x8c021222`. Still a few-word patch, not a driver rewrite.
 
 ### Verdict — shim home `0x8cfc0000–0x8cffffff`
 
-The highest address init writes is `0x8c1f34a0` (block B end). Every init write
-is ≤ `0x8c1f34a0`, over 14 MB below `0x8cfc0000`.
+The last byte init writes is `0x8c1f349f` (block B; its end bound `0x8c1f34a0`
+is exclusive). Every init write is ≤ `0x8c1f349f`, over 14 MB below `0x8cfc0000`.
 
 **→ Shim home SAFE — init never touches `0x8cfc0000+`.**
 
@@ -118,9 +137,10 @@ is ≤ `0x8c1f34a0`, over 14 MB below `0x8cfc0000`.
 - **Shim disc access = BIOS GD-ROM syscalls** (vector `0x8c0000bc`). Raw ATA
   driver NOT required.
 - **Shim home `0x8cfc0000+` needs no relocation and no memset-bound patch.**
-- Low-priority watch item: init's 32-byte code-stub write at `0x8c000000`
-  (block G, store at `0x8c0211fe`) — re-check only if a real-BIOS GD syscall
-  faults immediately post-init.
+- Low-priority watch item: init's 32-byte code-stub writes at `0x8c000000`
+  (four store sites: `0x8c0211fe`, `0x8c021218`, `0x8c02121e`, `0x8c021222`) —
+  re-check only if a real-BIOS GD syscall faults immediately post-init; any
+  patch must cover all four sites.
 
 ### Reproduction
 

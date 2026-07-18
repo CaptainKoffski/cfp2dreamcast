@@ -84,4 +84,13 @@ for name, start, end, is_zero in loops:
 gstart, gend = expect["G code-stub copy"]
 assert gstart >= SYSCALL_LO and gend <= 0x8c0000bc, "block G assumption changed"
 
+# 6. Row G': three conditional stores (0x8c021218/1e/22) also land inside
+#    0x8c000000-0x8c00001f, guarded by *[0x8c004000] == 0x000b003b.
+assert rd(0x8c021348) == 0x8c004000 and rd(0x8c021344) == 0x000b003b, \
+    "G' guard changed"
+for dest_pool in (0x8c021350, 0x8c021358, 0x8c021360):
+    d = rd(dest_pool)
+    assert gstart <= d < gend and d < 0x8c0000bc, \
+        f"G' store dest moved: pool {dest_pool:#x} -> {d:#x}"
+
 print("OK: all V1 bounds verified; syscall area survives zeroing; shim home safe")
