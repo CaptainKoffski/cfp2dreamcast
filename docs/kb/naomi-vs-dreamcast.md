@@ -21,7 +21,7 @@ exists it is cited by URL. Unresolved items are in §8, never guessed.
 | **CPU** | Hitachi SH-4 (HD6417091) @ 200 MHz | Hitachi SH-4 @ 200 MHz | None. Identical ISA and clock — game code runs unmodified. `naomi.cpp:62` (chip), `naomi.cpp:1205` (`#define CPU_CLOCK (200000000)`); DC clock: [dreamcast.wiki hardware](https://dreamcast.wiki/Hardware_overview) |
 | **GPU** | PowerVR2 / CLX2 "Holly" @ 100 MHz | PowerVR2 / CLX2 "Holly" @ 100 MHz | None. Same TA/ISP/DAC register block, mapped identically (`0x5f7c00`, `0x5f8000`). `naomi.cpp:63`, `naomi.cpp:1301-1302`; `dccons.cpp:153-154` |
 | **Sound** | Yamaha AICA (315-6232) + ARM7 @ 45 MHz | Yamaha AICA + ARM7 @ 45 MHz | None. Same SPU; AICA reg block at `0x00700000` on both. `naomi.cpp:74`, `naomi.cpp:1304`; `dccons.cpp:156` |
-| **Main RAM** | 32 MB @ `0x0c000000-0x0dffffff` | 16 MB @ `0x0c000000-0x0cffffff` (upper 16 MB are mirrors) | **Half the RAM.** Game may assume 32 MB. Phase 2 measured asset placement at **11.2 MB** — fits 16 MB — but a scan finds data ~1 KB below the top of 32 MB (likely a high-address stack) that must be pinned down in Phase 3. See `docs/kb/phase2-measurements.md`. `naomi.cpp:1319`; `dccons.cpp:170-173` |
+| **Main RAM** | 32 MB @ `0x0c000000-0x0dffffff` | 16 MB @ `0x0c000000-0x0cffffff` (upper 16 MB are mirrors) | **Half the RAM.** Phase 2 measured asset placement at **11.2 MB** (fits 16 MB); a scan hit near the top of 32 MB was **stale data, not a stack** — Phase 3 pinned the SP low in RAM (`0x8c00e6e8`..`0x8c00ef28`, `docs/kb/boot-binary.md` §3), so **main RAM is safe on DC 16 MB, no SP relocation**. See `docs/kb/phase2-measurements.md`. `naomi.cpp:1319`; `dccons.cpp:170-173` |
 | **Video RAM** | 16 MB texture/frame RAM | 8 MB texture RAM | **Half the VRAM.** Naomi map exposes 16 MB texture area (`0x04000000-0x04ffffff` = 16 MB). DC has 8 MB. Asset/texture budget likely needs cuts (Phase 5). `naomi.cpp:1312`; DC: [dreamcast.wiki](https://dreamcast.wiki/Hardware_overview) |
 | **Sound RAM** | 8 MB @ `0x00800000-0x00ffffff` | 2 MB @ `0x00800000-0x009fffff` | **Quarter the sound RAM.** Audio-sample budget must shrink. `naomi.cpp:1306`; `dccons.cpp:158` |
 | **Game storage** | ROM cartridge on the G1 bus (this game: 109 MB image) | GD-ROM disc (~1 GB usable) | **The central port problem.** Cart streamed via ROM-board registers; on DC becomes GD-ROM streaming / RAM preload. See §2, §3. `naomibd.cpp:8-24`; GD-ROM cap: [Wikipedia GD-ROM](https://en.wikipedia.org/wiki/GD-ROM) |
@@ -278,11 +278,13 @@ a Naomi syscall table — we only have to (a) reproduce the header-driven load
 direct hardware pokes (redirect cart DMA to GD-ROM, MIE input to Maple, EEPROM
 to forced defaults).
 
-*Caveat / open question §8-3:* whether the game's boot binary ever calls a
-Naomi BIOS routine (e.g. a font/print helper or a system function left resident
-at a fixed low address) has not been proven from the binary — RE only asserts
-the *common* startup pattern. Phase 3 disassembly must confirm the game makes
-no `jsr` into BIOS ROM (`0x00000000-0x001fffff`) after the entrypoint.
+**RESOLVED Phase 3** (`docs/kb/boot-binary.md` §7): the game's boot binary
+makes no calls into Naomi BIOS ROM after the entrypoint. Static
+`ScanBiosTargets.java` found zero flow references into BIOS ROM (`BIOSREF=0`);
+dynamic logging found zero BIOS-range executions across both captures
+(`BIOSEXEC=0`, `no_bios_exec` PASS). Six pool constants in the BIOS address
+range are exception-vector offsets (VBR setup) and two potential BIOS data-read
+pointers — not call targets. No BIOS-call shim is needed in Phase 4.
 
 ### Dreamcast boot sequence
 
@@ -376,6 +378,13 @@ DC boot structures.
    Phase 3 — check the disassembly for any `jsr`/`jmp` targeting
    `0x00000000-0x001fffff` (BIOS ROM) after `0x8c04ae2c`. If it does call BIOS,
    those routines must be reimplemented in the loader.
+   **RESOLVED Phase 3** — see `docs/kb/boot-binary.md` §7: `BIOSREF=0`
+   (Ghidra `ScanBiosTargets.java` found zero flow references into BIOS ROM) +
+   `BIOSEXEC=0` (dynamic `no_bios_exec` PASS across both captures). No BIOS-call
+   dependency, statically or dynamically. Six pool words in BIOS address range
+   (`POOLBIOS=6`) are SH-4 exception-vector constants (game's own VBR setup) and
+   two P2-uncached BIOS-ROM data pointers — NOT call targets; low-risk Phase 4
+   watch item only. **No BIOS shim needed in Phase 4.**
 4. **Watchdog / serial / network usage.** Unknown whether the game kicks the
    MB3773 watchdog or probes the serial/ARCNET hardware. *Tried:* board notes in
    `naomi.cpp:163-164,172-178`; no game-specific evidence. *Resolves in:*

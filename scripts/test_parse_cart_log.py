@@ -44,6 +44,82 @@ def test_check_flags_dest_out_of_ram():
     names = {name: ok for name, ok, _ in r["checks"]}
     assert names["dest_in_ram"] is False
 
+def test_parses_pc_lines():
+    text = (
+        "CARTDMA src=00800000 dest=0c010000 len=20\n"
+        "CARTDMAPC pc=8c050100 sp=0cff0000\n"
+        "MAPLEPC cmd=86 sub=15 pc=8c060200\n"
+        "MAPLEPC cmd=86 sub=03 pc=8c061000\n"
+    )
+    r = p.parse_text(text)
+    assert r["cartdma_pc"] == [{"pc": 0x8c050100, "sp": 0x0cff0000}]
+    assert {"sub": 0x15, "pc": 0x8c060200} in r["maple_pc"]
+    assert {"sub": 0x03, "pc": 0x8c061000} in r["maple_pc"]
+
+
+def test_pc_checks_pass_within_ranges():
+    text = (
+        "CARTDMAPC pc=8c050100 sp=0cff0000\n"
+        "MAPLEPC cmd=86 sub=15 pc=8c060200\n"
+        "MAPLEPC cmd=86 sub=03 pc=8c061000\n"
+    )
+    r = p.parse_text(text, cart_fn=(0x8c050000, 0x8c050fff),
+                     input_fn=(0x8c060000, 0x8c060fff),
+                     eeprom_fn=(0x8c061000, 0x8c061fff))
+    d = dict((n, ok) for n, ok, _ in r["checks"])
+    assert d["no_bios_exec"] is True
+    assert d["dma_pc_in_cart_fn"] is True
+    assert d["input_pc_in_input_fn"] is True
+    assert d["eeprom_seen"] is True
+    assert d["sp_consistent"] is True
+
+
+def test_bios_exec_fails_check():
+    r = p.parse_text("BIOSEXEC pc=00001234\n")
+    d = dict((n, ok) for n, ok, _ in r["checks"])
+    assert d["no_bios_exec"] is False
+
+
+def test_multi_range_covers_two_sites():
+    # input/eeprom poll from two distinct Maple routines: a set of ranges must
+    # cover both; a pc outside every range must still fail.
+    text = (
+        "MAPLEPC cmd=86 sub=15 pc=8c0315fe\n"   # primary site
+        "MAPLEPC cmd=86 sub=15 pc=8c03c300\n"   # secondary site
+        "MAPLEPC cmd=86 sub=03 pc=8c0315fe\n"   # eeprom, primary
+        "MAPLEPC cmd=86 sub=03 pc=8c03c300\n"   # eeprom, secondary
+    )
+    two = [(0x8c0315ce, 0x8c03161f), (0x8c03c2c6, 0x8c03c4a1)]
+    r = p.parse_text(text, input_fn=two, eeprom_fn=two)
+    d = dict((n, ok) for n, ok, _ in r["checks"])
+    assert d["input_pc_in_input_fn"] is True     # both input sites covered by the set
+    assert d["eeprom_seen"] is True
+
+    # a single range that misses the secondary site must fail BOTH the input
+    # check and eeprom_seen (eeprom_seen folds the PC-in-range test when a
+    # range is given, so the uncovered secondary eeprom PC must flip it False).
+    r2 = p.parse_text(text, input_fn=(0x8c0315ce, 0x8c03161f),
+                      eeprom_fn=(0x8c0315ce, 0x8c03161f))
+    d2 = dict((n, ok) for n, ok, _ in r2["checks"])
+    assert d2["input_pc_in_input_fn"] is False   # 0x8c03c300 is outside the lone range
+    assert d2["eeprom_seen"] is False            # secondary eeprom PC also outside
+
+
+def test_pc_mirror_normalization():
+    # a PC logged in the P0 mirror (0x0c...) matches a P1 range (0x8c...) — same
+    # physical instruction. This is the real smoke-log case: input site 0x0c03161e.
+    text = "MAPLEPC cmd=86 sub=15 pc=0c03161e\n"
+    r = p.parse_text(text, input_fn=(0x8c0315ce, 0x8c03161f))
+    d = dict((n, ok) for n, ok, _ in r["checks"])
+    assert d["input_pc_in_input_fn"] is True
+
+
+def test_range_cli_parser_single_and_set():
+    assert p._range("8c0315ce-8c03161f") == [(0x8c0315ce, 0x8c03161f)]
+    assert p._range("8c0315ce-8c03161f,8c03c2c6-8c03c4a1") == [
+        (0x8c0315ce, 0x8c03161f), (0x8c03c2c6, 0x8c03c4a1)]
+
+
 def test_cli_writes_csv(tmp_path):
     log = tmp_path / "in.log"; log.write_text(SAMPLE)
     out = tmp_path / "out.csv"
@@ -53,3 +129,23 @@ def test_cli_writes_csv(tmp_path):
     assert rows[0] == "cart_offset,length,dest,mode"
     assert "0x00000000,0x100000,0x0c020000,DMA" in rows
     assert any(r.endswith(",PIO") for r in rows)
+
+
+if __name__ == "__main__":
+    import pathlib, tempfile
+    _tmp = pathlib.Path(tempfile.mkdtemp())
+    fns = [v for k, v in globals().items() if k.startswith("test_")]
+    passed = failed = 0
+    for fn in fns:
+        import inspect
+        sig = inspect.signature(fn)
+        try:
+            fn(_tmp) if sig.parameters else fn()
+            print(f"  PASS {fn.__name__}")
+            passed += 1
+        except Exception as e:
+            print(f"  FAIL {fn.__name__}: {e}")
+            failed += 1
+    print(f"\n{passed} passed, {failed} failed")
+    if failed:
+        sys.exit(1)

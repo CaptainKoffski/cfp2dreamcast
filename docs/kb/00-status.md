@@ -1,6 +1,6 @@
 # Project status
 
-**Updated:** 2026-07-18 (Phase 2 complete)
+**Updated:** 2026-07-18 (Phase 3 complete)
 
 ## What this is
 
@@ -24,8 +24,8 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
 
 1. **Foundation — DONE 2026-07-18** (repo, knowledge base, tooling, boot verification)
 2. **Instrumented analysis — DONE 2026-07-18** (cart-streaming map, RAM/serial measurements, input map via instrumented Flycast)
-3. **Reverse engineering — NEXT** (Ghidra on the 1 MB boot binary)
-4. Conversion (loader + shims + patches → bootable GDI)
+3. **Reverse engineering — DONE 2026-07-18** (Ghidra headless + interpreter-mode dynamic analysis; entry chain, SP verdict, cart-read fn, input fn, EEPROM fn, BIOS verdict — see `docs/kb/boot-binary.md`)
+4. **Conversion — NEXT** (loader + shims + patches → bootable GDI)
 5. Fit & polish (RAM/asset cuts if measurements demand, hardware testing)
 
 ## Phase 1 checklist
@@ -40,10 +40,20 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
 
 ## Next step
 
-Brainstorm and spec Phase 3 (reverse engineering): Ghidra on the 1 MB boot
-binary — confirm no BIOS `jsr` after the entrypoint (§8-3), and locate the
-cart-read and input-decode functions the Phase 4 patches target,
-cross-referenced against the Phase 2 cart-streaming map and input map.
+Brainstorm and spec Phase 4 (conversion): design the loader + shims + patches
+that produce a bootable Dreamcast GDI from the Naomi binary. Phase 3 produced
+the concrete patch targets:
+
+- **Cart DMA intercept:** patch `FUN_8c03bd08` (`0x8c03bd08`–`0x8c03bd4d`),
+  specifically the SB_GDST store at `0x8c03bd26` — redirect to GD-ROM reads.
+- **Input shim:** patch the Maple store routine at `0x8c0315ce` (primary,
+  369× per-frame) and `FUN_8c03c2c6` (secondary, 7×) — translate to DC
+  `GetCondition`.
+- **EEPROM shim:** intercept sub `0x01`/`0x03` at the same Maple sites;
+  return forced free-play defaults.
+- **No SP relocation** — stack lives at `0x8c00e–fxxx`; main RAM safe.
+- **No BIOS shim** — BIOSREF=0, BIOSEXEC=0; the two BIOS-ROM data-pointer pool
+  words (`0xa0060000`, `0xa01ffd00`) are a low-risk watch item only.
 
 ## Key facts so far
 
@@ -54,16 +64,27 @@ cross-referenced against the Phase 2 cart-streaming map and input map.
 - The rest of the cart is read at runtime via the ROM-board interface —
   on DC this must become GD-ROM streaming / RAM preload.
 
+### Phase 3 findings (see `boot-binary.md`)
+
+- **Entry chain:** trampoline `0x8c04ae2c` → init `0x8c021000` (resolved by `DumpEntryChain.java`).
+- **SP / main RAM:** stack at `0x8c00e6e8`–`0x8c00ef28`; Phase 2 WATERMARK hit near 32 MB was stale data; **main RAM safe on DC 16 MB, no SP relocation needed**.
+- **Cart-read fn:** `FUN_8c03bd08` (`0x8c03bd08`–`0x8c03bd4d`) — runtime DMA trigger (computed SB_GDST store); static candidate `FUN_8c08063c` is a separate config-time builder; **Phase 4 patches `FUN_8c03bd08`**.
+- **Input fn:** Maple store routine `0x8c0315ce` (primary, 369×/frame) + `FUN_8c03c2c6` (secondary, 7×); **Phase 4 shims to DC `GetCondition`**.
+- **EEPROM fn:** same two Maple sites (sub `0x01`/`0x03`); **Phase 4 forces free-play defaults**.
+- **BIOS verdict:** BIOSREF=0 + BIOSEXEC=0 across both captures; **no BIOS-call shim needed**.
+
 ### Phase 2 findings (see `cart-streaming-map.md`, `phase2-measurements.md`, `input-map.md`)
 
 - **Cart streaming map:** 388 unique DMA `(cart offset, length, dest)` triples
   captured (attract + demo + play-to-game-over), cart span
   `0x800000`..`0x609c000`; streams almost entirely by DMA (1 PIO seek). Top
   ~12 MB of cart never streamed (known gap). Feeds the Phase 4 GD-ROM reissue.
-- **RAM verdict:** main-RAM asset placement 11.2 MB (fits DC 16 MB), but a scan
-  hit near the top of Naomi's 32 MB (likely a high-address stack) is a **Phase 3
-  question** before main RAM is declared safe. VRAM ~9.2 MB (over DC 8 MB → likely
-  texture cuts in Phase 5). Sound RAM inconclusive (scan artifact).
+- **RAM verdict:** main-RAM asset placement 11.2 MB (fits DC 16 MB). The scan
+  hit near the top of Naomi's 32 MB was **stale data, not a real stack** —
+  Phase 3 pinned the SP low in RAM (`0x8c00e6e8`..`0x8c00ef28` during play; see
+  `boot-binary.md` §3), so **main RAM is safe on DC's 16 MB with no SP
+  relocation**. VRAM ~9.2 MB (over DC 8 MB → likely texture cuts in Phase 5).
+  Sound RAM inconclusive (scan artifact).
 - **Input map:** all 7 gameplay controls confirmed to single JVS bits
   (Start 0x8000, Up/Down/Left/Right 0x2000/1000/0800/0400, B1/B2 0x0200/0100).
 - **Serial/watchdog:** 0 pokes → no serial or watchdog shim needed.

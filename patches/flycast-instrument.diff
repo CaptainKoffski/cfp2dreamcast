@@ -34,19 +34,34 @@ index 19bdfee..37cb109 100644
  		endif()
  	elseif(UNIX)
  		if(NOT BUILD_TESTING)
+diff --git a/core/deps/Syphon b/core/deps/Syphon
+--- a/core/deps/Syphon
++++ b/core/deps/Syphon
+@@ -1 +1 @@
+-Subproject commit 53ec412a78b246c84cedcb4a2a5b92852704d61d
++Subproject commit 53ec412a78b246c84cedcb4a2a5b92852704d61d-dirty
 diff --git a/core/hw/maple/maple_jvs.cpp b/core/hw/maple/maple_jvs.cpp
-index d01240f..3c8deec 100644
+index d01240f..cf0b4a6 100644
 --- a/core/hw/maple/maple_jvs.cpp
 +++ b/core/hw/maple/maple_jvs.cpp
-@@ -19,6 +19,7 @@
+@@ -19,6 +19,8 @@
  #include "maple_devs.h"
  #include "maple_if.h"
  #include "hw/naomi/naomi_cart.h"
-+#include "hw/naomi/cartlog.h"
++#include "hw/naomi/cartlog.h"   // Phase 2/3 instrumentation
++#include "hw/sh4/sh4_if.h"      // Phase 3: Sh4cntx
  #include <xxhash.h>
  #include "oslib/oslib.h"
  #include "oslib/i18n.h"
-@@ -2225,6 +2226,7 @@ u32 jvs_io_board::handle_jvs_message(const u8 *buffer_in, u32 length_in, u8 *buf
+@@ -1750,6 +1752,7 @@ void MIEImpl::handle_86_subcommand()
+ 		return;
+ 	}
+ 	u32 subcode = dma_buffer_in[0];
++	cartlog("MAPLEPC cmd=86 sub=%02x pc=%08x\n", subcode, Sh4cntx.pc);   // Phase 3: input(0x15)/EEPROM(0x01/03/0B) call site
+ 
+ 	// CT fw uses 13 as a 17, and 17 as 13 and also uses 19
+ 	if (crazy_mode)
+@@ -2225,6 +2228,7 @@ u32 jvs_io_board::handle_jvs_message(const u8 *buffer_in, u32 length_in, u8 *buf
  
  						u32 inputs[4];
  						read_digital_in(buttons, inputs);
@@ -105,14 +120,15 @@ index 0000000..e2c7ef6
 +#pragma once
 +void cartlog(const char *fmt, ...);
 diff --git a/core/hw/naomi/naomi.cpp b/core/hw/naomi/naomi.cpp
-index 45005d7..dac07b3 100644
+index 45005d7..3e251a8 100644
 --- a/core/hw/naomi/naomi.cpp
 +++ b/core/hw/naomi/naomi.cpp
-@@ -35,6 +35,12 @@
+@@ -35,6 +35,13 @@
  #include "midiffb.h"
  #include "atomiswave.h"
  #include "oslib/i18n.h"
 +#include "cartlog.h"
++#include "hw/sh4/sh4_if.h"   // Phase 3: Sh4cntx (guest pc/sp)
 +// Phase 2 instrumentation: RAM buffers for watermark scans.
 +// mem_b/RAM_SIZE = main system RAM (sh4_mem.h, already included); vram/VRAM_SIZE
 +// (pvr_mem.h); aica::aica_ram/ARAM_SIZE (aica_if.h). Sizes are macros in types.h.
@@ -121,7 +137,7 @@ index 45005d7..dac07b3 100644
  
  #include <memory>
  #include <algorithm>
-@@ -106,6 +112,8 @@ void WriteMem_naomi(u32 address, u32 data, u32 size)
+@@ -106,6 +113,8 @@ void WriteMem_naomi(u32 address, u32 data, u32 size)
  		INFO_LOG(NAOMI, "called without cartridge");
  		return;
  	}
@@ -130,7 +146,7 @@ index 45005d7..dac07b3 100644
  	if (!settings.naomi.slave && m3comm != nullptr && address >= NAOMI_COMM_CTRL_addr && address <= NAOMI_COMM_STATUS2_addr) {
  		m3comm->WriteMem(address, data, size);
  		return;
-@@ -148,6 +156,24 @@ static int naomiDmaSched(int tag, int sch_cycl, int jitter, void *arg)
+@@ -148,6 +157,24 @@ static int naomiDmaSched(int tag, int sch_cycl, int jitter, void *arg)
  	}
  }
  
@@ -155,12 +171,13 @@ index 45005d7..dac07b3 100644
  //Dma Start
  static void Naomi_DmaStart(u32 addr, u32 data)
  {
-@@ -165,6 +191,11 @@ static void Naomi_DmaStart(u32 addr, u32 data)
+@@ -165,6 +192,12 @@ static void Naomi_DmaStart(u32 addr, u32 data)
  	else if ((m3comm == nullptr || !m3comm->DmaStart(addr, data)) && CurrentCartridge != nullptr)
  	{
  		DEBUG_LOG(NAOMI, "NAOMI-DMA start addr %08X len %x", SB_GDSTAR, SB_GDLEN);
 +		cartlog("CARTDMA src=%08x dest=%08x len=%x\n",
 +				CurrentCartridge->GetDmaSrcOffset(), SB_GDSTAR & 0x1FFFFFE0, SB_GDLEN);
++		cartlog("CARTDMAPC pc=%08x sp=%08x\n", Sh4cntx.pc, Sh4cntx.r[15]);   // Phase 3: guest PC/SP at DMA kick
 +		static u32 cartlog_dma_count = 0;
 +		if ((cartlog_dma_count++ & 63) == 0)   // ponytail: every 64th DMA; the scan is cheap but not free
 +			cartlog_watermarks();
@@ -208,3 +225,45 @@ index 4011837..0d2f910 100644
  	void AdvancePtr(u32 size) override {
  		DmaOffset += size;
  	}
+diff --git a/core/hw/sh4/interpr/sh4_interpreter.cpp b/core/hw/sh4/interpr/sh4_interpreter.cpp
+index 54a2b02..667a9aa 100644
+--- a/core/hw/sh4/interpr/sh4_interpreter.cpp
++++ b/core/hw/sh4/interpr/sh4_interpreter.cpp
+@@ -3,6 +3,7 @@
+ */
+ 
+ #include "types.h"
++#include "hw/naomi/cartlog.h"   // Phase 3 instrumentation
+ 
+ #include "../sh4_interpreter.h"
+ #include "../sh4_opcode_list.h"
+@@ -18,6 +19,21 @@ Sh4ICache icache;
+ Sh4OCache ocache;
+ Sh4Interpreter *Sh4Interpreter::Instance;
+ 
++// Phase 3: flag any guest execution inside BIOS ROM (phys < 0x200000) AFTER the
++// Naomi entrypoint is first reached. Dynamic half of naomi-vs-dreamcast §8-3.
++// ponytail: interpreter-only (this pass forces the interpreter); dynarec won't fire this.
++static bool cartlog_entry_seen = false;
++static void cartlog_bios_check(u32 pc)
++{
++	if (pc == 0x8c04ae2c)
++		cartlog_entry_seen = true;
++	if (cartlog_entry_seen && (pc & 0x1fffffff) < 0x00200000)
++	{
++		static u32 last = 0xffffffff;
++		if (pc != last) { last = pc; cartlog("BIOSEXEC pc=%08x\n", pc); }
++	}
++}
++
+ void Sh4Interpreter::ExecuteOpcode(u16 op)
+ {
+ 	if (ctx->sr.FD == 1 && OpDesc[op]->IsFloatingPoint())
+@@ -29,6 +45,7 @@ void Sh4Interpreter::ExecuteOpcode(u16 op)
+ u16 Sh4Interpreter::ReadNexOp()
+ {
+ 	u32 addr = ctx->pc;
++	cartlog_bios_check(addr);
+ 	if (!mmu_enabled() && (addr & 1))
+ 		// address error
+ 		throw SH4ThrownException(addr, Sh4Ex_AddressErrorRead);
