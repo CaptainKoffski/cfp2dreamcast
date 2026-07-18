@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include "../include/shim_iface.h"
 #include "../src/cart.c"     /* pure part only (guards out SH-4 code) */
+#include "../src/jvs.c"      /* pure: dc_to_jvs, jvs_checksum, jvs_hasdata */
 
 int main(void) {
     split_t s;
@@ -29,6 +30,27 @@ int main(void) {
     /* zero-length read: no head/body/tail => no I/O issued */
     cart_split(1000, 0, &s);
     assert(s.head_take == 0 && s.body_sect == 0 && s.tail_take == 0);
-    printf("PASS test_host cart_split\n");
+
+    /* dc_to_jvs: DC condition is ACTIVE-LOW (0=pressed); JVS is ACTIVE-HIGH.
+       DC bits (KOS controller.h CONT_*): 1=B 2=A 3=Start 4=Up 5=Down 6=Left 7=Right.
+       JVS word (input-map.md, observed): Start 0x8000 Up 0x2000 Down 0x1000
+       Left 0x0800 Right 0x0400 B1 0x0200 B2 0x0100. */
+    assert(dc_to_jvs(0xffff) == 0x0000);                             /* nothing pressed */
+    assert(dc_to_jvs((unsigned short)~(1u << 3)) == 0x8000);         /* Start */
+    assert(dc_to_jvs((unsigned short)~(1u << 4)) == 0x2000);         /* Up */
+    assert(dc_to_jvs((unsigned short)~(1u << 5)) == 0x1000);         /* Down */
+    assert(dc_to_jvs((unsigned short)~(1u << 6)) == 0x0800);         /* Left */
+    assert(dc_to_jvs((unsigned short)~(1u << 7)) == 0x0400);         /* Right */
+    assert(dc_to_jvs((unsigned short)~(1u << 2)) == 0x0200);         /* A -> B1 */
+    assert(dc_to_jvs((unsigned short)~(1u << 1)) == 0x0100);         /* B -> B2 */
+    assert(dc_to_jvs((unsigned short)~((1u<<3)|(1u<<4))) == 0xa000); /* Start+Up chord */
+
+    /* jvs_checksum on the reconstructed golden idle has-data frame = 0x22.
+       This pins the whole 64-byte template byte-for-byte (§input-ABI). */
+    assert(jvs_hasdata[0x00] == 0x87 && jvs_hasdata[0x03] == 0x0f);  /* maple hdr 87 00 20 0f */
+    assert(jvs_hasdata[0x04] == 0x16 && jvs_hasdata[0x1a] == 0xe0);  /* subresp / JVS E0 sync */
+    assert(jvs_checksum(jvs_hasdata) == 0x22 && jvs_hasdata[0x3a] == 0x22);
+
+    printf("PASS test_host cart_split + dc_to_jvs + jvs_checksum\n");
     return 0;
 }
