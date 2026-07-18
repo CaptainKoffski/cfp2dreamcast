@@ -1,7 +1,7 @@
 CC = /opt/toolchains/dc/sh-elf/bin/sh-elf-gcc
 NM = /opt/toolchains/dc/sh-elf/bin/sh-elf-nm
 OBJCOPY = /opt/toolchains/dc/sh-elf/bin/sh-elf-objcopy
-CFLAGS = -ml -m4-single-only -ffreestanding -nostdlib -Os -Wall -Iinclude
+CFLAGS = -ml -m4-single-only -ffreestanding -nostdlib -Os -Wall -Wextra -fno-tree-loop-distribute-patterns -Iinclude
 B = build
 # Embedded data: free-play EEPROM + verbatim MIE ACK templates (gitignored blobs)
 DATA_SRCS = $(B)/eeprom_img.c $(B)/mie_sub01.c $(B)/mie_sub13.c $(B)/mie_sub17.c \
