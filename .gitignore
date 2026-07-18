@@ -8,3 +8,5 @@ bios/
 __pycache__/
 build/
 shims/data/
+loader/*.o
+loader/*.elf

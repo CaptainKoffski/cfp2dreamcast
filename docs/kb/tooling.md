@@ -195,6 +195,49 @@ environment every Phase 4 build task sources.
 - **Every later build shell must `source tools/kos/environ.sh` first** (gives
   `kos-cc`, `KOS_BASE`, flags).
 
+### makeip — 2.0.0 (Dreamcast IP.BIN builder, Phase 4)
+
+- Install:
+  ```sh
+  git clone https://github.com/sizious/makeip tools/makeip   # gitignored
+  cd tools/makeip/src
+  CPATH=/opt/homebrew/include LIBRARY_PATH=/opt/homebrew/lib make
+  ```
+  Cloned commit: `3adba188cdcd5e856db2a5248ba8988dae816b65`. The CPATH/LIBRARY_PATH
+  exports are the same arm64-brew fix as the KOS build — the Makefile hardcodes
+  `-I/usr/local/include` and dies on `png.h` without them (libpng already
+  installed via KOS prereqs).
+- Binary: `tools/makeip/src/makeip` (Mach-O arm64).
+- Use: `tools/makeip/src/makeip loader/ip.txt build/IP.BIN`.
+- Field limits are enforced (`src/field.c`): SW Maker Name max 16 chars —
+  the plan's "CLEO PORT PROJECT" (17) was shortened to "CLEO PORT PROJ" in
+  `loader/ip.txt`.
+
+### cdrtools — 3.02a09 (mkisofs, Phase 4 GDI mastering)
+
+- Install: `brew install cdrtools` → `/opt/homebrew/bin/mkisofs` (3.02a09).
+  (Conflicts with `dvdrtools`; neither was previously installed. dvdrtools is
+  NOT an equivalent substitute.)
+- Used by `scripts/make_gdi.py`: `mkisofs -C 0,45000 ...` offsets the in-FS
+  extent LBAs to match track 3's disc position. The warning
+  `-C specified without -M: old session data will not be merged.` is expected
+  and harmless — we want exactly that (no merge, just the LBA offset).
+
+### Flycast serial console (M1 boot-test output)
+
+- Config key (release Flycast 2.6 and source build): `Debug.SerialConsoleEnabled = yes`
+  under `[config]` in `~/Library/Application Support/Flycast/emu.cfg`.
+  Source of truth: `tools/flycast-src/core/cfg/option.cpp:132`
+  (`Option<bool> SerialConsole("Debug.SerialConsoleEnabled")`).
+- Effect: guest SCIF (serial) output — where KOS `dbglog` writes by default —
+  is dumped to Flycast's **stdout**. Redirect stdout to a file when launching
+  headless; the loader's lines appear ~30 s after launch (DC HLE boot, no BIOS
+  files needed for a GDI).
+- The launch gotchas from the "Flycast — source build" section apply to the
+  release app too: absolute GDI path, and
+  `defaults write com.flyinghead.Flycast ApplePersistenceIgnoreState -bool YES`
+  before launching.
+
 ### MAME source (reference only — never built, never run)
 
 - Install: `git clone --depth 1 --filter=blob:none --sparse https://github.com/mamedev/mame.git tools/mame`
