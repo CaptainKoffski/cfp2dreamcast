@@ -45,6 +45,60 @@ The environment must be rebuildable from scratch from this file.
   operator menu); their specific keys were not enumerated. Gameplay uses
   only Start + 4 directions + 2 buttons.
 
+### Flycast — source build (Phase 2 instrumentation)
+
+The instrumented build that logs this game's cart streaming, RAM watermarks, JVS
+input, and serial pokes. Distinct from the release Flycast above.
+
+- **Clone:** `tools/flycast-src/` (gitignored), pinned at commit
+  `f09d1f22ef8d199b8b7a2395d0b46774e08a58c2`.
+- **Instrumentation:** `patches/flycast-instrument.diff` +
+  `patches/flycast-syphon-build-fix.diff` — apply per `patches/README.md`
+  (submodule init first; the Syphon patch applies *inside* the submodule).
+- **Build prereqs (macOS/arm64, this box):**
+  - Standalone **CMake 3.31.6** (Kitware universal binary). **NOT** Homebrew
+    cmake 4.x — 4.x breaks this Flycast commit at generate (cmrc/OBJC).
+  - Full Xcode reachable via `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`
+    (cmake's OBJC ABI detection needs `xcodebuild`; CommandLineTools alone fails).
+  - No extra `brew install` needed (zlib/png already present).
+- **Configure + build:**
+  ```sh
+  cd tools/flycast-src
+  git submodule update --init --recursive          # slow; re-run if it times out
+  git submodule update --init --force --recursive   # force-populate if a prior clone left trees empty
+  # (apply the two patches here — see patches/README.md)
+  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+  CM=<path>/cmake-3.31.6-macos-universal/CMake.app/Contents/bin/cmake
+  ZLIB_TBD="$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/libz.tbd"
+  "$CM" -B build -DCMAKE_BUILD_TYPE=Release \
+        -DUSE_BREAKPAD=OFF -DUSE_VULKAN=OFF \
+        -DCMAKE_OSX_ARCHITECTURES=arm64 -DZLIB_LIBRARY="$ZLIB_TBD"
+  "$CM" --build build -j"$(sysctl -n hw.ncpu)"      # resumable; re-run same cmd if a call times out
+  ```
+  Flags: `USE_BREAKPAD=OFF` (dump_syms wants full-Xcode; crash reporting irrelevant),
+  `USE_VULKAN=OFF` (no MoltenVK on this box; OpenGL renderer is fine),
+  `OSX_ARCHITECTURES=arm64` (M1, single-arch halves build time),
+  `ZLIB_LIBRARY=<real libz.tbd>` (upstream's `-lz` doesn't resolve here).
+- **Output:** `tools/flycast-src/build/Flycast.app/Contents/MacOS/Flycast` (Mach-O arm64).
+- **Capturing:** use `scripts/capture.sh <attract|play|input> [seconds]`. It sets
+  `FLYCAST_CARTLOG=<repo>/capture-<pass>.log` (the cartlog helper writes there,
+  flushed per line) and handles two macOS gotchas:
+  - `-config config:rend.vsync=no` — required, or the emu thread deadlocks past
+    boot when the window is unfocused (transient flag; `emu.cfg` untouched).
+  - `defaults write com.flyinghead.Flycast ApplePersistenceIgnoreState -bool YES`
+    — a killed/crashed run makes macOS show a "reopen windows?" modal on the
+    *next* launch that silently blocks boot (process alive at ~0% CPU, guest
+    never runs, zero cartlog). This was the mysterious "post-sleep launch fails"
+    blocker; a reboot does **not** fix it — this key does.
+- **Log line formats** (parsed by `scripts/parse_cart_log.py`):
+  ```
+  CARTDMA src=%08x dest=%08x len=%x      # cart→RAM DMA: cart byte offset, phys RAM dest, bytes
+  CARTPIO offset=%08x                     # PIO seek (ROM_DATA port)
+  WATERMARK region=%s used=%x size=%x     # region in {main,vram,aram}; highest non-zero byte+1
+  JVSREPORT buttons=%04x                  # P1 JVS word (active-high: set bit = pressed)
+  SERIALPOKE addr=%08x data=%08x          # write to a NAOMI_COMM_* serial/network register
+  ```
+
 ### Ghidra — 12.1.2 (20260605)
 
 - Install: `brew install --cask ghidra` unavailable in Homebrew; direct download used:
