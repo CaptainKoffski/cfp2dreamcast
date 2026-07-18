@@ -73,7 +73,9 @@ void shim_cart_service(void) {
     u32 len = m[0x408/4];               /* SB_GDLEN mirror (bytes), sole length */
     /* ponytail: length is SB_GDLEN; DMA_COUNT (mirror+0x14) is never written by
      * this game's arm path (FUN_8c03b81a) -- cross-check dropped */
-    u32 dest = m[0x404/4];              /* SB_GDSTAR mirror (phys dest) */
+    u32 dest = m[0x404/4] & 0x1fffffff; /* SB_GDSTAR mirror; game programs it
+                                         * P1-aliased (0x8c..) -- mask P0/P1/P2
+                                         * region bits to physical 0x0c.. */
     if (!len || off + len > CART_SIZE ||
         (dest & 0x1f000000) != 0x0c000000 || dest + len > 0x0d000000)
         shim_die(2, off, dest);
