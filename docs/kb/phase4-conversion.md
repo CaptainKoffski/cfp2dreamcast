@@ -221,6 +221,242 @@ python3 scripts/parse_cart_log.py capture-attract.log   # -> CHECK shim_home_cle
 
 ---
 
+## V3 — cart-DMA completion-wait mechanism
+
+**Question (spec §4 V3):** does the game wait for the G1 cart DMA by *polling*
+a register or by *sleeping on an IRQ*? Poll → the register-mirror handles it
+for free (the poll lands in the mirror once the descriptor base is repointed);
+IRQ/sleep → the patch table needs an extra branch-over. Candidate wait:
+`FUN_8c03bc12`, called immediately after the `SB_GDST` trigger
+(`boot-binary.md` §4).
+
+### Method
+
+`scripts/ghidra/run.sh script DisasmRange.java 0x8c03bc12 0x8c03bd08`; the
+loop-called function pointer and the base-relative offsets were resolved to
+their pool words (16-bit `.word` / 32-bit `.long`, read from `tools/boot.bin`,
+file offset = VA − `0x8c020000`).
+
+### FUN_8c03bc12 is a base-relative poll loop (verdict: POLL, not IRQ)
+
+`FUN_8c03bc12(r4=flag, r5=descriptor)` (`0x8c03bc12`–`0x8c03bc72`):
+
+```
+8c03bc20  LOOP: mov.l @(0x70,r14),r2 ; r2 = [desc+0x70]  (mode flag)
+8c03bc24        tst r2,r2
+8c03bc26        bf   0x8c03bc50       ; mode!=0 → skip yield
+8c03bc2e        jsr  @r11             ; r11 = *0x8c03bd00 = FUN_8c09dfe4  (task yield)
+8c03bc32        mov  #0x58,r0
+8c03bc36        mov.l @(r0,r14),r3    ; r3 = [desc+0x58]  = G1 base (0xa05f7000)
+8c03bc3a        add  r5,r3            ; r5 = *0x8c03bcf6 = 0x0418  → base+0x418 = SB_GDST
+8c03bc3c        mov.l @r3,r2          ; r2 = *(base+0x418)  ← READ SB_GDST
+8c03bc3e        tst  r2,r13           ; r13 = 1  → test bit0
+8c03bc40        bf   0x8c03bc58       ; bit0 SET (busy) → 0x8c03bc58 → loops back to 0x8c03bc20
+                ; bit0 CLEAR (done): read base+0x4f8 (*0x8c03bcfa) → [desc+0x5c], return
+```
+
+- The exit condition is `*(base+0x418) & 1 == 0` (SB_GDST bit0 clear = "DMA no
+  longer in progress"). `base = [desc+0x58]` = the descriptor register base
+  (`0xa05f7000`, see cart-patch-sites). This is a **descriptor-base-relative
+  read** → it lands in the shim mirror once the base is repointed.
+- Pool offsets (`tools/boot.bin`): `0x8c03bcf6 = 0x0418` (SB_GDST),
+  `0x8c03bcf8 = 0x0414` (SB_GDEN), `0x8c03bcfa = 0x04f8` (G1 status, → desc+0x5c),
+  `0x8c03bcfc = 0x0084`. All are offsets added to `base`, so **every register
+  access in the wait is base-relative** — none is an absolute pool literal.
+- `*0x8c03bd00 = 0x8c09dfe4` is **not** a sleep/IRQ primitive: `FUN_8c09dfe4`
+  (`0x8c09dfe4`+) saves `PR/MACH/MACL/r14..r11` to a context block at
+  `*0x8c09e0b4` — a **cooperative task-yield / context switch**. So the loop is
+  a *yield-between-polls busy-wait*, not an interrupt wait. The exit still
+  depends 100 % on the register read at `0x8c03bc3c`.
+- The sibling arm helper `FUN_8c03bbe8` (`0x8c03bbe8`, called before the
+  trigger) performs the same base-relative poll: writes `base+0x414`
+  (SB_GDEN) = 0 and spins on `base+0x418` bit0 (`0x8c03bc02`–`0x8c03bc0a`).
+- `*0x8c03bd04 = 0xdeaddead` is a poison sentinel compared in the post-DMA
+  handler `FUN_8c03bc74` — not part of the wait.
+
+### Verdict + chosen intercept
+
+**POLL, base-relative.** No interrupt/sleep wait exists, so **no branch-over
+patch is required**. Because `FUN_8c03bc12`, `FUN_8c03bbe8`, and the runtime
+trigger all read/write `SB_GDST`/`SB_GDEN` as `base+0x418`/`base+0x414` with
+`base = [desc+0x58]`, repointing the descriptor base (cart-patch-sites, patch
+#1) makes the whole wait land in the mirror. The shim keeps **`mirror+0x418`
+bit0 = 0** (DMA idle/done) after each synchronous service, and the first poll
+iteration exits.
+
+- **Chosen default (belt-and-suspenders): entry-hook `FUN_8c03bc12` →
+  `shim_cart_service`** (serve the read, ensure completion visible, return).
+  Works for any polling variant and removes the cooperative yield from the hot
+  path. Recorded for Task 12.
+- Even without the hook, the mirror alone satisfies the wait (poll reads
+  `mirror+0x418` = 0). The hook is the safety margin, not a necessity.
+
+Every config-time `SB_GDST` reader uses the *same* wait-for-clear test
+(`tst r2,r2; bf` loops while `SB_GDST != 0`: `FUN_8c08074a`, `FUN_8c080868`,
+`FUN_8c081c76`, `FUN_8c081d68/d86`, `FUN_8c081efc`), so a single invariant —
+**mirror `+0x418` reads 0 when idle** — satisfies both the runtime and the
+config-time pollers.
+
+### Reproduction
+
+```sh
+scripts/ghidra/run.sh script DisasmRange.java 0x8c03bbe8 0x8c03bd06 2>&1 | grep 'DisasmRange.java> 8c03'
+scripts/ghidra/run.sh script DisasmRange.java 0x8c09dfe4 0x8c09e002 2>&1 | grep 'DisasmRange.java> 8c09'
+# pool offsets: 0x8c03bcf6=0418 0x8c03bcf8=0414 0x8c03bcfa=04f8 0x8c03bd00=8c09dfe4
+```
+
+---
+
+## cart-patch-sites — cart/G1 register-mirror patch list (Task 6)
+
+The exact list Task 12 turns into patch definitions for the **register-mirror**
+cart-DMA shim (spec §3). Every game store/load to the Naomi cart/G1 registers
+(`0x5f7000`–`0x5f7014` cart offset/count, `0x5f7400`–`0x5f74ff` G1 DMA channel)
+must be repointed to a shim-owned **mirror block** so nothing hits the DC's
+real GD-ROM ATA registers at the same addresses (`naomi-vs-dreamcast.md` §3
+collision). Reads of the mirror are served by the shim; the `SB_GDST` trigger
+becomes a shim call (Task 12).
+
+### The mirror block
+
+A ≥ `0x500`-byte (round to `0x800`) block in shim home
+(`0x8cfc0000`–`0x8cffffff`, V2-verified), laid out so **`MIRROR + 0xYYY`
+stands in for register `0x5f7YYY`**. Repoint values use the **P2-uncached**
+alias (`0xA0000000 | mirror_phys`, written `MIRROR_P2` below) to match the
+game's original `0xa05f7xxx` accesses and to keep shim/game views coherent
+without cache flushes. Offsets actually used span `0x00c`–`0x4b8`.
+
+### Method
+
+`scripts/ghidra/ListPoolWords.java` (new this task) raw-scans every 4-aligned
+32-bit word whose value masked to 29-bit phys lands in `[0x5f7000, 0x5f7800)`
+and prints its referencing instructions + functions; cross-checked against the
+Phase-3 operand+data scanner `FindMmioXrefs.java` (identical 13-site active
+set) and against `getReferencesTo` per word. Each active pool word was then
+confirmed via `DisasmRange` to be used **only** by cart/G1 config/streaming
+code (no unrelated sharer).
+
+```sh
+scripts/ghidra/run.sh script ListPoolWords.java 0x005f7000 0x005f7800 2>&1 | grep POOLWORD
+scripts/ghidra/run.sh script FindMmioXrefs.java 2>&1 | grep -E 'block=(cart|g1dma)'
+```
+
+### Patch #1 — descriptor-base source (PRIMARY; covers ALL runtime streaming)
+
+The runtime trigger `FUN_8c03bd08` and its wait/arm helpers read the G1
+register base from `[desc+0x58]` and add offsets (`boot-binary.md` §4). That
+base is set **once, at descriptor construction**, from a single pool word:
+
+- **Getter** `FUN_8c02d9a6` (`0x8c02d9a6`): `mov.l 0x8c02da74,r0; rts` — returns
+  `*0x8c02da74 = 0xa05f7000`. Pool word `0x8c02da74` is referenced **only** by
+  this getter (`getReferencesTo` → 1 ref).
+- **Constructor** `FUN_8c02dd20`: `0x8c02dd2c bsr 0x8c02d9a6` (getter → r0),
+  then `0x8c02dd30 mov #0x58,r1; add r14,r1; 0x8c02dd38 mov.l r0,@r1` →
+  **`*(desc+0x58) = 0xa05f7000`**. `FUN_8c02dd20` (via `FindRefs`) is the
+  getter's sole caller and the sole writer of `+0x58` (all other `+0x58`
+  accesses in the `0x8c03bxxx` cluster are reads).
+
+| pool word | value | ref | rewrite |
+|---|---|---|---|
+| `0x8c02da74` | `0xa05f7000` | `FUN_8c02d9a6` (only) | → `MIRROR_P2 + 0x000` |
+
+**Consumers auto-covered by patch #1** (all read `base=[desc+0x58]`, add a const):
+`FUN_8c03bd08` writes `base+0x414` (SB_GDEN, `0x8c03bd1e`) and `base+0x418`
+(SB_GDST trigger, `0x8c03bd26`); `FUN_8c03bc12`/`FUN_8c03bbe8` poll
+`base+0x418`; `FUN_8c03b81a` writes `base+0x404/0x408/0x40c/0x4b8`
+(`0x8c03b88e`–`0x8c03b8ea`, offsets `0x8c03b984..0x8c03b98a`). **Because these
+are `base + const`, once `base = MIRROR_P2` every one lands in the mirror
+automatically — confirmed.** (The `SB_GDST`/`SB_GDEN` computed writes the task
+flags in `FUN_8c03bd08` therefore need no separate patch.) This is the whole
+per-frame streaming path (dynamically: all 460 cart DMAs, `boot-binary.md` §4).
+
+### Patches #2–#13 — config-time absolute pool literals
+
+Config/region-setup code programs the G1 channel via **absolute** pool literals
+(no descriptor). Each would hit real ATA on DC; each pool word is exclusive to
+its function (cross-checked). `MIRROR_P2 + 0xYYY` = repoint target.
+
+| # | pool word | value | reg | function(s) @ load site | access | rewrite |
+|---|---|---|---|---|---|---|
+| 2 | `0x8c08071c` | `0xa05f74b8` | GDEN cfg `74b8` | `FUN_8c08063c` @`0x8c08063c` | WRITE | `MIRROR_P2+0x4b8` |
+| 3 | `0x8c080720` | `0xa05f7480` | GDSTAR `7480` | `FUN_8c08063c` @`0x8c080642` | WRITE | `MIRROR_P2+0x480` |
+| 4 | `0x8c080724` | `0xa05f7484` | GDLEN `7484` | `FUN_8c08063c` @`0x8c080648` | WRITE | `MIRROR_P2+0x484` |
+| 5 | `0x8c080728` | `0xa05f7490` | GDDIR `7490` | `FUN_8c08063c` @`0x8c080656` | WRITE | `MIRROR_P2+0x490` |
+| 6 | `0x8c08072c` | `0xa05f74a4` | `74a4` | `FUN_8c08063c` @`0x8c08065a` | WRITE | `MIRROR_P2+0x4a4` |
+| 7 | `0x8c0807d8` | `0xa05f7418` | SB_GDST `7418` | `FUN_8c08074a` @`0x8c08074a` | READ | `MIRROR_P2+0x418` |
+| 8 | `0x8c0808e4` | `0xa05f7418` | SB_GDST `7418` | `FUN_8c080868` @`0x8c080868` | READ | `MIRROR_P2+0x418` |
+| 9 | `0x8c080904` | `0xa05f700c` | cart `700c` | `FUN_8c080868` @`0x8c080874` | WRITE | `MIRROR_P2+0x00c` |
+| 10 | `0x8c080e3c` | `0xa05f700c` | cart `700c` | `FUN_8c080d18` @`0x8c080d3c` | WRITE | `MIRROR_P2+0x00c` |
+| 11 | `0x8c081d24` | `0xa05f7418` | SB_GDST `7418` | `FUN_8c081c76` @`0x8c081c78`, `FUN_8c081aee` @`0x8c081b90` | READ (poll) | `MIRROR_P2+0x418` |
+| 12 | `0x8c081e90` | `0xa05f7418` | SB_GDST `7418` | `FUN_8c081d68` @`0x8c081d6c`, `FUN_8c081d86` @`0x8c081d86` | READ (poll) | `MIRROR_P2+0x418` |
+| 13 | `0x8c081ff8` | `0xa05f7418` | SB_GDST `7418` | `FUN_8c081efc` @`0x8c081fac` | READ (poll) | `MIRROR_P2+0x418` |
+
+**Computed-offset writes inside `FUN_8c08063c` are auto-covered by #2–#6.** The
+function loads the pool literals as *bases* then reaches adjacent registers by
+constant arithmetic: `add #-0x30`/`add #0xc` off r2 (from `74b8`) → `7488`,
+`7494`; `add #0xc` off r3 (from `7480`) → `748c`; `add #0x10` off r7 (from
+`7490`) → `74a0` (`0x8c08064e`–`0x8c080748`). Since the deltas are constants
+and the mirror preserves relative layout, repointing the 5 base literals
+redirects the computed writes too — no extra patch.
+
+**Config-time `SB_GDST` reads (#7,#8,#11,#12,#13) share the wait-for-clear
+semantics of V3** (`tst r2,r2; bf` loops while `SB_GDST != 0`). With the shim
+holding `mirror+0x418 = 0` when idle, `FUN_8c08074a` returns "idle",
+`FUN_8c080868` proceeds, and the `0x8c081xxx` pollers exit immediately — no
+hang. These config-time sites were **not** observed in the dynamic capture
+(the `CARTDMAPC` hook logs `SB_GDST` *stores* only, and all 460 were inside
+`FUN_8c03bd08`); they are repointed defensively because they are live,
+statically-reachable code that would read real GD-ROM ATA on DC.
+
+### Flagged — NOT mirror-repointable (findings)
+
+1. **Generic hardware-register tables** (`0x8c0a39a0`+ and `0x8c0a3fb8`+). These
+   are data tables listing DMA-start / Holly registers across **all** channels,
+   not cart/G1-exclusive pool literals: e.g. `0x8c0a39a0..` = `{reg, 0}` pairs
+   `0x5f6808, 0x5f6820, 0x5f6c18 (SB_MDST maple), 0x5f7418 (SB_GDST), 0x5f7818
+   (AICA), 0x5f7838}`; `0x8c0a3fb8..` = a run `0x5f6800/04/10/14, 0x5f6c04/10,
+   0x5f7404/08/40c, 0x5f7800/04/08/0c/10`. They hold the G1 regs `0x5f7418`
+   (`0x8c0a39b8`) and `0x5f7404/08/40c` (`0x8c0a3fd0/d4/d8`) **among unrelated
+   Maple/AICA/PVR regs**, so the G1 entries cannot be blindly repointed without
+   desyncing any routine that walks the whole table. `getReferencesTo` returns
+   **zero** for every entry (and the neighborhood), so no analyzed code indexes
+   them — they are either dead or reached only by a computed-access routine
+   Ghidra did not resolve. **If** M2/M3 testing shows a fault touching real
+   GD-ROM around a multi-channel DMA quiesce/reset, this needs an
+   *instruction-level* patch on that routine, **not** a mirror repoint. LOW
+   risk: unreferenced + the dynamic capture (boot→attract→demo→play) never
+   triggered a cart DMA outside `FUN_8c03bd08`.
+
+2. **Dead pool slots** holding cart/G1 addresses but with **zero** references
+   (confirmed `FindRefs`; not even Ghidra-defined data — raw literal-pool
+   filler): `0x8c080620` (`7418`), `0x8c080628` (`703c`), `0x8c080630`
+   (`7014`), `0x8c0807e0` (`7000`), `0x8c0807e4` (`7004`), `0x8c0807f0`
+   (`7008`), `0x8c0808e8` (`7004`), `0x8c0808f0` (`7000`), `0x8c0808f4`
+   (`7014`), `0x8c0808f8` (`7010`), `0x8c080908` (`7404`), `0x8c08090c`
+   (`7408`), `0x8c080910` (`740c`), `0x8c081eb4` (`7068`), `0x8c0821c8`
+   (`7418`). Not active programming sites → **no patch**; listed for
+   completeness so a future re-scan does not re-flag them.
+
+### Summary for Task 12
+
+**13 mirror repoints:** patch #1 (descriptor base `0x8c02da74`) covers the
+entire runtime streaming path (trigger + arm + wait, all base-relative);
+patches #2–#13 cover the config-time absolute literals. Plus the V3 entry-hook
+on `FUN_8c03bc12` (default). No branch-over patch needed (V3 = poll, not IRQ).
+Two flagged findings (generic reg tables; dead slots) need no mirror action now.
+
+### Reproduction
+
+```sh
+scripts/ghidra/run.sh script ListPoolWords.java 0x005f7000 0x005f7800 2>&1 | grep POOLWORD
+scripts/ghidra/run.sh script DisasmRange.java 0x8c02dd20 0x8c02dd3a 2>&1 | grep 'DisasmRange.java> 8c02'  # +0x58 base store
+scripts/ghidra/run.sh script DisasmRange.java 0x8c08063c 0x8c080760 2>&1 | grep 'DisasmRange.java> 8c08'  # FUN_8c08063c config writes
+# pool values read from tools/boot.bin (offset = VA-0x8c020000, LE):
+#   0x8c02da74=a05f7000  0x8c08071c=a05f74b8 ... 0x8c081ff8=a05f7418
+```
+
+---
+
 ## V4 — MIE response templates + response buffer address
 
 **Question (task brief):** the input/EEPROM shim replaces the MIE (Maple cmd
