@@ -952,3 +952,111 @@ scripts/ghidra/run.sh script DisasmRange.java 0x8c0803a4 0x8c0803da 2>&1 | grep 
 # pool values (tools/boot.bin, LE): 0x8c07fb38=a0200000  0x8c07fc74=a0200008
 #   0x8c07fc78=a0200100  0x8c081d4c=a0200000  0x8c081d50=a0200004
 ```
+
+---
+
+## V-EEPROM — baked free-play 93C46 image (Task 8)
+
+Deliverable: `shims/data/eeprom.bin` — the exact 128-byte Naomi main-board
+93C46 image the input/EEPROM shim replays for MIE sub `0x03`. **Gitignored**
+(ROM-derived runtime data — never committed; only this provenance record is).
+Task 11 embeds it.
+
+### Source (provenance)
+
+Reconstructed **from the captured MIE replies the game already read and
+accepted** — the strongest possible guarantee (no hand-editing, so CRCs are
+correct by construction):
+
+* **Bytes 0x00–0x23 (0–35): system section**, copied verbatim from
+  `build/mie_sub03.bin` at `EE_OFF=4` (`eeprom.bin[0:60] == mie_sub03.bin[4:64]`,
+  verified). This is the two-copy CRC-protected system block
+  (`naomi.md:174-181`, `naomi-vs-dreamcast.md` §5).
+* **Bytes 0x24–0x7F (36–127): all `0x00`** — the game section as the game read
+  it. Bytes 36–59 are the captured zeros; 60–127 continue them (the 0x40-byte
+  MIERESP instrumentation dump, `maple_if.cpp:242`, truncates the 128-byte
+  reply, so 60–127 weren't logged — but see acceptance proof below; the game
+  ignores this region).
+
+The Flycast on-disk `.nvmem` (`…/data/Cleopatra Fortune Plus.dat.nvmem`, 0x8000
+bytes) is the **game SRAM**, not the 93C46 — a full-filesystem scan (294k files)
+for the system signature `50cb104245532009101a` found it **only** in
+`build/mie_sub03.bin`. Flycast persists the 93C46 to a `…​.eeprom` file
+(`maple_jvs.cpp:1449-1451,1617-1640`); Cleopatra (`cleoftp`) ships **no** built-in
+default (`naomi_roms.cpp:5043`, last field `nullptr`), and no `.eeprom` file
+exists on disk now — so the capture is the sole authoritative source.
+
+### Free-play confirmation (decode + citation)
+
+System data byte at EEPROM **offset 9** (copy 1) and **offset 27** (copy 2) =
+`0x1A`. Per `naomi.md:180`, the coin-assignment byte is zero-indexed and
+`0x1A` = assignment #27 = **FREE PLAY**. Cross-checked against
+`naomi/eeprom.py` `default()` (`system_array[7] = coin_setting − 1`, so
+`0x1A → 27`). Both CRC copies carry `0x1A`, so free-play survives either
+power-loss-recovery copy. Decoded system block:
+
+| off | bytes | meaning |
+|---|---|---|
+| 0x00 | `50 cb` | CRC-16 over 0x02–0x11 (**recomputed = match**) |
+| 0x02 | `10` | attract sound on (`naomi.md:178`) |
+| 0x03 | `42 45 53 20` = "BES " | game serial (= ROM hdr `0x134`, verified) |
+| 0x07 | `09 10` | additional settings |
+| 0x09 | **`1a`** | **coin assignment = FREE PLAY** (`naomi.md:180`) |
+| 0x0a | `01 01 01 00 11 11 11 11` | remaining settings |
+| 0x12 | `50 cb` + copy | identical second copy (0x12–0x23) |
+
+Because the ROM header default-settings block is **coin-mode**
+(`rom.defaults`: `apply_settings=False, coin_setting=1`, all 5 regions), free-play
+is **not** ROM-forced — it was configured in the test menu and captured, which
+is exactly why the harvest (not regeneration) is authoritative.
+
+### CRC status
+
+* **System section: CRC-valid, recomputed and confirmed** — both copies'
+  stored CRC `0x50cb` equals `crc(data[2:18])`/`crc(data[20:36])` using the
+  algorithm in `tools/netboot/naomi/eeprom.py` (`0xDEBDEB00` seed +
+  `0x10210000` round, trailing `0x00`).
+* **Game section: all-zero, accepted by the game as-is.** The netboot tool's
+  stricter `__validate_game` flags it (`crc(b"")=0x78ac ≠ 0x0000`), but
+  Cleopatra stores nothing in the 93C46 game section: across every capture the
+  game issued **4× sub `0x03` reads and 0× sub `0x0B` writes** — it read this
+  image and never re-initialised. The empirical acceptance (game booted to
+  attract+demo, free-play) outranks the general-purpose validator.
+
+### First 16 bytes
+
+`50cb 1042 4553 2009 101a 0101 0100 1111` (values gitignored elsewhere).
+
+### Consistency with Tasks 4/5
+
+`EE_OFF=4` (Task 5) holds: `eeprom.bin[0:60] == mie_sub03.bin[4:64]`, so the
+shim replaying the image at `recvaddr+4` hands the game the identical bytes it
+accepted. Sub `0x01` (schedule-read ACK) is unaffected — shim replays
+`mie_sub01.bin` verbatim as before.
+
+### Reproduction
+
+```sh
+# rebuild + full self-check (asserts length, both system CRCs, free-play,
+# serial, and EE_OFF consistency); writes gitignored shims/data/eeprom.bin
+python3 - <<'PY'
+import struct
+def _c(d):
+    rc=0xDEBDEB00
+    for b in bytes(d)+b"\x00":
+        rc=(rc&0xFFFFFF00)+(b&0xFF)
+        for _ in range(8):
+            rc=(rc*2)&0xFFFFFFFF if rc<0x80000000 else ((rc*2)&0xFFFFFFFF)+0x10210000&0xFFFFFFFF
+    return struct.pack("<H",(rc>>16)&0xFFFF)
+s=open("build/mie_sub03.bin","rb").read(); assert s[0]==0x87
+ee=bytearray(s[4:64])+b"\x00"*68; assert len(ee)==128
+assert ee[0:2]==_c(ee[2:18]) and ee[18:20]==_c(ee[20:36])   # system CRCs
+assert ee[2:18]==ee[20:36] and ee[3:7]==b"BES "
+assert ee[9]==0x1A and ee[27]==0x1A                          # free-play #27
+assert bytes(ee[:60])==s[4:64]                               # EE_OFF=4 consistency
+open("shims/data/eeprom.bin","wb").write(bytes(ee)); print("ok 128B free-play")
+PY
+# writes are absent from every capture (proves accept-as-is):
+grep -c 'sub=0b' capture-*.log   # -> 0
+```
+
