@@ -1602,3 +1602,72 @@ grep -oE 'IOCHK pc=[0-9a-f]+' cap.log | sort | uniq -c   # in-loop 1fa/200 absen
 scripts/ghidra/run.sh script DisasmRange.java 0x8c07a22a 0x8c07a2e0
 scripts/ghidra/run.sh script FindRefsTo.java 0x8c07a22a    # single caller FUN_8c04ae50
 ```
+
+## Task 14d — post-check MIE frame is a RED HERRING; real M3 blocker pinned
+
+Task 14c left a "post-check `shim_maple_boot` sub=0 recv=0xc8000000 → `shim_die(3)`"
+blocker and hypothesised it was a misparse or a servable MIE frame. **Both refuted
+by evidence.** The frame is a non-MIE transaction the shim was never meant to touch,
+and handling it (any way) does not advance the game.
+
+### The frame, precisely (dumped + disassembled)
+
+`shim_maple_boot` (hooked at `pool[0x8c027618]=0x8c0315ce`) parses `sub=[cmdblk+0xc]`
+low byte and `recv=[cmdblk+0x4]`, `cmdblk=*0x8c0e6400`. Disasm of the real builder
+`FUN_8c0315ce` (`0x8c0315ce–0x8c03161c`) confirms **the shim reads exactly what the
+builder reads — no offset misparse.** At the post-check call:
+
+- `cmdblk = 0x8c0e62e0` (a static scratch command block, zero-filled in the image,
+  refilled per transaction; boot.bin off `0xc62e0`).
+- `[cmdblk+0x00]=control`, `[cmdblk+0x04]=recv=0xc8000000`, `[cmdblk+0x08]=0x940004f6`,
+  `[cmdblk+0x0c]` low byte `=0x00` (sub).
+- The builder's frame header = `([cmdblk+0x08] & 0x03efffff) | 0x20000000 = 0x200004f6`
+  → per Flycast `maple_if.cpp maple_DoDma`: **cmd `0xf6`, reci `0x04`** — NOT an MIE
+  frame (MIE = cmd `0x86`, reci `0x20`). `recv 0xc8000000 & 0x1fffffe0 = 0x08000000`
+  (area 2, invalid → Flycast discards the reply). `arg0 = 0x8c0a27f4` = **float data**
+  (`3f800000`×4), a graphics/matrix payload, not a JVS command.
+
+So `sub=0 / recv=0xc8000000` are **real fields of a non-MIE transaction**, not a
+misread. `pool[0x8c027618]` feeds the **generic** dispatcher `FUN_8c027584`
+(`FindRefsTo` = 160+ callers); its builder `0x8c0315ce` serves ALL `(r10&0x20)==0`
+transactions. Hooking it made the shim mis-treat every such frame as MIE.
+
+### Three experiments → the frame is a red herring (instrumented DC interpreter)
+
+| shim_maple_boot handling | cart reads | outcome |
+|---|---|---|
+| shim_die(3) (Task 14c ship) | **149** | clean halt at first non-MIE call (masks the real crash) |
+| tolerate (fake completion) | **180** | `EXC epc=0c10004c evn=180` crash loop |
+| **unhooked / real builder runs** | **180** | **identical** `EXC epc=0c10004c` crash |
+
+Tolerate and unhook reach the **byte-identical** crash (`SLEEPWAIT pc=8c016928`, then
+`EXC epc=0c10004c evn=180 newpc=8c00f500`). The frame does not even generate a maple
+DMA when the real builder runs (no `cmd=0xf6` in `rawdma_call`; `FUN_8c027eac` routes
+it elsewhere / drops it). ⇒ the sub=0 frame is irrelevant to progress.
+
+### Real M3 blocker (deep — deferred, = Task-14b async-MIE)
+
+After the forced I/O check, the game stays in the I/O-status scene loop
+`FUN_8c04ae50` and polls steady input through the **still-unhooked Mode-B builder**
+`pool[0x8c02ee88]=0x8c03c2c6` (`pc=8c03c3e4`), which returns garbage `fd0023` MIE
+responses (no real MIE on DC — the exact Task-14b deferral). The scene object
+`*0x8c0c4510` (healthy `0x8c0a2494`) goes **null** and the game wild-jumps to
+**unloaded, zero-filled RAM `0x0c10004c`** (never a cart-DMA dest; boot image = `0x0000`
+= illegal instruction) → `evn=0x180` exception loop the game's own handler cannot
+recover from. Root cause: **the force-check advances into code that genuinely needs a
+working I/O board (real MIE input); faking the result flag is insufficient.** Reaching
+attract requires the deferred Task-14b fix — service the async maple engine so the
+steady input returns real controller data (§input-ABI addendum step 4), not the
+sub=0 frame.
+
+### Ship (Task 14d)
+
+`build_patch_table.py`: **un-hook the boot slot** (drop the `ptr(0x8c027618 → shim_maple_boot)`
+swap) — the root-cause fix for the reported symptom: stop intercepting a generic
+dispatcher with MIE logic. 18 patches (was 19). Effect: no false `SHIMERR=3`; game
+advances 149 → **180** cart reads (M2's 147 intact); reaches the real blocker instead
+of masking it. `shim_maple_boot` kept in the shim as the documented boot-MIE ABI +
+re-hook target. Reproduce: `scripts/../ (build)` then
+`FLYCAST_CARTLOG=cap.log <instrumented Flycast> -config config:Dynarec.Enabled=no
+-config config:Debug.SerialConsoleEnabled=yes build/cleo.gdi`;
+`grep -c '^CART ' <serial>` = 180, `grep 'EXC epc' cap.log` = the crash.

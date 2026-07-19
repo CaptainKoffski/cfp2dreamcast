@@ -140,7 +140,20 @@ pool(0x8C0814D0, 0xA01FFD00, BIOS_1FFD00_P2, "#15 BIOS 0x1ffd00 str -> shim-home
 # §input-ABI: MIE fn-pointer slots (game does jsr @rN, rN loaded from the pool
 # word) -> swap the slot to the shim entry (not an entry hook: the swap is the
 # whole redirect).
-ptr(0x8C027618, 0x8C0315CE, sym("shim_maple_boot"),  "input BOOT slot -> shim_maple_boot")
+# §Task 14d: the BOOT slot 0x8c027618 (=0x8c0315ce) is NOT hooked. That pool feeds
+# the GENERIC transaction dispatcher FUN_8c027584 (160+ callers), whose builder
+# 0x8c0315ce serves ALL of its (r10&0x20)==0 transactions -- not only MIE input.
+# On DC the boot JVS enumeration uses the raw-maple path (Task 14/14b: shim_maple_boot
+# fires 0x before the I/O check), and AFTER the forced I/O check the first call through
+# this path is a NON-MIE transaction (frame_header cmd=0xf6/reci=0x04, recv=0xc8000000,
+# float payload) -- so hooking it made the shim mis-treat a generic frame as MIE and
+# shim_die(3). Behavioural proof (instrumented DC interpreter): hooked+die halts at 149
+# cart reads; unhooked (real builder runs) AND tolerate-in-shim BOTH reach 180 reads and
+# the IDENTICAL downstream crash (EXC epc=0c10004c evn=180) -- i.e. this frame is a red
+# herring, and letting the real builder handle it is both correct and carries the game
+# further. The real M3 blocker is downstream (deferred Task-14b async-MIE; see
+# phase4-conversion.md §Task 14d). shim_maple_boot stays in the shim as the documented
+# boot-MIE ABI, ready to re-hook if a MIE-only call site is ever isolated.
 ptr(0x8C02ED6C, 0x8C03C2C6, sym("shim_maple_entry"), "input STEADY slot -> shim_maple_entry")
 # §Task 14c: FORCE the I/O-board-detected check to pass (M3 unblock).
 # Dynamic evidence (instrumented DC-mode interpreter on build/cleo.gdi): the current
@@ -187,5 +200,6 @@ out.append(f"enum {{ CLEO_NPATCHES = {len(patches)} }};")
 (ROOT / "build").mkdir(exist_ok=True)
 (ROOT / "build/patch_table.h").write_text("\n".join(out) + "\n")
 print(f"OK patch_table.h: {len(patches)} patches "
-      f"(1 hook, 15 pool, 2 ptr, 1 insn16); MIRROR_P2={MIRROR_P2:#010x} "
+      f"(1 hook, 15 pool, 1 ptr, 1 insn16; boot MIE slot unhooked Task 14d); "
+      f"MIRROR_P2={MIRROR_P2:#010x} "
       f"BIOS_60000_P2={BIOS_60000_P2:#010x} BIOS_1FFD00_P2={BIOS_1FFD00_P2:#010x}")

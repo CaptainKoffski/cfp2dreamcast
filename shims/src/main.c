@@ -96,7 +96,13 @@ static void maple_reply(u32 sub, u32 recvaddr) {
     }
 }
 
-/* Boot MIE builder (0x8c0315ce, reached via fn-ptr pool[0x8c027618]). Sub +
+/* ponytail: currently UNHOOKED (Task 14d). pool[0x8c027618] feeds the generic
+ * dispatcher FUN_8c027584 (160+ callers), not an MIE-only site, so hooking it made
+ * the shim shim_die on the first post-check NON-MIE frame (cmd 0xf6, recv 0xc8000000).
+ * Kept as the documented boot-MIE ABI + re-hook target once a MIE-only call site is
+ * isolated. See scripts/build_patch_table.py §Task 14d + phase4-conversion.md §Task 14d.
+ *
+ * Boot MIE builder (0x8c0315ce, reached via fn-ptr pool[0x8c027618]). Sub +
  * recvaddr are read from the command block *0x8c0e6400 (word3 low byte = sub,
  * word1 = recvaddr). Completion: leave the Maple DMA observably done, i.e.
  * SB_MDST reads 0. [KB §input-ABI site A -- boot completion is M4-gated.]
