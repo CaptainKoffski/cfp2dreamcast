@@ -971,6 +971,43 @@ as documented boot-MIE ABI but no longer hooked.
 attract-streaming loop past the Task-14d crash.** Visual M3 (attract renders) and
 M4 (input responds) are the user's confirmation.
 
+### Task 15 — diagnose Start (M4) + free-play (M5); instrument the input path
+
+Full analysis: `.superpowers/sdd/task-15-report.md`. The input read path
+(`maple.c` GetCondition → `dc_to_jvs` → `jvs_digital` BTN_OFF `0x20/0x21` +
+checksum `0x3a`) is **correct by construction — no static bug to fix**. Rate-
+limited SCIF instrumentation was added to `shims/src/main.c` (input trace +
+EEPROM deliver/write logging); the break is runtime and pins down under the
+user's real Start press.
+
+**Confirmed this task (unattended DC-mode boot, serial + cart log):**
+- **Free-play EEPROM IS delivered** via the async path: `EE deliver rcv=0c1038e0
+  coin09=0x1a coin27=0x1a` (both copies FREE PLAY, `naomi.md:180`). **EE_OFF=4 +
+  sub 0x03 are correct — delivery is not the bug.**
+- **NEW: the game issues exactly 16× sub-0x0b EEPROM WRITES** (`EE
+  WRITE(reinit?)`, alternating recv buffers) — **absent from all five Naomi
+  captures** (§V-EEPROM claimed "0× 0x0b"). This is the EEPROM **re-init**: our
+  baked `eeprom.bin` game section is all-zero with an invalid CRC
+  (`crc(b"")=0x78ac ≠ 0x0000`), so the game detects the mismatch and
+  re-initialises (shim ACKs+drops the writes). Two live hypotheses for "9
+  credits": **H1** the re-init resets coin to ROM-default coin mode
+  (`coin_setting=1`); **H2** coin/credit state comes from a BIOS-maintained path
+  we don't replicate (the 16 writes being normal game-section init). Not
+  disambiguated; **not a quick fix**, deferred. Next step: log the 0x0b write
+  target offset/payload.
+- **M3 intact:** `MIERESP=0` (no real MIE DMA leaked), no `SHIMERR`, `IOCHK …
+  conn=1 specs=1 mir=1`, cart streaming ~218 MB.
+- **sub-0x33 not reached in 195 s interpreter** (0 `IN` lines) — same
+  interpreter-speed artifact as 14f; the user's dynarec run reaches it.
+
+**Concrete Start finding — keyboard-profile mismatch (Link 2b).** `cleo.gdi`
+boots as a **Dreamcast** disc, so Flycast uses `mappings/SDL_Keyboard.cfg` where
+**Start = "/" (SDL scancode 56)** and **Enter (40) is unbound**; the
+**arcade** profile (`SDL_Keyboard_arcade.cfg`, used for the raw Naomi ROM) binds
+Start to **Enter (40)**. A user habituated to Enter=Start presses Enter →
+unbound → nothing. Most-likely cause; the `IN raw=…` trace confirms whether the
+press reaches the emulated port-A controller.
+
 ---
 
 ## V5 — battery-SRAM reference scan (spec §3 out-of-scope check)

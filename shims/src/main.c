@@ -9,6 +9,7 @@ unsigned short maple_getcond(void);
 unsigned short dc_to_jvs(unsigned short);
 unsigned char  jvs_checksum(const unsigned char *);
 extern const unsigned char jvs_hasdata[];               /* src/jvs.c */
+void scif_puts(const char *); void scif_puthex(unsigned int);   /* src/scif.c */
 
 /* MIE reply templates + free-play EEPROM, embedded at build (Makefile xxd rules;
  * gitignored source blobs). Verbatim ACKs replayed as captured (§input-ABI 4a). */
@@ -36,13 +37,34 @@ extern const unsigned char mie_jvs14[]; extern const u32 mie_jvs14_len;  /* 14 f
  * .data but does NOT zero .bss). */
 static u8 pending_jvs = 0xff;
 
+/* Task 15 instrumentation state. ALL forced non-zero so they land in .data
+ * (the loader copies .data but does NOT zero .bss -- see pending_jvs above; a
+ * .bss static would boot with garbage and break the rate-limit / one-shot). */
+static unsigned int in_last = 0xffffffffu;   /* last (raw<<16 | jvs); sentinel forces first log */
+static unsigned int in_hb   = 1;             /* sub-0x33/0x15 poll heartbeat counter */
+static u8 ee_logged = 1;                     /* 1 = still need to log the sub-0x03 EEPROM deliver */
+static u8 wr_left   = 32;                     /* remaining sub-0x0b (EEPROM write / re-init) log budget */
+
 #define SB_MDST (*(volatile u32 *)0xa05f6c18)
 #define GW(a)   (*(volatile u32 *)((a) | 0x80000000u))  /* cached word: game control state */
 #define GB(a)   (*(volatile u8  *)((a) | 0x80000000u))  /* cached byte */
 
-/* Live DC GetCondition -> JVS digital-read has-data frame at recvaddr. */
-static void jvs_digital(void *rx) {
-    unsigned short j = dc_to_jvs(maple_getcond());
+/* Live DC GetCondition -> JVS digital-read has-data frame at recvaddr.
+ * Task 15: rate-limited SCIF trace ("IN raw=<getcond> jvs=<jvsword> sub=<sub>")
+ * on CHANGE or every 256th poll, so a user press is visible on serial without
+ * flooding the ~60Hz poll. raw=0000ffff idle = controller all-released or no pad;
+ * a Start press flips raw (bit3 low) and yields jvs=00008000. */
+static void jvs_digital(u32 sub, void *rx) {
+    unsigned short raw = maple_getcond();
+    unsigned short j   = dc_to_jvs(raw);
+    unsigned int   key = ((unsigned int)raw << 16) | j;
+    if (key != in_last || (++in_hb & 0xffu) == 0u) {
+        in_last = key;
+        scif_puts("IN raw="); scif_puthex(raw);
+        scif_puts(" jvs=");   scif_puthex(j);
+        scif_puts(" sub=");   scif_puthex(sub);
+        scif_puts("\n");
+    }
     u8 f[64];
     xmemcpy(f, jvs_hasdata, 64);
     f[0x20] = (u8)(j >> 8);                 /* BTN_OFF: P1 word big-endian (hi) */
@@ -59,7 +81,7 @@ static void maple_reply(u32 sub, u32 recvaddr) {
     void *rx = (void *)P2ADDR(recvaddr);
     switch (sub) {
     case 0x33:                              /* steady per-frame poll: always live */
-        jvs_digital(rx);
+        jvs_digital(0x33, rx);
         break;
     case 0x15:                              /* boot receive: enumeration reply or live */
         switch (pending_jvs) {              /* keyed on the last transmitted JVS cmd */
@@ -69,13 +91,20 @@ static void maple_reply(u32 sub, u32 recvaddr) {
         case 0x12: xmemcpy(rx, mie_jvs12, mie_jvs12_len); break;
         case 0x13: xmemcpy(rx, mie_jvs13, mie_jvs13_len); break;
         case 0x14: xmemcpy(rx, mie_jvs14, mie_jvs14_len); break;
-        default:   jvs_digital(rx);         break;  /* digital read (0x20/0x21/0x22/none) */
+        default:   jvs_digital(0x15, rx);   break;  /* digital read (0x20/0x21/0x22/none) */
         }
         break;
     case 0x03: {                            /* EEPROM read: 1-word hdr + 128 B @ EE_OFF=4 */
         u8 hdr[4] = { 0x87, 0x00, 0x20, 0x20 };   /* 0x20 words */
         xmemcpy(rx, hdr, 4);
         xmemcpy((u8 *)rx + 4, eeprom_img, 128);
+        if (ee_logged) {                    /* Task 15: confirm free-play EEPROM is delivered (once) */
+            ee_logged = 0;
+            scif_puts("EE deliver rcv="); scif_puthex(recvaddr);
+            scif_puts(" coin09=");   scif_puthex(eeprom_img[9]);   /* 0x1a = FREE PLAY */
+            scif_puts(" coin27=");   scif_puthex(eeprom_img[27]);
+            scif_puts("\n");
+        }
         break;
     }
     case 0x01: xmemcpy(rx, mie_sub01, mie_sub01_len); break;   /* EEPROM ready ACK */
@@ -90,6 +119,10 @@ static void maple_reply(u32 sub, u32 recvaddr) {
                                                0x); defensive so a stray write can't hang. */
         u8 ack[8] = { 0x87, 0x00, 0x20, 0x01, 0x0c, 0x00, 0x8e, 0x00 };
         xmemcpy(rx, ack, 8);
+        if (wr_left) {                      /* Task 15: EEPROM write == game re-init (free-play smoking gun) */
+            wr_left--;
+            scif_puts("EE WRITE(reinit?) rcv="); scif_puthex(recvaddr); scif_puts("\n");
+        }
         break;
     }
     default:   shim_die(3, sub, recvaddr);
