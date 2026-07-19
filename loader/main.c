@@ -75,6 +75,13 @@ int main(void) {
     volatile uint32 *mir = (volatile uint32 *)P2ADDR(G1_MIRROR);
     for (unsigned i = 0; i < 0x800 / 4; i++) mir[i] = 0;
 
+    /* Task 14f: zero the async-Maple register mirror so the steady engine's first
+     * cross-frame SB_MDST poll (0x8c03c30a) sees "not busy" (bit0=0) and triggers,
+     * instead of spinning forever on stale RAM. Uncached P2, matching the game's
+     * repointed 0xa0-prefixed access -- no cache to purge. */
+    volatile uint32 *mmir = (volatile uint32 *)P2ADDR(MAPLE_MIRROR);
+    for (unsigned i = 0; i < MAPLE_MIRROR_LEN / 4; i++) mmir[i] = 0;
+
     /* Relocate the PIC handoff stub out of the copy target and flush it to RAM. */
     uint32 ho_len = (uint32)((uint8 *)handoff_end - (uint8 *)handoff);
     memcpy((void *)HANDOFF_SCRATCH, (void *)handoff, ho_len);

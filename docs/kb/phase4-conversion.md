@@ -870,6 +870,107 @@ Task 14b set out to intercept the "config-time raw-maple JVS enumeration"
    mirror alone suffices or an IRQ/engine hook is required. `maple_reply` +
    `mie_jvs*`/`mie_sub*` blobs are reusable unchanged; only the transport is new.
 
+### Task 14f — async-Maple MIE service (input + EEPROM transport)
+
+Implements approach A from `.superpowers/sdd/task-14e-completion-mechanism.md`
+(completion pinned as AUTO/HARDWARE: `FUN_8c03c2c6` triggers a maple DMA and
+cross-frame-polls the hw `SB_MDST` busy bit, which the DC maple engine
+self-clears every DMA regardless of device — the transaction always "completes",
+just with garbage `fd0023`; the only defect is the DATA in the recv buffer).
+
+**Mechanism (register mirror + wrapper hook, 3 patches; 20 total).**
+
+1. *Maple-base mirror* — pool `0x8c030fec` (`0xa05f6c00`, the sole live maple-base
+   literal, stored by `FUN_8c030fc4` into engine `[struct+0x10f4]`) is repointed to
+   `MAPLE_MIRROR` (`shim_iface.h` = `SHIM_BASE+0x13000` = phys `0x0cfd3000`, P2
+   alias `0xacfd3000`, `0x100` bytes; above BIOS_DATA_1FFD00, below RAM top). After
+   this, `FUN_8c03c2c6`'s computed `base+0x04` (SB_MDSTAR), `base+0x14` (SB_MDEN),
+   `base+0x18` (SB_MDST) accesses land in shim RAM — the game engine triggers **no
+   real controller DMA**. The shim's own `maple.c` GetCondition uses hardcoded real
+   registers, unaffected; the config-time Z80 path uses its own literals
+   (`0x8c080e74/88/8c/90`), untouched.
+
+2. *Both fn-ptr slots* `pool[0x8c02ed6c]` (Mode A) and `pool[0x8c02ee88]` (Mode B,
+   DC takes this) are repointed from `0x8c03c2c6` to `shim_maple_steady`
+   (`shims/src/main.c`). Old-byte asserts: both = `0x8c03c2c6` in `tools/boot.bin`.
+
+3. *Loader* zeroes `MAPLE_MIRROR` (uncached P2, like the G1 mirror) so the engine's
+   first cross-frame `SB_MDST` poll (`0x8c03c30a`) sees bit0=0 and triggers.
+
+**`shim_maple_steady` — per-frame service, ordering from `DisasmRange
+0x8c03c2c6 0x8c03c4a2`:**
+
+```
+call the REAL FUN_8c03c2c6 (fn ptr @0x8c03c2c6), capture rc:
+  0x8c03c30a  read mirror_SB_MDST; bit0 set -> return -1, clear -> proceed (0x8c03c30e)
+  0x8c03c396  bsr FUN_8c03c1c2   (per-frame pump/state machine -- MUST run; 14b)
+  0x8c03c3d6  mov.l r0,@r8       mirror_SB_MDSTAR := phys(descriptor list)
+  0x8c03c3e2  mov.l r12,@(0x18,r2)  mirror_SB_MDST := 1 (trigger); returns 0 (0x8c03c490)
+if mirror_SB_MDST bit0 set (a DMA was triggered this frame):
+  addr = mirror_SB_MDSTAR & 0x1fffffe0
+  walk the maple command list (Flycast maple_DoDma, maple_if.cpp:184-311):
+    h1=[addr+0], recv=[addr+4]&0x1fffffe0, plen=(h1&0xff)+1, op=(h1>>8)&7
+    if op==0 (MP_Start) and [addr+8]&0xff==0x86 and ([addr+8]>>8)&0xff==0x20 (MIE):
+       sub=[addr+0x0c] low byte; transmit subs (0x17/0x19/0x21) latch JVS cmd
+       [addr+0x14]; 0x27 latches 0xff; then maple_reply(sub, recv)
+    if h1 bit31 (last) break; else addr += (2+plen)*4   (cap 32)
+  mirror_SB_MDST = 0     <- completion: next frame's poll (0x8c03c30a) sees done
+return rc
+```
+
+Ordering rationale: `FUN_8c03c2c6`'s pump runs at `0x8c03c396` **before** the
+trigger at `0x8c03c3e2`, so on frame N+1 the pump reads frame N's reply out of the
+recv buffer *before* re-triggering — exactly the async DMA-to-recv-buffer timing.
+So the wrapper calls the real engine first (pump + build + trigger into the
+mirror), then walks the just-programmed descriptor and synthesizes the reply into
+its recv addr, then clears `mirror_SB_MDST`. Recv addrs are taken live from the
+descriptor (double-buffered `0x0c0fd8e0`/`0x0c1038e0`, alternated by the engine's
+`xor` @`0x8c03c3f6`/`0x8c03c416`), never assumed. Reuses `maple_reply` + all
+`mie_sub*`/`mie_jvs*`/`eeprom.bin` blobs unchanged (sub `0x03` → baked free-play
+`eeprom.bin`, the only DC delivery route for it; sub `0x33`/`0x15` → live DC
+GetCondition → JVS has-data frame). `shim_maple_entry`/`shim_maple_boot` retained
+as documented boot-MIE ABI but no longer hooked.
+
+**Runtime evidence (DC-mode interpreter on `build/cleo.gdi`, `capture-14f.log`,
+130 s; vs baseline `capture-iochk.log` = same build minus 14f).**
+
+- *Build:* `make -C shims test` GREEN; `build_patch_table.py` → 20 patches, all
+  old-byte asserts pass; loader stdout shows all 20 applied (incl. `#16 maple
+  base → mirror`, `STEADY slot A/B → shim_maple_steady`), no PATCH MISMATCH.
+- *Mirror works:* the game engine's real-`SB_MDST` accesses (baseline: `HWW
+  pc=8c03c3e2` / `HWR pc=8c03c30a` / `HWR pc=8c03c4ba`, 817× each) are **gone**
+  from the `0x5f6c18` HW log; only the config-Z80 path (`pc=8c080xxx`, ~1× each)
+  remains. `MDODMA` from `pc=8c03c3d6/8c03c3e4` (817+ baseline) → **0**.
+  `MIERESP` (real cmd-0x86 MIE DMA) = **0** (baseline: 139). ⇒ the engine drives
+  the mirror, no real controller DMA from the game path.
+- *Shim services cleanly:* no `SHIMERR` on serial → `shim_die` never fired → every
+  MIE sub in every descriptor was handled (no unknown-sub / malformed frame).
+- *Past the crash:* all 61 `IOCHK` snapshots show scene object `*0x8c0c4510 =
+  0x8c0a2494` (**never null**); no jump to `0x0c10004c`, no exception, no `HANG`.
+- *Steady running loop:* 130 `PCSAMPLE` (1/s, whole run alive), **75 unique PCs
+  across 12+ code regions** (baseline stuck at 21, in the I/O-check scene). The
+  dominant loop `0x8c02bb80–0x8c02bc60` is the **VBLANK/IRQ context-switch
+  dispatcher** (save FP → `jsr` handler → restore banked regs/`SSR`/`SPC`) — the
+  per-frame game loop. A new region `0x8c061xxx–0x8c062xxx` (nested 7×16 object
+  loops = scene/content logic) appears only in the run's **second half** = phase
+  progression, not a spin. `SLEEPWAIT` (a `sleep` insn = vblank-paced idle) fires.
+- *Cart streaming:* 231 cart reads to `off=0x058ad000` (~92 MB of attract/demo
+  assets; baseline 147) — the game streams content for attract.
+- *Free-play EEPROM:* delivered by design (sub `0x03` → baked `eeprom.bin`); shim
+  confirmed running and handling the EEPROM/enum phase (game advanced past it). A
+  direct sub-`0x0b` re-init count is **not measurable** post-fix (the mirror
+  removes the real-DMA `MIERESP` log that carried it).
+- *Remaining gap (M4, user-visual):* live sub-`0x33` input polling was **not**
+  reached in the 130 s window (no shim `maple_getcond` → no `MDODMA pc=8cfc*`),
+  i.e. the running loop is a pre-interactive attract/boot-render phase; live
+  button response (M4) is the user's on-screen test. The input **transport** is
+  proven (the game advances on the shim's DIP/enum/EEPROM replies; a sub-`0x33`
+  frame would route through the same serviced walk → `jvs_digital`).
+
+⇒ **The async-Maple transport is fixed and drives the game to a steady, running,
+attract-streaming loop past the Task-14d crash.** Visual M3 (attract renders) and
+M4 (input responds) are the user's confirmation.
+
 ---
 
 ## V5 — battery-SRAM reference scan (spec §3 out-of-scope check)

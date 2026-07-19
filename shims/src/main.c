@@ -143,3 +143,64 @@ int shim_maple_entry(void) {
     GW(desc + 0x18) &= ~1u;                        /* clear pending bit0 = completion */
     return 0;
 }
+
+/* Task 14f: async-Maple MIE service -- the input+EEPROM transport (M3/M4).
+ *
+ * The steady engine FUN_8c03c2c6 (0x8c03c2c6-0x8c03c4a1) is reached via two
+ * fn-ptr slots (pool[0x8c02ed6c] Mode A, pool[0x8c02ee88] Mode B); both are
+ * repointed here. The sole live maple-base pool word 0x8c030fec (0xa05f6c00) is
+ * repointed to MAPLE_MIRROR, so the engine's SB_MDSTAR/MDEN/MDST accesses hit
+ * shim RAM, not real maple regs -> the game path triggers NO real controller DMA.
+ *
+ * Per-frame ordering, verified against DisasmRange 0x8c03c2c6-0x8c03c4a2:
+ *   0x8c03c30a  read [desc+0x18]=mirror_SB_MDST; bit0 set (busy) -> return -1,
+ *               bit0 clear -> proceed (0x8c03c30e).
+ *   0x8c03c396  bsr FUN_8c03c1c2  -- the per-frame pump/state machine (MUST run;
+ *               14b: replacing the builder skips it -> 0 cart reads).
+ *   0x8c03c3d6  mov.l r0,@r8      -- mirror_SB_MDSTAR := phys(descriptor list).
+ *   0x8c03c3e2  mov.l r12,@(0x18,r2) -- mirror_SB_MDST := 1 (trigger); returns 0.
+ * So we call the REAL engine first (pump + build + trigger into the mirror), then
+ * -- if it triggered (mirror_SB_MDST bit0 set) -- walk the descriptor list it just
+ * programmed, synthesize each MIE reply into its recv addr, and clear
+ * mirror_SB_MDST so next frame's cross-frame poll (0x8c03c30a) sees completion.
+ * The reply is ready the same frame; the pump reads it on the following frame,
+ * exactly as the real async DMA-to-recv-buffer would land it (double-buffered
+ * recv addrs alternate 0x0c0fd8e0/0x0c1038e0 -- taken live from the descriptor).
+ *
+ * Descriptor list = maple command list (Flycast maple_DoDma, maple_if.cpp:184-311):
+ *   +0x00 header_1 : bit31=last, [7:0]=plen-1, [10:8]=maple_op (0=MP_Start), [17:16]=bus
+ *   +0x04 header_2 : recv addr (& 0x1fffffe0)
+ *   +0x08 frame_hdr: [7:0]=cmd (0x86=MIE), [15:8]=reci (0x20=MIE)
+ *   +0x0c payload[0] low byte = subcommand
+ *   +0x14 frame byte 12 = JVS command (transmit subs; = boot builder arg0+4)
+ *   next frame at +(2+plen)*4. Reuses maple_reply + blobs unchanged. */
+extern int shim_maple_steady(void);   /* both fn-ptr slots point here (ptr patches) */
+#define MMIR(off) (*(volatile u32 *)P2ADDR(MAPLE_MIRROR + (off)))   /* mirror reg (uncached, game view) */
+
+int shim_maple_steady(void) {
+    int rc = ((int (*)(void))0x8c03c2c6)();        /* real engine: pump + build + trigger into mirror */
+    if (MMIR(0x18) & 1u) {                          /* mirror_SB_MDST bit0 = a DMA was triggered this frame */
+        u32 addr = MMIR(0x04) & 0x1fffffe0u;        /* mirror_SB_MDSTAR = phys(descriptor list) */
+        u32 i;
+        for (i = 0; i < 32u; i++) {                 /* walk cmd list (<=24 slots); cap guards a runaway list */
+            u32 h1   = GW(addr + 0x00);             /* transfer control (cached: pump wrote it cached, same core) */
+            u32 rcv  = GW(addr + 0x04) & 0x1fffffe0u;   /* recv addr (phys) */
+            u32 plen = (h1 & 0xffu) + 1u;
+            if (((h1 >> 8) & 7u) == 0u) {           /* MP_Start command frame */
+                u32 fh = GW(addr + 0x08);           /* frame header */
+                if ((fh & 0xffu) == 0x86u && ((fh >> 8) & 0xffu) == 0x20u) {  /* MIE: cmd 0x86 / reci 0x20 */
+                    u32 sub = GB(addr + 0x0c);      /* payload[0] low byte = subcommand */
+                    switch (sub) {                  /* transmit subs: latch JVS cmd (frame byte 12 = desc+0x14) */
+                    case 0x17: case 0x19: case 0x21: pending_jvs = GB(addr + 0x14); break;
+                    case 0x27:                       pending_jvs = 0xff;            break;
+                    }
+                    maple_reply(sub, rcv);          /* synthesize reply into the transaction's recv buffer */
+                }
+            }
+            if (h1 >> 31) break;                    /* last-transfer bit -> end of list */
+            addr += (2u + plen) * 4u;
+        }
+        MMIR(0x18) = 0;                             /* completion: next frame's poll sees SB_MDST bit0 clear */
+    }
+    return rc;
+}

@@ -21,6 +21,18 @@
 #define BIOS_DATA_1FFD00     (SHIM_BASE + 0x12000)  /* FUN_8c081438 copyright-string auth */
 #define BIOS_DATA_1FFD00_LEN 0x70
 
+/* Task 14f: async-Maple engine register mirror. The runtime MIE engine
+ * (FUN_8c03c2c6) reads/writes the maple register window via the sole live
+ * maple-base pool word 0x8c030fec (value 0xa05f6c00); build_patch_table repoints
+ * that word here, so the engine's SB_MDSTAR (+0x04)/SB_MDEN (+0x14)/SB_MDST
+ * (+0x18) accesses land in shim RAM instead of real maple regs -- no real
+ * controller DMA fires from the game path, and shim_maple_steady services the
+ * transaction. Above BIOS_DATA_1FFD00 (ends +0x12070), below RAM top, above the
+ * game write watermark (15.5 MB). Accessed uncached (P2), matching the game's
+ * 0xa0-prefixed view. */
+#define MAPLE_MIRROR         (SHIM_BASE + 0x13000)
+#define MAPLE_MIRROR_LEN     0x100
+
 #define STAGING_ADDR    0x8cd00000
 #define GAME_LOAD_ADDR  0x8c020000
 #define GAME_LEN        0x00100000
