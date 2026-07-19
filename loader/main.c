@@ -60,6 +60,12 @@ int main(void) {
 
     uint32 shim_len = (uint32)(shim_bin_end - shim_bin);
     memcpy((void *)SHIM_BASE, shim_bin, shim_len);
+    /* Zero the shim's .bss (NOBITS -- absent from shim.bin, so uninitialised on
+     * real DC where RAM boots as garbage; Flycast happens to zero RAM, masking
+     * it). The shim has zero-init statics (main.c cfg_seen) that MUST start 0.
+     * .bss sits between end-of-loaded-data and the code budget (shim.ld ASSERT
+     * . <= SHIM_BASE+SHIM_CODE_MAX), so zeroing that gap covers it exactly. */
+    memset((void *)(SHIM_BASE + shim_len), 0, SHIM_CODE_MAX - shim_len);
 
     /* Place the two Naomi BIOS-ROM slices the game reads via patched P2 pointers
      * (0x60000 verify+copy library, 0x1ffd00 copyright-string auth). Both absent
@@ -89,7 +95,7 @@ int main(void) {
     /* Write-back the CPU stores (patched image, shim code, stub) to RAM: handoff
      * reads staging via P2 and the game/shim read the shim region freshly cached. */
     dcache_purge_range(STAGING_ADDR, GAME_LEN);
-    dcache_purge_range(SHIM_BASE, shim_len);
+    dcache_purge_range(SHIM_BASE, SHIM_CODE_MAX);   /* code+data + zeroed .bss */
     dcache_purge_range(HANDOFF_SCRATCH, ho_len);
     /* Flush our BIOS-data writes: the game reads them via P2 uncached. */
     dcache_purge_range(BIOS_DATA_60000,  BIOS_DATA_60000_LEN);

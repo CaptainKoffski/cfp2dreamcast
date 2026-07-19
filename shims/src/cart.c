@@ -36,14 +36,22 @@ static void gd_or_die(void *dst, u32 rel_fad, u32 n) {
     if (r < 0) shim_die(4, rel_fad, (u32)r);
 }
 
-/* dest_phys is a main-RAM phys addr (0x0c......); we read it back cached via the
- * P1 alias (0x8c......). PIO copies are CPU stores into that same cached view,
- * so the game (also CPU, cached P1) sees them coherently -- no dcache flush.
- * ponytail: coherent because reader and writer share one cache view; a future
- * DMAREAD upgrade (Phase 5) WOULD need dcache_inval on the dest. */
+/* dest_phys is a main-RAM phys addr (0x0c......). The game reads streamed cart
+ * assets UNCACHED (P2, 0xa0......) or via hardware DMA (PVR/TA/AICA) -- real-DMA
+ * semantics, matching the original FUN_8c03bc12 which does NO cache op. So the
+ * bytes must land in RAM with nothing stale left in the D-cache. We therefore
+ * write the dest through the P2 UNCACHED alias (0xa0......): the xmemcpy head/
+ * tail stores AND the gd_read_sectors PIO body stores all go straight to RAM,
+ * bypassing the cache, so the game's P2 read (or a downstream DMA) sees current
+ * data on real hardware. (Via P1 cached the bytes would sit in D-cache while RAM
+ * stayed stale -> garbage graphics on real DC; Flycast has no cache so it masked
+ * this.) This mirrors maple_reply + the register mirror, which are all P2.
+ * The bounce buffer stays cached (shim home, P1): it is pure CPU scratch -- the
+ * BIOS PIO writes it and xmemcpy reads it back through the same cached view, so
+ * they are mutually coherent; only the FINAL dest must be uncached. */
 void cart_read(u32 off, u32 len, u32 dest_phys) {
     split_t s;
-    unsigned char *dst = (unsigned char *)(dest_phys | 0x80000000); /* P1 */
+    unsigned char *dst = (unsigned char *)(dest_phys | 0xa0000000); /* P2 uncached */
     unsigned char *bounce = (unsigned char *)SHIM_BOUNCE;
     cart_split(off, len, &s);
     if (s.head_take) {
