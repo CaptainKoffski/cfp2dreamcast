@@ -37,6 +37,11 @@ extern const unsigned char mie_jvs14[]; extern const u32 mie_jvs14_len;  /* 14 f
  * .data but does NOT zero .bss). */
 static u8 pending_jvs = 0xff;
 
+/* Task 15c: last JVS command the CONFIG-TIME enumeration transmitted through
+ * FUN_8c081562 -> selects the reply FUN_8c081626 returns. .data (non-zero). */
+static u8 pending_cfg = 0xf1;
+static u8 cfg_seen    = 0;               /* one-shot SCIF log bitmap of served cmds */
+
 /* Task 15 instrumentation state. ALL forced non-zero so they land in .data
  * (the loader copies .data but does NOT zero .bss -- see pending_jvs above; a
  * .bss static would boot with garbage and break the rate-limit / one-shot). */
@@ -236,4 +241,69 @@ int shim_maple_steady(void) {
         MMIR(0x18) = 0;                             /* completion: next frame's poll sees SB_MDST bit0 clear */
     }
     return rc;
+}
+
+/* Task 15c: service the CONFIG-TIME JVS enumeration so node-count [0x8c1ca474]>=1
+ * and the board struct [0x8c1ca47c] populates -> the runtime engine registers a
+ * JVS-board slot and emits sub-0x33 (the per-frame input poll 14f already routes
+ * to jvs_digital). This UNBLOCKS input (M4).
+ *
+ * ROOT CAUSE (re-RE'd; corrects the Task-15b/task-brief premise). The config JVS
+ * probe FUN_8c082bc4 does NOT drive raw maple by absolute literal, and it does
+ * NOT use the Z80-firmware-upload path FUN_8c080d18/FUN_8c0809b2 (that path is the
+ * dead-result Z80 upload -- Task 14b was right; its result vars are write-only).
+ * The probe/parser/per-node-builder (FUN_8c082bc4 / FUN_8c082c98 / FUN_8c082aa4,
+ * all reached from the node-count commit FUN_8c082fd8) transmit via FUN_8c081562
+ * and receive via FUN_8c081626, which funnel through FUN_8c03000c / FUN_8c02f158
+ * on the SHARED maple engine struct *0x8c0e8410 -- the SAME struct the runtime
+ * engine FUN_8c03c2c6 uses, whose base [struct+0x10f4]=0xa05f6c00 is ALREADY
+ * mirrored (patch #16). So the config DMA never hit real DC maple; mirroring more
+ * literals does nothing. Yet node-count stays 0 (capture-14f.log: all 61 IOCHK
+ * specs=1) because the config frames are queued (FUN_8c03000c) and only flushed by
+ * the async engine across a cooperative yield (FUN_8c082a96 -> FUN_8c0342c0) --
+ * which does not deliver the reply at the probe's synchronous read time on DC.
+ *
+ * FIX (parallels 14f -- hook the transport, synthesize the reply, at the CONFIG
+ * layer). build_patch_table repoints the 7 pool words that hold FUN_8c081562 (TX,
+ * 4 words) and FUN_8c081626 (RX, 3 words) -- used ONLY by the enum cluster
+ * 0x8c082aa4..0x8c082e4c (boot.bin scan) -- to these routines. shim_cfg_tx latches
+ * the JVS command (payload[0]); shim_cfg_rx returns the matching captured Naomi
+ * reply at +0x15 (FUN_8c081626 returns *(slot+8)+0x15; probe/parser read
+ * reply[k]=frame[0x15+k]). This reproduces the EXACT Naomi 1-board enumeration:
+ *   F1  -> mie_jvsf1 : reply[3]=0,reply[8]=1,reply[4]!=0,reply[1]=0x8e
+ *          => probe FUN_8c082bc4 returns 1 => node-count=1.
+ *   10..14 -> mie_jvs10..14 : parser FUN_8c082c98 fills the board struct; the
+ *          mie_jvs14 feature list (2 players / 13 switches / 2 coin / 8 analog)
+ *          satisfies spec-compute (byte0>=2, byte1>=8) => specs=0.
+ *   default (incl. cmd 0x21 from FUN_8c082aa4) -> mie_jvsf1 : validator
+ *          FUN_8c082654 passes for node 1 (reply[2]=0x01==node, reply[3]=0,
+ *          reply[8]=1, reply[4]!=0); its result does not gate node-count/spec.
+ * All blobs have [0x17]=0x01 so reply[2]==node(1). 14c specs-force (patch #19)
+ * becomes redundant (specs=0 naturally) but is harmless -- left in place. */
+int shim_cfg_tx(u32 node, u32 arg1, u32 len, u32 payload);   /* FUN_8c081562 replacement */
+const unsigned char *shim_cfg_rx(void);                      /* FUN_8c081626 replacement */
+
+int shim_cfg_tx(u32 node, u32 arg1, u32 len, u32 payload) {
+    (void)node; (void)arg1; (void)len;
+    pending_cfg = GB(payload);          /* payload[0] = JVS command byte */
+    return 0;                            /* callers ignore r0 */
+}
+
+const unsigned char *shim_cfg_rx(void) {
+    const unsigned char *b;
+    u8 bit;
+    switch (pending_cfg) {
+    case 0x10: b = mie_jvs10; bit = 0x01; break;
+    case 0x11: b = mie_jvs11; bit = 0x02; break;
+    case 0x12: b = mie_jvs12; bit = 0x04; break;
+    case 0x13: b = mie_jvs13; bit = 0x08; break;
+    case 0x14: b = mie_jvs14; bit = 0x10; break;
+    case 0xf1: b = mie_jvsf1; bit = 0x20; break;
+    default:   b = mie_jvsf1; bit = 0x40; break;   /* cmd 0x21 per-node builder etc. */
+    }
+    if (!(cfg_seen & bit)) {            /* one-shot serial trace per command */
+        cfg_seen |= bit;
+        scif_puts("CFG enum cmd="); scif_puthex(pending_cfg); scif_puts("\n");
+    }
+    return b + 0x15;                     /* reply base: game reads reply[k]=frame[0x15+k] */
 }

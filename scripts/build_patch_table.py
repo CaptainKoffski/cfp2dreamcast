@@ -185,6 +185,27 @@ ptr(0x8C02EE88, 0x8C03C2C6, sym("shim_maple_steady"), "Task14f STEADY slot B -> 
 # single caller so no other path is affected.
 insn16(0x8C07A266, 0x2118, 0x0018, "Task14c: I/O spec-check OK (tst r1,r1 -> sett)")
 
+# §Task 15c: service the CONFIG-TIME JVS enumeration -> node-count [0x8c1ca474]>=1
+# -> board struct [0x8c1ca47c] populated -> engine emits sub-0x33 (input poll, M4).
+# CORRECTS the Task-15b premise: the node-count probe FUN_8c082bc4 (+ parser
+# FUN_8c082c98 + per-node builder FUN_8c082aa4, all from the commit FUN_8c082fd8)
+# do NOT use raw-maple absolute literals nor the dead Z80 path FUN_8c080d18/
+# FUN_8c0809b2; they transmit via FUN_8c081562 / receive via FUN_8c081626, funneling
+# through FUN_8c03000c/FUN_8c02f158 on the shared engine struct *0x8c0e8410 whose
+# base [+0x10f4]=0xa05f6c00 is already mirrored (patch #16). Node-count still 0
+# (capture-14f.log: 61/61 IOCHK specs=1) because those queued frames aren't serviced
+# at the probe's synchronous read time. Fix parallels 14f but at the config layer:
+# repoint the 7 pool words that hold FUN_8c081562 (TX) / FUN_8c081626 (RX) -- used
+# ONLY by the enum cluster 0x8c082aa4..0x8c082e4c (boot.bin scan: 4 TX + 3 RX words,
+# no other holders) -- to shim_cfg_tx / shim_cfg_rx, which latch the JVS command and
+# replay the captured Naomi enum blobs (mie_jvsf1/10..14) at +0x15. Reproduces the
+# exact Naomi 1-board enumeration -> node-count=1, specs=0. See main.c shim_cfg_rx
+# + docs/kb/phase4-conversion.md §Task 15c. Old-byte asserts: all 7 = their fn addr.
+for _w in (0x8C082BB0, 0x8C082C8C, 0x8C082D10, 0x8C082E4C):
+    ptr(_w, 0x8C081562, sym("shim_cfg_tx"), "Task15c: config JVS TX -> shim_cfg_tx")
+for _w in (0x8C082BB8, 0x8C082C94, 0x8C082D18):
+    ptr(_w, 0x8C081626, sym("shim_cfg_rx"), "Task15c: config JVS RX -> shim_cfg_rx")
+
 # NOTE (Task 14b history, RESOLVED by Task 14f above): FUN_8c03c2c6 is reached via
 # BOTH pool[0x8c02ed6c] (Mode A) and pool[0x8c02ee88] (Mode B, DC takes this); Task
 # 14 swapped only the first, and swapping the second to shim_maple_entry regressed
@@ -211,6 +232,6 @@ out.append(f"enum {{ CLEO_NPATCHES = {len(patches)} }};")
 (ROOT / "build").mkdir(exist_ok=True)
 (ROOT / "build/patch_table.h").write_text("\n".join(out) + "\n")
 print(f"OK patch_table.h: {len(patches)} patches "
-      f"(1 hook, 16 pool, 2 ptr, 1 insn16; Task 14f async-MIE, boot MIE slot unhooked Task 14d); "
+      f"(1 hook, 16 pool, 9 ptr, 1 insn16; Task 14f async-MIE + Task 15c config-JVS-enum service); "
       f"MIRROR_P2={MIRROR_P2:#010x} MAPLE_MIRROR_P2={MAPLE_MIRROR_P2:#010x} "
       f"BIOS_60000_P2={BIOS_60000_P2:#010x} BIOS_1FFD00_P2={BIOS_1FFD00_P2:#010x}")

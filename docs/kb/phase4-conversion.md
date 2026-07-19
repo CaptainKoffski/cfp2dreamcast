@@ -2021,3 +2021,104 @@ separate cosmetic "9 credits" issue.
 `jvs_digital` → GetCondition (port A, real regs) → `dc_to_jvs` bit3→Start
 `0x8000` → `BTN_OFF=0x20` is correct by construction (Task 15 §1); only the poll
 being emitted is missing.
+
+## Task 15c — service the CONFIG-TIME JVS enumeration → node-count≥1 → sub-0x33 (M4 UNBLOCK)
+
+**DONE. node-count [0x8c1ca474] flips 0→≥1, sub-0x33 now fires per-frame, input
+poll enabled.** Full report: `.superpowers/sdd/task-15c-report.md`.
+
+### The Task-15b premise was WRONG — re-RE corrects it (cite disasm)
+
+15b/the task brief said the config JVS scan drives raw maple by **absolute
+literals** in `FUN_8c080d18`/`FUN_8c0809b2` that 14f didn't mirror → real DC maple
+→ 0 nodes, and the fix = mirror those + hook `FUN_8c0809b2`. **Disassembly refutes
+this:**
+
+1. **The node-count probe uses the shared, already-mirrored engine — not the Z80
+   path.** The gate writer `FUN_8c082fd8` (`0x8c08312c`) calls probe `FUN_8c082bc4`
+   (`0x8c083112`), parser `FUN_8c082c98` (`0x8c08315a`) and per-node builder
+   `FUN_8c082aa4` (`0x8c0831b8`). All three transmit via `FUN_8c081562` (pool
+   `0x8c082c8c`/`bb0`/`d10`/`e4c`) and receive via `FUN_8c081626` (pool
+   `0x8c082c94`/`bb8`/`d18`), which funnel through `FUN_8c03000c` (queue-add) /
+   `FUN_8c02f158` (slot index) on the **shared maple engine struct** `*0x8c03004c =
+   0x8c0e8410` — the **SAME** struct the runtime engine `FUN_8c03c2c6` uses (`base =
+   *0x8c0e8410`), whose maple base `[struct+0x10f4]=0xa05f6c00` is **already mirrored
+   by patch #16**. So the config DMA never hit real DC maple; mirroring the
+   `0x8c080e74..90` / `0x8c080a00`/`b40`/`be0`/`d0c` literals does nothing for the
+   gate. `ListPoolWords 0x5f6c00 0x5f6c20`: those 8 literals ref only
+   `FUN_8c080d18`/`FUN_8c0809b2` = the **dead Z80 firmware upload** (Task 14b was
+   right — its result vars are write-only).
+2. **node-count was empirically still 0 WITH the 14f mirror.** `capture-14f.log`
+   (20-patch) — all **61 `IOCHK specs=1`** (`specs=[0x8c0d541c]`, which spec-compute
+   sets to 1 exactly when node-count==0). So the mirror alone did not open the gate.
+3. **Why: cooperative-multitask completion, not served at probe read time.** The
+   config primitives queue a frame (`FUN_8c03000c`) and the probe reads the reply
+   right after, with only `FUN_8c082a96` → `FUN_8c0342c0` (a scheduler yield)
+   between TX and RX; the frame is flushed by the async engine (`FUN_8c03c2c6` =
+   `shim_maple_steady`) across the yield, which on DC does not deliver the reply at
+   the synchronous read → probe reads empty → 0 nodes.
+
+### The fix (parallels 14f, at the CONFIG layer): 7 ptr repoints + 2 shim routines
+
+`build_patch_table.py` repoints the **7 pool words** holding `FUN_8c081562` (TX, 4)
+and `FUN_8c081626` (RX, 3) — used **only** by the enum cluster `0x8c082aa4..e4c`
+(boot.bin scan: no other holders) — to `shim_cfg_tx` / `shim_cfg_rx`
+(`shims/src/main.c`). `shim_cfg_tx` latches the JVS command (payload[0]);
+`shim_cfg_rx` replays the **captured Naomi** reply at `+0x15` (the real
+`FUN_8c081626` returns `*(slot+8)+0x15`; probe/parser read `reply[k]=frame[0x15+k]`):
+
+| JVS cmd | blob | probe/validator check → effect |
+|---|---|---|
+| F1 (set-addr) | `mie_jvsf1` | `reply[3]=0,reply[8]=1,reply[4]=7,reply[1]=0x8e` → probe `FUN_8c082bc4` returns 1 → **node-count=1** |
+| 0x10..0x14 | `mie_jvs10..14` | parser `FUN_8c082c98` fills board struct; `mie_jvs14` = 2 players / 13 switches / 2 coin / 8 analog → **spec byte0≥2, byte1≥8 → specs=0** |
+| default (0x21 etc.) | `mie_jvsf1` | validator `FUN_8c082654` passes for node 1 (`reply[2]=0x01==node`); result doesn't gate node-count/spec |
+
+All blobs have `[0x17]=0x01` so `reply[2]==node(1)`. This reproduces the EXACT
+Naomi 1-board enumeration through the game's own probe/parse/register path (not a
+fake struct — the 15b fallback's "no responder hangs the runtime handshake" risk
+does not apply: 14f's `shim_maple_steady` IS the runtime sub-0x33/0x15/0x17
+responder). Patch total 20→27. 14c specs-force (patch #19) is now redundant
+(specs=0 naturally) but harmless — left in place.
+
+### Runtime evidence (DC-mode interpreter on `build/cleo.gdi`, `capture-15c.log`)
+
+DECISIVE, vs `capture-14f.log` baseline:
+- **`IOCHK specs=00000000`** all 61 snapshots (was `specs=1`) → **node-count
+  [0x8c1ca474] ≥ 1. GATE OPEN.**
+- **Config enum serviced by the shim:** serial `CFG enum cmd=` f1/10/11/12/13/14
+  each ×1 (probe + parser got the captured replies).
+- **sub-0x33 NOW FIRES:** 485 shim GetCondition DMAs (`MDODMA cmd=09 reci=20
+  pc=8cfc09ba`) = per-frame input poll running (was **0×** sub-0x33 in 14f/15b);
+  serial `IN raw=0000ffff jvs=00000000 sub=00000033` (idle controller). The engine
+  switched from sub-0x31 (no-board fallback) to sub-0x33 (JVS-board digital poll).
+- Clean: **0** `SHIMERR`/`shim_die`; 35 `PCSAMPLE` regions (alive, running); cart
+  streaming intact (M2/M3 not regressed). `make -C shims test` GREEN; all 27
+  old-byte asserts pass.
+
+⇒ **Input poll is enabled (M4 unblocked).** Delivery is correct by construction
+(14f/Task 15 §1): sub-0x33 → `jvs_digital` → GetCondition (port A) → `dc_to_jvs`
+bit3→Start `0x8000` → `BTN_OFF=0x20`. Final on-screen confirmation (press Start →
+game starts) is the **user's** test on a dynarec run.
+
+### Reproduction
+
+```sh
+source tools/kos/environ.sh && make -C shims && python3 scripts/build_patch_table.py \
+  && make -C loader && python3 scripts/make_gdi.py         # 27 patches, asserts pass
+BIN=tools/flycast-src/build/Flycast.app/Contents/MacOS/Flycast
+FLYCAST_CARTLOG=capture-15c.log "$BIN" -config config:rend.vsync=no \
+  -config config:Dynarec.Enabled=no -config config:Debug.SerialConsoleEnabled=yes \
+  build/cleo.gdi > capture-15c.stdout.log 2>&1 &                # kill after ~120 s
+grep -a IOCHK capture-15c.log | grep -oE 'specs=[0-9a-f]+' | sort | uniq -c   # 61 specs=0
+grep -a 'MDODMA cmd=09' capture-15c.log | wc -l                # sub-0x33 GetConditions
+grep -a 'CFG enum' capture-15c.stdout.log                      # f1/10..14 serviced
+# static: probe/parser/builder use FUN_8c081562/081626 on shared struct *0x8c0e8410
+python3 - <<'PY'
+b=open('tools/boot.bin','rb').read(); base=0x8c020000
+w32=lambda va:int.from_bytes(b[va-base:va-base+4],'little')
+assert w32(0x8c03004c)==0x8c0e8410                     # config TX shares runtime engine struct
+for w in (0x8c082c8c,0x8c082bb0,0x8c082d10,0x8c082e4c): assert w32(w)==0x8c081562  # TX pool words
+for w in (0x8c082c94,0x8c082bb8,0x8c082d18):           assert w32(w)==0x8c081626  # RX pool words
+print("OK: config enum uses FUN_8c081562/081626 on shared (already-mirrored) engine")
+PY
+```
