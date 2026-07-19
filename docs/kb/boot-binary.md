@@ -191,6 +191,23 @@ B1 `0x0200`, B2 `0x0100` (active-high).
 `GetCondition` request and translate the DC controller bitmap to the JVS layout
 the game expects. The minor site `FUN_8c03c2c6` may need the same shim.
 
+> **Addendum 2026-07-18 (Phase 4 Task 4) — primary/secondary inversion.**
+> The 369×/7× counts above count only **sub `0x15`** traffic (the parser's
+> input check filters on sub 0x15) and that framing is misleading for the
+> steady state. Both captures show the per-frame input poll is actually
+> **sub `0x33` issued from `FUN_8c03c2c6`**:
+> Phase 3 interpreter-exact `capture-pc.log` has **23,762** `MAPLEPC sub=33
+> pc=8c03c3e4` lines (inside `FUN_8c03c2c6` `0x8c03c2c6`–`0x8c03c4a1`) vs
+> 369 `sub=15` at the `0x8c0315ce` site; the Phase 4 600 s attract capture
+> (`capture-attract.log`, dynarec ON, block-granular PCs) has **34,991**
+> `sub=33 pc=8c03c3d6` — same function — vs 376 `sub=15` total, all in the
+> boot phase. So: **`0x8c0315ce` = boot-phase site (subs 0x15/0x27 + one-off
+> 0x01/0x03 EEPROM), `FUN_8c03c2c6` = steady-state per-frame input poll
+> (sub 0x33)**. The old counts stand as what they measured (sub-0x15 only);
+> the "primary/minor" labels do not. **Task 5 must disassemble BOTH sites**,
+> and the input shim must serve sub 0x33 (see `phase4-conversion.md` §V4
+> for reply templates and the per-sub site table).
+
 ---
 
 ## 6. EEPROM/settings-parse function — Phase 4 shim target

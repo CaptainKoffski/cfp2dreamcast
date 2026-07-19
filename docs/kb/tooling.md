@@ -58,6 +58,11 @@ input, and serial pokes. Distinct from the release Flycast above.
 - **Build prereqs (macOS/arm64, this box):**
   - Standalone **CMake 3.31.6** (Kitware universal binary). **NOT** Homebrew
     cmake 4.x — 4.x breaks this Flycast commit at generate (cmrc/OBJC).
+    Download (the binary is not preserved between scratchpad sessions —
+    re-fetch it whenever it's missing, it's gitignored/not committed):
+    `curl -L -o cmake-3.31.6-macos-universal.tar.gz https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-macos-universal.tar.gz && tar xzf cmake-3.31.6-macos-universal.tar.gz`
+    → `cmake-3.31.6-macos-universal/CMake.app/Contents/bin/cmake` (confirmed
+    `cmake version 3.31.6`, re-verified Phase 4 Task 4).
   - Full Xcode reachable via `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`
     (cmake's OBJC ABI detection needs `xcodebuild`; CommandLineTools alone fails).
   - No extra `brew install` needed (zlib/png already present).
@@ -105,7 +110,69 @@ input, and serial pokes. Distinct from the release Flycast above.
   CARTDMAPC pc=%08x sp=%08x              # Phase 3: guest PC at SB_GDST store + stack pointer
   MAPLEPC cmd=86 sub=%02x pc=%08x        # Phase 3: guest PC at Maple DMA store (cmd 0x86)
   BIOSEXEC pc=%08x                        # Phase 3: any guest insn in BIOS ROM range (phys 0x0–0x1fffff)
+  SHIMWATCH addr=%08x                     # Phase 4: RAM content scan found a non-zero byte in the
+                                           #   planned shim home 0x0cfc0000-0x0cffffff (first occurrence only)
+  MIERESP sub=%02x addr=%08x data=<128 hex chars>   # Phase 4: MIE's actual reply bytes (0x40
+                                           #   bytes, zero-padded) + guest recv address, for cmd 0x86
   ```
+  **SHIMWATCH is a content scan, not a write intercept** (`core/hw/naomi/naomi.cpp`
+  `cartlog_shimwatch()`, sampled at the same 64-DMA cadence as `WATERMARK`): the
+  arm64 dynarec's fast memory path (`core/rec-ARM64/rec_arm64.cpp`
+  `GenWriteMemoryFast`/`GenWriteMemoryImmediate`) stores directly into the
+  host-mapped RAM array when `addrspace::virtmemEnabled()` (true on this build),
+  bypassing every C-level write function for register-indirect stores — the
+  common case for game code. A live hook on `WriteMem`/`addrspace::write*` would
+  silently miss most writes with the dynarec on, so this instrumentation instead
+  scans actual RAM content (same technique as the pre-existing
+  `cartlog_watermarks`/`cartlog_high`). Caveat: a write immediately zeroed again
+  before the next 64-DMA sample would be missed — the same accepted trade-off as
+  the WATERMARK high-water scan, not a new one.
+  **MIERESP** is logged from `core/hw/maple/maple_if.cpp` `maple_DoDma()`
+  (`MP_Start` case), right after `RawDma()` returns and after the `swap_msb`
+  byte-order fixup — i.e. byte-identical to what the emulator writes to guest
+  RAM at `addr=` (the Maple DMA descriptor's second word, masked). `outbuf` is
+  zeroed before the call so the fixed 64-byte dump never exposes uninitialized
+  stack bytes past the actual reply length.
+
+#### Headless framebuffer → PNG screenshot (Task 18)
+
+Self-verify the on-screen display without a macOS screen-capture (TCC)
+permission — the emulator reads its **own** GL framebuffer, no OS screenshot API.
+Added in `core/ui/gui.cpp` `gui_dumpFramebuffer()` (called from
+`core/ui/mainui.cpp` `mainui_rend_frame()`, render thread, after `emu.render()`),
+which **reuses the built-in screenshot readback** `getScreenshot()` →
+`OpenGLRenderer::GetLastFrame()` (`core/rend/gles/gldraw.cpp:814`, the same path
+Flycast's own screenshot/savestate thumbnail uses) then `stbi_write_png` to a
+file. No behaviour change unless enabled.
+
+- **Enable + trigger:** set env `FLYCAST_SHOT=/abs/path/shot.png` before
+  launch. The current frame is written to that path **every N frames**
+  (`FLYCAST_SHOT_EVERY`, default 60 ≈ once/sec, overwriting) **and** on
+  **`SIGUSR1`** (`kill -USR1 <pid>` for an on-demand grab). Output is 640×480
+  8-bit RGB PNG, correctly oriented (inherits `GetLastFrame`'s orientation).
+- **Read it:** copy the file first (it's overwritten continuously) then open —
+  a torn read is rare (the write is one `fwrite`) but a copy avoids it.
+- **Which trigger:** the every-N-frames dump (`FLYCAST_SHOT_EVERY`) is **flaky**
+  for capturing a *specific* screen — it usually samples a load/transition frame
+  → a black PNG (see the black-PNG note below). The **`SIGUSR1` single-shot is
+  reliable**: bring the on-screen state you want up, then `kill -USR1 <pid>` once
+  and read that grab. Used this way for the free-play "FREE PLAY" confirmation
+  (Task 18) and the attract renders (Tasks 14/20).
+- **Usage (headless, same launch gotchas as capture.sh — abs GDI path +
+  `ApplePersistenceIgnoreState` + `rend.vsync=no`):**
+  ```sh
+  defaults write com.flyinghead.Flycast ApplePersistenceIgnoreState -bool YES
+  FLYCAST_SHOT=/tmp/shot.png FLYCAST_SHOT_EVERY=30 \
+    tools/flycast-src/build/Flycast.app/Contents/MacOS/Flycast \
+    -config config:rend.vsync=no "$(pwd)/build/cleo.gdi" &
+  # wait ~40s for HLE boot to reach attract, then:
+  cp /tmp/shot.png /tmp/snap.png   # read /tmp/snap.png
+  ```
+  A black PNG just means the frame sampled was a load/transition — grab a few
+  frames across a few seconds to catch the title/attract (title shows the
+  credit/FREE-PLAY corner). Kill leftover Flycast instances before relaunching
+  (`pkill -9 -f "flycast-src.*Flycast"`): a stale instance makes the new one
+  fail the SH4 vmem `Verify Failed` (driver.cpp:349) and never boot.
 
 ### Ghidra — 12.1.2 (20260605)
 
@@ -129,9 +196,123 @@ input, and serial pokes. Distinct from the release Flycast above.
   scripts/ghidra/run.sh import              # import tools/boot.bin, full auto-analysis (once)
   scripts/ghidra/run.sh script NAME.java    # run scripts/ghidra/NAME.java (-noanalysis)
   ```
-  Project dir: `tools/ghidra-proj/` (gitignored). Scripts: `FindMmioXrefs.java`,
-  `ScanBiosTargets.java`, `DumpEntryChain.java`, `WhichFunc.java`.
-  `tools/boot.bin` = first 1 MB of `Cleopatra Fortune Plus.dat` (gitignored).
+  Project dir: `tools/ghidra-proj/` (gitignored). Scripts (`scripts/ghidra/`):
+  - Phase 3: `FindMmioXrefs.java`, `ScanBiosTargets.java`, `DumpEntryChain.java`,
+    `WhichFunc.java`.
+  - Phase 4 (added): `DisasmRange.java` (list/disassemble an arbitrary address
+    range on the auto-analysed program — the workhorse for V1/V3/cart-patch-sites
+    /input-ABI/M2/M3), `ListPoolWords.java` (raw-scan every 4-aligned 32-bit pool
+    word whose 29-bit-masked value lands in a target MMIO range, with its
+    referencing instructions — used to enumerate the cart/G1 mirror repoints),
+    `FindRefsTo.java` (`getReferencesTo` for a word/function — used to prove pool
+    words are single-referenced before repointing them).
+  `tools/boot.bin` = first 1 MB of `Cleopatra Fortune Plus.dat` (gitignored;
+  regenerate: `dd if="Cleopatra Fortune Plus.dat" of=tools/boot.bin bs=1M count=1`).
+
+### KallistiOS (KOS) + sh-elf toolchain
+
+Dreamcast SDK for Phase 4 (loader, shims). Provides `kos-cc` and the KOS
+environment every Phase 4 build task sources.
+
+- **Clone:** `git clone --recursive https://github.com/KallistiOS/KallistiOS.git tools/kos`
+  (gitignored). Cloned commit: `705c862957b2f6091a6ce4784943744daecc3e2b`.
+  Note: this revision has no submodules (`--recursive` is a harmless no-op).
+- **Prefix (requires sudo, one-time):**
+  ```sh
+  sudo mkdir -p /opt/toolchains/dc && sudo chown "$(whoami)" /opt/toolchains/dc
+  ```
+  Everything after this is sudo-free. Do NOT relocate — KOS defaults and all
+  Phase 4 tasks assume `/opt/toolchains/dc`.
+- **Homebrew prereqs:**
+  `brew install gmp mpfr libmpc gettext texinfo wget libelf jpeg-turbo libpng`
+  (versions used: gmp 6.3.0, mpfr 4.2.2, libmpc 1.4.1, gettext 1.0,
+  texinfo 7.3, wget 1.25.0, libelf 0.8.13_1, jpeg-turbo 3.2.0, libpng 1.6.58).
+  jpeg-turbo/libpng are needed by the KOS `dcbumpgen` util, not the toolchain.
+- **Toolchain build — the builder is `utils/kos-chain`, NOT `utils/dc-chain`**
+  (upstream renamed/reworked dc-chain; config is now `Makefile.cfg` copied from
+  a per-platform sample, not `config/config.mk.stable.sample`):
+  ```sh
+  cd tools/kos/utils/kos-chain
+  cp Makefile.dreamcast.cfg Makefile.cfg   # stable profile, prefix /opt/toolchains/dc/sh-elf
+  make                                     # LONG (~20 min on M1); resumable — re-run same cmd on timeout
+  ```
+  Built: binutils 2.45.1, GCC 15.2.0 (2-pass, c/c++/objc), newlib 4.6.0.20260123.
+  - **Flake hit:** pass-1 GCC died once with
+    `fatal error: libgcc_tm.h: No such file or directory` — a parallel-make
+    race on a generated header. Recovery: just re-run the same `make`; it
+    resumed and completed. If it recurs, set `makejobs=1` in `Makefile.cfg`.
+  - **Harmless noise** in the log: `clang++: error: unsupported option
+    '-print-multi-os-directory'` — GCC configure probing the host compiler.
+- **arm-eabi (AICA) toolchain: deliberately NOT built.** Optional in this KOS
+  revision — `kernel/arch/dreamcast/sound/arm/Makefile` falls back to the
+  shipped `stream.drv.prebuilt` when `DC_ARM_CC` is absent (confirmed used in
+  our build log). Build it only if a custom AICA driver is ever needed
+  (`cp Makefile.aica.cfg Makefile.cfg && make` in kos-chain).
+- **KOS environment + library build:**
+  ```sh
+  cd tools/kos
+  cp doc/environ.sh.sample environ.sh
+  # edit environ.sh: KOS_BASE="/Users/captainkoffski/AntigravityProjects/cleopatra/tools/kos"
+  # (absolute path; all other settings left at defaults — KOS_SUBARCH stays
+  #  commented = "pristine" Dreamcast; the loader targets a stock DC)
+  source environ.sh
+  export CPATH=/opt/homebrew/include LIBRARY_PATH=/opt/homebrew/lib  # see below
+  make
+  ```
+  - **macOS/arm64 deviation:** without CPATH/LIBRARY_PATH the build dies at
+    `utils/dcbumpgen` with `jpeglib.h: file not found` — its Makefile
+    hardcodes `-I/usr/local/include` (Intel-mac Homebrew path; arm64 brew is
+    `/opt/homebrew`). The two exports fix it; no file edits needed.
+  - Output: `tools/kos/lib/dreamcast/libkallisti.a` (5.8 MB).
+- **Verify:**
+  - `/opt/toolchains/dc/sh-elf/bin/sh-elf-gcc --version` → `sh-elf-gcc (GCC) 15.2.0`
+  - hello example: `source environ.sh && cd examples/dreamcast/hello && make`
+    → `hello.elf` (ELF 32-bit LSB, Renesas SH, statically linked).
+- **Every later build shell must `source tools/kos/environ.sh` first** (gives
+  `kos-cc`, `KOS_BASE`, flags).
+
+### makeip — 2.0.0 (Dreamcast IP.BIN builder, Phase 4)
+
+- Install:
+  ```sh
+  git clone https://github.com/sizious/makeip tools/makeip   # gitignored
+  cd tools/makeip/src
+  CPATH=/opt/homebrew/include LIBRARY_PATH=/opt/homebrew/lib make
+  ```
+  Cloned commit: `3adba188cdcd5e856db2a5248ba8988dae816b65`. The CPATH/LIBRARY_PATH
+  exports are the same arm64-brew fix as the KOS build — the Makefile hardcodes
+  `-I/usr/local/include` and dies on `png.h` without them (libpng already
+  installed via KOS prereqs).
+- Binary: `tools/makeip/src/makeip` (Mach-O arm64).
+- Use: `tools/makeip/src/makeip loader/ip.txt build/IP.BIN`.
+- Field limits are enforced (`src/field.c`): SW Maker Name max 16 chars —
+  the plan's "CLEO PORT PROJECT" (17) was shortened to "CLEO PORT PROJ" in
+  `loader/ip.txt`.
+
+### cdrtools — 3.02a09 (mkisofs, Phase 4 GDI mastering)
+
+- Install: `brew install cdrtools` → `/opt/homebrew/bin/mkisofs` (3.02a09).
+  (Conflicts with `dvdrtools`; neither was previously installed. dvdrtools is
+  NOT an equivalent substitute.)
+- Used by `scripts/make_gdi.py`: `mkisofs -C 0,45000 ...` offsets the in-FS
+  extent LBAs to match track 3's disc position. The warning
+  `-C specified without -M: old session data will not be merged.` is expected
+  and harmless — we want exactly that (no merge, just the LBA offset).
+
+### Flycast serial console (M1 boot-test output)
+
+- Config key (release Flycast 2.6 and source build): `Debug.SerialConsoleEnabled = yes`
+  under `[config]` in `~/Library/Application Support/Flycast/emu.cfg`.
+  Source of truth: `tools/flycast-src/core/cfg/option.cpp:132`
+  (`Option<bool> SerialConsole("Debug.SerialConsoleEnabled")`).
+- Effect: guest SCIF (serial) output — where KOS `dbglog` writes by default —
+  is dumped to Flycast's **stdout**. Redirect stdout to a file when launching
+  headless; the loader's lines appear ~30 s after launch (DC HLE boot, no BIOS
+  files needed for a GDI).
+- The launch gotchas from the "Flycast — source build" section apply to the
+  release app too: absolute GDI path, and
+  `defaults write com.flyinghead.Flycast ApplePersistenceIgnoreState -bool YES`
+  before launching.
 
 ### MAME source (reference only — never built, never run)
 

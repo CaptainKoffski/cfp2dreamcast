@@ -120,6 +120,47 @@ def test_range_cli_parser_single_and_set():
         (0x8c0315ce, 0x8c03161f), (0x8c03c2c6, 0x8c03c4a1)]
 
 
+def test_shimwatch_fails_check():
+    r = p.parse_text("SHIMWATCH addr=0cfc0100\n")
+    d = dict((n, ok) for n, ok, _ in r["checks"])
+    assert d["shim_home_clean"] is False
+    assert r["shimwatch"] == [0x0cfc0100]
+
+
+def test_shim_home_clean_passes_without_shimwatch():
+    r = p.parse_text(SAMPLE)   # existing sample has no SHIMWATCH lines
+    d = dict((n, ok) for n, ok, _ in r["checks"])
+    assert d["shim_home_clean"] is True
+
+
+def test_mieresp_parses_bytes_and_addr():
+    text = "MIERESP sub=15 addr=0c012345 data=8f16000000\n"
+    r = p.parse_text(text)
+    assert len(r["mieresp"]) == 1
+    m = r["mieresp"][0]
+    assert m["sub"] == 0x15
+    assert m["addr"] == 0x0c012345
+    assert m["data"] == bytes.fromhex("8f16000000")
+
+
+def test_cli_dump_mie_first_occurrence(tmp_path):
+    log = tmp_path / "in.log"
+    log.write_text(
+        "MIERESP sub=15 addr=0c011000 data=aabbccdd\n"
+        "MIERESP sub=15 addr=0c011000 data=11223344\n"   # 2nd occurrence, must be ignored
+        "MIERESP sub=01 addr=0c012000 data=ff00\n"
+    )
+    out_dir = tmp_path / "mie"
+    result = subprocess.run(
+        [sys.executable, os.path.join(os.path.dirname(__file__), "parse_cart_log.py"),
+         str(log), "--dump-mie", str(out_dir)],
+        check=True, capture_output=True, text=True)
+    assert (out_dir / "mie_sub15.bin").read_bytes() == bytes.fromhex("aabbccdd")  # first wins
+    assert (out_dir / "mie_sub01.bin").read_bytes() == bytes.fromhex("ff00")
+    assert "addr=0c011000" in result.stdout
+    assert "addr=0c012000" in result.stdout
+
+
 def test_cli_writes_csv(tmp_path):
     log = tmp_path / "in.log"; log.write_text(SAMPLE)
     out = tmp_path / "out.csv"

@@ -1,0 +1,2408 @@
+# Phase 4 — conversion build notes & analysis results
+
+Analysis results feeding the Phase 4 static-conversion patches. Every bound
+below is cited to an instruction address in the boot binary
+(`tools/boot.bin`, imported at base `0x8c020000`) and, where the bound is a
+literal, to the 32-bit pool word that holds it. Pool words were read directly
+from `tools/boot.bin` (file offset = addr − `0x8c020000`, little-endian) and,
+where a pool word is itself an in-image pointer, dereferenced one level.
+
+**This document has two parts.** The **Shipped architecture** and **Running on
+real hardware** sections immediately below are the final, deliverable-facing
+summary of what actually shipped. Everything after them (V1…, cart-patch-sites,
+input-ABI, M2/M3, Task 14–18, V5, V-EEPROM…) is the chronological
+analysis/evidence trail that produced it, kept verbatim for its citations — the
+implementation diverged massively from the original plan, and those sections
+record how each real finding was pinned.
+
+---
+
+## Shipped architecture (final)
+
+Status: **Phase 4 DONE (2026-07-20)** — boots, runs attract, playable 1P+2P with
+free-play, all **Flycast-confirmed**; real hardware is Phase 5 (untested). Branch
+`phase4-conversion`, **28 patches** (`scripts/build_patch_table.py`,
+ROM-old-byte-verified: 2 hook + 16 pool + 9 ptr + 1 insn16). The deliverable is
+four pieces.
+
+**A. Loader — KOS `1ST_READ.BIN`** (`loader/main.c`, `loader/handoff.S`). Reads
+the 1 MB game image from the GDI at `CART_FAD 47198` (`shim_iface.h:40`) into
+staging `0x8cd00000`; applies the 28 patches (each old-byte-verified, aborts on
+mismatch — `apply_patches`, `main.c:24`); copies `shim.bin` to
+`SHIM_BASE 0x8cfc0000` and zeros its `.bss` (`main.c:62,68`); places the two
+Naomi BIOS-data slices (`0x60000` +0x7000 lib at `SHIM_BASE+0xb000`, `0x1ffd00`
++0x70 auth at `SHIM_BASE+0x12000`; `main.c:73`); zeros the G1 + async-Maple
+register mirrors (`main.c:81,88`); `dcache_purge_range` over every
+cached-written region (`main.c:97-102`); `irq_disable`; then the PIC handoff stub
+copies staging→`0x8c020000` via P2 uncached, invalidates I+D cache
+(CCR `0x0000090d`), and jumps `GAME_ENTRY 0x8c04ae2c` (`handoff.S`;
+handoff-cache correctness verified `task-19-branch-review.md` "Confirmed
+NON-issues").
+
+**B. Cart-read shim — register-mirror + GD-ROM PIO** (`shims/src/cart.c`,
+`gd.c`; patches #1–#13 + hook on `FUN_8c03bc12`). The descriptor-base pool word
+`0x8c02da74` (`0xa05f7000`) and 12 config-time G1 literals are repointed to a
+shim-owned mirror `G1_MIRROR` (P2 `0xacfc8800`), so no game cart/G1 access hits
+the DC's real GD-ROM ATA registers at the colliding addresses
+(§cart-patch-sites; §V3 proved the completion-wait is a base-relative poll, so
+repointing the base carries the whole streaming path). The completion-wait
+`FUN_8c03bc12` is entry-hooked → `shim_cart_service`, which issues a GD-ROM PIO
+read via BIOS syscall (§V1, GD vector `0x8c0000bc`) and writes the destination
+via **P2 uncached** — cache-coherent for real hardware (the C1 fix, Task 20).
+
+**C. Async-Maple MIE service — input / EEPROM / enum** (`shims/src/main.c`,
+`maple.c`, `jvs.c`; patch #16 + 2 steady fn-ptr slots + Task-15c 7 slots +
+Task-16 hook). The runtime maple-base pool word `0x8c030fec` (`0xa05f6c00`) is
+mirrored to `MAPLE_MIRROR` (P2 `0xacfd3000`), so the steady MIE engine
+`FUN_8c03c2c6` drives shim RAM, not real controller DMA. Both fn-ptr slots that
+dispatch it — `0x8c02ed6c` (Mode A) and `0x8c02ee88` (Mode B, DC takes this) →
+`shim_maple_steady`, which calls the **real** engine (its per-frame pump
+`FUN_8c03c1c2` must run — §Task 14b/14f), walks the descriptor the engine just
+programmed into the mirror, and synthesizes each MIE reply into its live recv
+address:
+- **input** (sub 0x15/0x33) via real DC `GetCondition` (port A + port B) →
+  `dc_to_jvs` → a JVS has-data frame with recomputed checksum (§input-ABI:
+  BTN_OFF 0x20/0x21 = P1 big-endian, 0x22/0x23 = P2, checksum at 0x3a);
+- **EEPROM** (sub 0x03) → the baked free-play `eeprom.bin` (§V-EEPROM);
+- **JVS enum** (F1/10–14) → captured Naomi blobs (`mie_jvs*`); DIP/ACK verbatim.
+
+The **config-time** JVS enumeration is serviced separately (`shim_cfg_tx` /
+`shim_cfg_rx`, 7 fn-ptr repoints of `FUN_8c081562`/`FUN_8c081626`, §Task 15c) so
+the board reports **node-count ≥ 1** — required before the game emits the
+per-frame input poll. A **sync EEPROM-read hook** (`shim_ee_read` on
+`FUN_8c080f50`, §Task 16) fills the settings validator's buffers directly so it
+accepts free-play.
+
+**D. Forcing patches** (`scripts/build_patch_table.py`). Forced I/O-spec check
+`insn16 0x8c07a266` (`tst r1,r1` → `sett`, §M3 I/O-check force / Task 14c);
+free-play pinned per-frame at settings-struct `+0xc = 0x8c1c9790 = 1`
+(`shim_maple_steady`, Task 18 — this flag drives BOTH the CREDIT/FREE-PLAY
+display and the credit-decrement gate `FUN_8c081efc`, superseding Task 16's
+ineffective coin-byte pin); two Naomi BIOS-ROM data-pointer redirects
+`0x8c0804d4` (`0xa0060000` → `SHIM_BASE+0xb000` P2) and `0x8c0814d0`
+(`0xa01ffd00` → `SHIM_BASE+0x12000` P2) to the loader's RAM copies (§M2, patches
+#14/#15). 2-player input reuses the same MIE service (port B → JVS P2 slots,
+Task 17) with no extra game patch.
+
+## Running on real hardware
+
+**Status: HW-untested.** Everything in this KB is confirmed in Flycast only; the
+user runs the real-hardware test (Phase 5). The build target is a **GDEMU-class
+SD-card ODE** (`00-status.md` Decisions; `CLAUDE.md`).
+
+### Deploy to GDEMU
+
+`scripts/make_gdi.py` produces `build/cleo.gdi` plus its three track files
+`build/track01.bin`, `build/track02.raw`, `build/track03.bin` (track 3 =
+IP.BIN + `1ST_READ.BIN` ISO region, then the cart image at LBA 47048 / FAD
+47198). To run on a GDEMU-class ODE: copy the `.gdi` **and all three track
+files together** into a numbered folder on the GDEMU SD card (one game per
+`01/`, `02/`, … folder, per the GDEMU menu convention) and select it from the
+GDEMU boot menu. (GDEMU loads GDI/CDI images from FAT32 SD folders — general
+usage per the GDEMU manual / community setup guides, not a per-title claim.)
+Burning `cleo.gdi` to CD-R is a possible alternative, but GDEMU is the stated
+target and avoids media/laser variance.
+
+### One-command reproducible build (from the `.dat`)
+
+```sh
+source tools/kos/environ.sh \
+  && make -C shims \
+  && python3 scripts/build_patch_table.py \
+  && make -C loader \
+  && python3 scripts/make_gdi.py
+# -> build/cleo.gdi (+ track01.bin / track02.raw / track03.bin); 28 patches
+```
+
+Verified from clean (`make -C shims clean && make -C loader clean` first) on
+2026-07-20: `OK patch_table.h: 28 patches`, `OK cleo.gdi cart at LBA 47048
+(FAD 47198)`.
+
+**Gitignored inputs required** (never committed — ROM-derived or user-supplied):
+
+| Input | What / how to (re)generate |
+|---|---|
+| `Cleopatra Fortune Plus.dat` | the decrypted Naomi cart ROM (repo root; user-supplied) |
+| `bios/naomi/epr-21576h.ic27` | Naomi BIOS ROM (from `bios/naomi.zip`); `loader/Makefile` `dd`s the two BIOS slices → `build/bios_data.bin` automatically |
+| `tools/boot.bin` | first 1 MB of the `.dat` (`dd if="Cleopatra Fortune Plus.dat" of=tools/boot.bin bs=1M count=1`); `build_patch_table.py` reads it for old-byte verification |
+| `shims/data/eeprom.bin` | baked free-play 93C46 image; regenerate from `build/mie_sub03.bin` with the snippet in §V-EEPROM "Reproduction" |
+| `build/mie_sub*.bin` | MIE ACK / EEPROM templates; `python3 scripts/parse_cart_log.py capture-attract.log --dump-mie build/` (needs a Naomi-mode capture) |
+| `build/mie_jvs*.bin` | JVS I/O-board enumeration replies; `python3 scripts/extract_jvs_replies.py capture-attract.log` |
+
+Tests (all pass, run 2026-07-20): `make -C shims test`,
+`python3 scripts/test_parse_cart_log.py`, `python3 scripts/test_v1_ranges.py`,
+`python3 scripts/check_triples.py`.
+
+### Real-hardware watch-items (`.superpowers/sdd/task-19-branch-review.md`)
+
+Test order on HW: **(1) graphics → (2) streaming hitches → (3) controller
+input.**
+
+- **C1 — cache coherency (FIXED, Task 20).** `cart_read` now writes the streamed
+  destination via the **P2 uncached** alias (`shims/src/cart.c:46`,
+  `dest_phys | 0xa0000000`). The original Naomi cart-DMA delivered assets to
+  physical RAM and the game consumes them uncached / via hardware DMA
+  (PVR/TA/AICA); the old P1-cached write left fresh bytes in the D-cache with RAM
+  stale → garbage/black graphics on real hardware. Flycast has no real cache, so
+  this was catchable only by reasoning, never by the emulator. **If graphics are
+  wrong on HW, look here first** (confirm which alias the game reads the buffer
+  through).
+- **I1 — GD-ROM PIO latency.** The cart hook does a synchronous busy-polled
+  **PIO** read inside the frame-critical DMA-wait (`gd.c:33-45`,
+  `cart.c:70-91`). Flycast's virtual drive returns instantly; a real GD-ROM is
+  far slower and PIO adds per-word CPU cost, so heavy streaming (stage loads) may
+  hitch or underrun audio. Not a crash. **Mitigation: the Phase-5 GD-DMA
+  upgrade** (noted in `gd.c`). Test the heaviest streaming transitions first.
+- **I2 — real-Maple input setup.** The shim drives the real Maple registers for
+  `GetCondition` (`maple.c:32-48`); this works only because KOS (the loader is a
+  KOS program) programmed `SB_MDAPRO`/`SB_MDTSEL`/`SB_MDSPEED` + bus-enable at
+  boot and the game never touches the real regs afterward (all mirrored). KOS's
+  `maple_dma_mem_protection()` covers `0x0c000000..0x0cffffff` incl. the shim RX
+  buffer, so it should hold — but Flycast ignores `SB_MDAPRO`, so **if controller
+  input is dead on HW, this is the first suspect.**
+
+Other review items (`task-19-branch-review.md`, all low-risk / non-blocking): an
+unhandled MIE subcommand hard-hangs via `shim_die` (the handled set covers
+attract/1P/2P/free-play, but an untested condition could brick — a benign
+fallback ACK would be forward-safe); and the empty-port-B poll costs one extra
+maple timeout/frame (well within the 16.6 ms budget).
+
+---
+
+## V1 — init RAM-write range (BIOS-GD-syscalls vs raw-ATA gate)
+
+**Question (task brief / spec §2):** the DC port jumps into init at
+`0x8c021000` (via trampoline `0x8c04ae2c`, `boot-binary.md` §2). init "zeroes
+RAM" (`boot-binary.md` §2). The planned disc-access shim calls the DC BIOS
+GD-ROM syscall, whose **vector table + work area live in `0x8c000000–0x8c007fff`**
+(GD-ROM vector pointer at `0x8c0000bc`, see citations). If init's zeroing
+covers that area, the shim must instead carry a raw ATA driver (STOP-and-revise
+gate). Also check the planned shim home `0x8cfc0000–0x8cffffff`.
+
+### Method
+
+`scripts/ghidra/run.sh script DisasmRange.java <start> <end>` (new this task;
+listing over an address range on the already-auto-analysed program). init and
+its callees were disassembled, every clear/copy/fill loop identified, and each
+loop's bound registers chased to their pool-literal / pointer-table constants.
+
+### init structure — this is a compiler crt0, not a hand memset
+
+init (`0x8c021000`) is a standard SH-4 C-runtime startup:
+
+- `0x8c021000` MMIO reg store `*(0xa05f811c)=0xff` (Holly reg; not RAM) then
+  two cache-init `jsr`s run in P2-uncached space (`0x8c02100c`→`0xac0210c4`,
+  `0x8c021042`→`0xac0210b8`; CCR/cache ops, not RAM fills).
+- `0x8c02104c` `jsr @r3` → **`FUN_0x8c094a68`** with `r4=0xac00fc00, r5=0,
+  r6=0x400` — a byte `memset(dest,val,len)` (loop body `0x8c094a72`–`0x8c094a7a`,
+  `mov.b r5,@r0`). **Zeroes phys `0x8c00fc00`–`0x8c00ffff`** (1 KB, via the
+  uncached mirror `0xac00fc00`).
+- `0x8c02108c` `mov r0,r15` sets SP = `0x8c00f400` (pool `0x8c0210a4`);
+  `0x8c021090` `ldc r0,VBR` sets VBR = `0x8c00f400` (pool `0x8c0210b0`).
+- `0x8c021104` `mov.l @r0,r15` sets the definitive SP = `*[0x8c0c44a4]` =
+  `0x8c00f000` (pool `0x8c021118` holds the pointer `0x8c0c44a4`). Reconciles
+  `boot-binary.md` §3.
+- `0x8c021108` `jmp @r0` → `0x8c021150` (pool `0x8c02111c`), the data/bss init.
+- `0x8c021176` `bsr 0x8c0211e2` (block G) then `0x8c02117a` `bsr 0x8c021188`
+  (blocks C–F).
+- `0x8c02122c`+ are `.init_array`/ctor walkers (`jsr @r2` over a function-pointer
+  table); they run application constructors — out of V1 scope.
+
+### Every RAM-writing loop/call in init
+
+| # | Site (loop body) | Kind | Range written | Bound evidence |
+|---|---|---|---|---|
+| memset | `FUN_0x8c094a68` `0x8c094a72` | **zero** (byte) | `0x8c00fc00`–`0x8c00ffff` (1 KB) | args at `0x8c02104c`: r4=pool`0x8c021060`=`0xac00fc00`, r6=pool`0x8c021054`=`0x400`, r5=0 |
+| G | `0x8c0211f8` | copy (non-zero code stubs) | `0x8c000000`–`0x8c00001f` (32 B) | dest=pool`0x8c02133c`=`0x8c000000`, end=pool`0x8c021340`=`0x8c000020`; src table `0x8c0a20f8` |
+| G′ | stores `0x8c021218`, `0x8c02121e`, `0x8c021222` | conditional non-zero word stores | `0x8c000010`, `0x8c000018`, `0x8c00001c` (3 words) | vals `0x002b003b`/`0x402b9401`/`0x0100e501` (pools `0x8c02134c`/`0x8c021354`/`0x8c02135c`) → dests pools `0x8c021350`=`0x8c000010`, `0x8c021358`=`0x8c000018`, `0x8c021360`=`0x8c00001c` |
+| A | `0x8c02115a` | fill `0x41474553` ("SEGA") | `0x8c00c000`–`0x8c00efff` (12 KB) | start=pool`0x8c0212fc`=`0x8c00c000`, fill=pool`0x8c0212f8`=`0x41474553`, end=`*[pool 0x8c0212f4=0x8c0c44a4]`=`0x8c00f000` |
+| B | `0x8c02116c` | fill `0x41474553` ("SEGA") | `0x8c1f3480`–`0x8c1f349f` (32 B) | start=`*[pool 0x8c021304=0x8c0a1fcc]`=`0x8c1f3480`, end=`*[pool 0x8c021300=0x8c0a1fd0]`=`0x8c1f34a0` |
+| E | `0x8c0211bc` | **zero** (byte) | `0x8c0daf80`–`0x8c0fd8df` (~138 KB) | dest=`*[pool 0x8c021324=0x8c0a2028]`=`0x8c0daf80`, end=`*[pool 0x8c021320=0x8c0a2034]`=`0x8c0fd8e0` |
+| C | `0x8c021192` | **zero** (word) | `0x8c0fd8e0`–`0x8c1f347f` (~981 KB) | start=`*[pool 0x8c021310=0x8c0a1fbc]`=`0x8c0fd8e0`, end=`*[pool 0x8c02130c=0x8c0a1fc8]`=`0x8c1f3480` |
+| D | `0x8c0211a8` | byte copy | **empty** (dest==end==`0x8c0daf80`) | dest=`*[0x8c0a1fac]`=`0x8c0daf80`, end=`*[0x8c0a1fb8]`=`0x8c0daf80` |
+| F | `0x8c0211d2` | byte copy | **empty** (dest==end==`0x8c0daf80`) | dest=`*[0x8c0a2018]`=`0x8c0daf80`, end=`*[0x8c0a2024]`=`0x8c0daf80` |
+
+Notes:
+- **E + C are contiguous** → the BSS clear is one region **`0x8c0daf80`–`0x8c1f347f`**
+  (~1.12 MB), byte-clear up to `0x8c0fd8e0` then word-clear to the end.
+- D and F (the `.data` ROM→RAM copies) are no-ops: the game runs from the same
+  RAM image it was loaded into, so `.data` is already in place. Nothing to relocate.
+- Block A is stack painting: it fills the stack window `0x8c00c000`–`0x8c00f000`
+  (top = the SP `0x8c00f000`) with the pattern "SEGA" — a high-water-mark canary.
+  Contains the observed runtime stack `0x8c00e6e8`–`0x8c00ef28` (`boot-binary.md` §3).
+- Block G copies 8 words that decode as tiny SH-4 handler stubs
+  (`0x0009`=nop, `0x002b`=rte, `0x000b`=rts, `0xaffd`=bra) to `0x8c000000`. It is
+  a **non-zero code write, not a zeroing loop**, and the game's VBR is
+  `0x8c00f400`, so these are not the game's exception vectors — just 32 bytes the
+  game parks at the base of RAM.
+- Row G′: immediately after the copy loop, three more word stores overwrite
+  three of those stub slots — but only conditionally. The guard at
+  `0x8c02120c`–`0x8c021210` loads `*[0x8c004000]` (ptr from pool `0x8c021348`)
+  and compares it to `0x000b003b` (pool `0x8c021344`); on mismatch,
+  `bf 0x8c021224` skips all three stores. Note the guard **reads** `0x8c004000`
+  — inside the syscall window — so on DC the branch outcome depends on whatever
+  the BIOS left there; the stores may or may not fire. Either way all three
+  dests stay within `0x8c000000`–`0x8c00001f`.
+- This table is the complete inventory of **crt0's own** RAM writes (init
+  through the `rts` at `0x8c021228`, plus the `FUN_0x8c094a68` call). The
+  `.init_array` walkers at `0x8c02122c`+ run application constructors via
+  function-pointer tables — out of V1 scope (they are ordinary game code, not
+  startup zeroing).
+
+### Verdict — syscall area `0x8c000000–0x8c007fff`
+
+DC BIOS GD-ROM syscall infrastructure (authoritative addresses):
+- Vector pointers `0x8c0000b0`–`0x8c0000e0`; **GD-ROM vector = `0x8c0000bc`**
+  (`VEC_MISC_GDROM = MEM_AREA_P1_BASE | 0x0C0000BC`,
+  `tools/kos/kernel/arch/dreamcast/hardware/syscalls.c:26`; identical in
+  `tools/flycast-src/core/reios/reios.cpp:39` `dc_bios_syscall_gd 0x8C0000BC`).
+- On flycast's HLE BIOS the vectors are patched to point at syscall stubs at
+  `0x8c001000`–`0x8c001008` (`reios.cpp:648-654`, `setup_syscall(0x8C001006,
+  dc_bios_syscall_gd)`).
+
+**None of init's zeroing touches the syscall area.** The zero ranges are
+`0x8c00fc00`–`0x8c00ffff` (memset), `0x8c0daf80`–`0x8c1f347f` (BSS) — all far
+**above** `0x8c007fff`. The lowest zero byte is `0x8c00fc00` (memset), well clear.
+
+**→ Syscall area SURVIVES the zeroing. GATE NOT TRIPPED.** The BIOS GD-syscall
+plan stands; no raw ATA driver is forced by init.
+
+Caveat (watch item, not a gate trip): init writes **32 non-zero bytes to
+`0x8c000000`–`0x8c00001f`**, inside the declared syscall window, from **four
+write sites**: the block G loop store (`0x8c0211fe`) plus the three conditional
+stores (`0x8c021218`, `0x8c02121e`, `0x8c021222` — row G′). All four stay
+*below* the syscall vector table (`0x8c0000b0`+) and below the HLE syscall
+stubs (`0x8c001000`+), so the GD-ROM vector `0x8c0000bc` and its handler are
+untouched — on flycast/reios these writes are harmless (that region holds
+nothing the syscalls use). They could not be proven harmless on **real** BIOS
+statically: the DC boot reserves the low 64 KB (KOS loads at `0x8c010000`), and
+whether the real BIOS gdrom driver keeps state in `0x8c000000`–`0x8c00001f`
+cannot be resolved without disassembling the real BIOS. If real-hardware
+testing later shows a GD syscall fault right after init, revisit these writes;
+any neutralizing patch must cover **all four store sites** (patching only the
+loop store at `0x8c0211fe` would leave the three conditional stores live) —
+e.g. redirect the dest pools `0x8c02133c`/`0x8c021340` and
+`0x8c021350`/`0x8c021358`/`0x8c021360`, or branch over
+`0x8c0211f2`–`0x8c021222`. Still a few-word patch, not a driver rewrite.
+
+### Verdict — shim home `0x8cfc0000–0x8cffffff`
+
+The last byte init writes is `0x8c1f349f` (block B; its end bound `0x8c1f34a0`
+is exclusive). Every init write is ≤ `0x8c1f349f`, over 14 MB below `0x8cfc0000`.
+
+**→ Shim home SAFE — init never touches `0x8cfc0000+`.**
+
+### Decision
+
+- **Shim disc access = BIOS GD-ROM syscalls** (vector `0x8c0000bc`). Raw ATA
+  driver NOT required.
+- **Shim home `0x8cfc0000+` needs no relocation and no memset-bound patch.**
+- Low-priority watch item: init's 32-byte code-stub writes at `0x8c000000`
+  (four store sites: `0x8c0211fe`, `0x8c021218`, `0x8c02121e`, `0x8c021222`) —
+  re-check only if a real-BIOS GD syscall faults immediately post-init; any
+  patch must cover all four sites.
+
+### Reproduction
+
+```sh
+# init + crt0 body
+scripts/ghidra/run.sh script DisasmRange.java 0x8c021000 0x8c021200 2>&1 | grep 'DisasmRange.java> 8c021'
+scripts/ghidra/run.sh script DisasmRange.java 0x8c0211e2 0x8c0212f4 2>&1 | grep 'DisasmRange.java> 8c021'
+# memset helper called at 0x8c02104c
+scripts/ghidra/run.sh script DisasmRange.java 0x8c094a68 0x8c094ab0 2>&1 | grep 'DisasmRange.java> 8c094'
+```
+
+Pool/pointer resolution + gate self-check (asserts the bounds this section
+claims — fails loudly if any pool word moves):
+
+```sh
+python3 scripts/test_v1_ranges.py    # -> OK: all V1 bounds verified
+```
+
+DC syscall vector citations:
+```sh
+grep -n 'VEC_MISC_GDROM\|VEC_SYSINFO' tools/kos/kernel/arch/dreamcast/hardware/syscalls.c
+grep -n 'dc_bios_syscall_gd\|setup_syscall(0x8C0010' tools/flycast-src/core/reios/reios.cpp
+```
+
+---
+
+## V2 — shim-home write-watch (dynamic, whole-run)
+
+**Question (task brief):** V1 proved *init* never touches the planned shim home
+phys `0x0cfc0000`–`0x0cffffff` (P1 `0x8cfc0000+`). Does the *running game* ever
+write there? If yes, the shim home must move.
+
+### Method
+
+Instrumented Flycast (`patches/flycast-instrument.diff`,
+`core/hw/naomi/naomi.cpp` `cartlog_shimwatch()`): a content scan of mem_b
+offsets `0x00fc0000`–`0x00ffffff`, sampled at the same every-64th-cart-DMA
+cadence as the `WATERMARK` scan, emitting `SHIMWATCH addr=` on the first
+non-zero byte found. A **content scan, not a write-intercept**, because the
+arm64 dynarec's fast path (`core/rec-ARM64/rec_arm64.cpp`
+`GenWriteMemoryFast`/`GenWriteMemoryImmediate`) stores straight into host RAM,
+bypassing every C-level write function — a `WriteMem` hook would miss most
+game writes with the dynarec on. mem_b is zeroed on hard reset
+(`core/hw/sh4/sh4_mem.cpp` `mem_Reset` → `mem_b.zero()`), so any non-zero byte
+must have been written during the run. Parser check: `shim_home_clean`
+(PASS iff zero `SHIMWATCH` lines).
+
+### Capture
+
+`scripts/capture.sh attract 600` — one unattended 600 s Naomi-mode run
+(dynarec ON), **coverage = boot + attract + demo mode (unattended)**; no human
+play this pass. Demo mode exercises gameplay (Phase 2: demo covered ~99% of
+streaming; hands-on play added only 5 DMAs). Log `capture-attract.log`
+(repo root, untracked): 108,648 lines — 865 CARTDMA, 35,759 MIERESP,
+35,758 MAPLEPC, 35,355 JVSREPORT, 42 WATERMARK (= 14 scan samples × 3
+regions), **0 SHIMWATCH**.
+
+### Verdict
+
+**`CHECK shim_home_clean: PASS` — zero SHIMWATCH lines across the run.**
+The game never left a non-zero byte in `0x0cfc0000`–`0x0cffffff`
+(scanned 14 times through boot → attract → demo). Shim home stands;
+no relocation of `shim_iface.h`'s choice needed.
+
+Margin note (honest caveat, not a trip): this run's main-RAM watermark
+reached `0x00f80040` (15.5 MB — higher than Phase 2's 11.2 MB DMA high-water;
+the game does write above the asset region), which is only 0x3ffc0 (~256 KB)
+below the shim window base `0x00fc0000`. The window itself stayed all-zero.
+Sampling caveat: a write that was fully re-zeroed between two 64-DMA samples
+would evade the scan — same accepted trade-off as the WATERMARK scan.
+
+### Reproduction
+
+```sh
+scripts/capture.sh attract 600
+python3 scripts/parse_cart_log.py capture-attract.log   # -> CHECK shim_home_clean: PASS
+```
+
+---
+
+## V3 — cart-DMA completion-wait mechanism
+
+**Question (spec §4 V3):** does the game wait for the G1 cart DMA by *polling*
+a register or by *sleeping on an IRQ*? Poll → the register-mirror handles it
+for free (the poll lands in the mirror once the descriptor base is repointed);
+IRQ/sleep → the patch table needs an extra branch-over. Candidate wait:
+`FUN_8c03bc12`, called immediately after the `SB_GDST` trigger
+(`boot-binary.md` §4).
+
+### Method
+
+`scripts/ghidra/run.sh script DisasmRange.java 0x8c03bc12 0x8c03bd08`; the
+loop-called function pointer and the base-relative offsets were resolved to
+their pool words (16-bit `.word` / 32-bit `.long`, read from `tools/boot.bin`,
+file offset = VA − `0x8c020000`).
+
+### FUN_8c03bc12 is a base-relative poll loop (verdict: POLL, not IRQ)
+
+`FUN_8c03bc12(r4=flag, r5=descriptor)` (`0x8c03bc12`–`0x8c03bc72`):
+
+```
+8c03bc20  LOOP: mov.l @(0x70,r14),r2 ; r2 = [desc+0x70]  (mode flag)
+8c03bc24        tst r2,r2
+8c03bc26        bf   0x8c03bc50       ; mode!=0 → skip yield
+8c03bc2e        jsr  @r11             ; r11 = *0x8c03bd00 = FUN_8c09dfe4  (task yield)
+8c03bc32        mov  #0x58,r0
+8c03bc36        mov.l @(r0,r14),r3    ; r3 = [desc+0x58]  = G1 base (0xa05f7000)
+8c03bc3a        add  r5,r3            ; r5 = *0x8c03bcf6 = 0x0418  → base+0x418 = SB_GDST
+8c03bc3c        mov.l @r3,r2          ; r2 = *(base+0x418)  ← READ SB_GDST
+8c03bc3e        tst  r2,r13           ; r13 = 1  → test bit0
+8c03bc40        bf   0x8c03bc58       ; bit0 SET (busy) → 0x8c03bc58 → loops back to 0x8c03bc20
+                ; bit0 CLEAR (done): read base+0x4f8 (*0x8c03bcfa) → [desc+0x5c], return
+```
+
+- The exit condition is `*(base+0x418) & 1 == 0` (SB_GDST bit0 clear = "DMA no
+  longer in progress"). `base = [desc+0x58]` = the descriptor register base
+  (`0xa05f7000`, see cart-patch-sites). This is a **descriptor-base-relative
+  read** → it lands in the shim mirror once the base is repointed.
+- Pool offsets (`tools/boot.bin`): `0x8c03bcf6 = 0x0418` (SB_GDST),
+  `0x8c03bcf8 = 0x0414` (SB_GDEN), `0x8c03bcfa = 0x04f8` (G1 status, → desc+0x5c),
+  `0x8c03bcfc = 0x0084`. All are offsets added to `base`, so **every register
+  access in the wait is base-relative** — none is an absolute pool literal.
+- `*0x8c03bd00 = 0x8c09dfe4` is **not** a sleep/IRQ primitive: `FUN_8c09dfe4`
+  (`0x8c09dfe4`+) saves `PR/MACH/MACL/r14..r11` to a context block at
+  `*0x8c09e0b4` — a **cooperative task-yield / context switch**. So the loop is
+  a *yield-between-polls busy-wait*, not an interrupt wait. The exit still
+  depends 100 % on the register read at `0x8c03bc3c`.
+- The sibling arm helper `FUN_8c03bbe8` (`0x8c03bbe8`, called before the
+  trigger) performs the same base-relative poll: writes `base+0x414`
+  (SB_GDEN) = 0 and spins on `base+0x418` bit0 (`0x8c03bc02`–`0x8c03bc0a`).
+- `*0x8c03bd04 = 0xdeaddead` is a poison sentinel compared in the post-DMA
+  handler `FUN_8c03bc74` — not part of the wait.
+
+### Verdict + chosen intercept
+
+**POLL, base-relative.** No interrupt/sleep wait exists, so **no branch-over
+patch is required**. Because `FUN_8c03bc12`, `FUN_8c03bbe8`, and the runtime
+trigger all read/write `SB_GDST`/`SB_GDEN` as `base+0x418`/`base+0x414` with
+`base = [desc+0x58]`, repointing the descriptor base (cart-patch-sites, patch
+#1) makes the whole wait land in the mirror. The shim keeps **`mirror+0x418`
+bit0 = 0** (DMA idle/done) after each synchronous service, and the first poll
+iteration exits.
+
+- **Chosen default (belt-and-suspenders): entry-hook `FUN_8c03bc12` →
+  `shim_cart_service`** (serve the read, ensure completion visible, return).
+  Works for any polling variant and removes the cooperative yield from the hot
+  path. Recorded for Task 12.
+- Even without the hook, the mirror alone satisfies the wait (poll reads
+  `mirror+0x418` = 0). The hook is the safety margin, not a necessity.
+
+Every config-time `SB_GDST` reader uses the *same* wait-for-clear test
+(`tst r2,r2; bf` loops while `SB_GDST != 0`: `FUN_8c08074a`, `FUN_8c080868`,
+`FUN_8c081c76`, `FUN_8c081d68/d86`, `FUN_8c081efc`), so a single invariant —
+**mirror `+0x418` reads 0 when idle** — satisfies both the runtime and the
+config-time pollers.
+
+### Reproduction
+
+```sh
+scripts/ghidra/run.sh script DisasmRange.java 0x8c03bbe8 0x8c03bd06 2>&1 | grep 'DisasmRange.java> 8c03'
+scripts/ghidra/run.sh script DisasmRange.java 0x8c09dfe4 0x8c09e002 2>&1 | grep 'DisasmRange.java> 8c09'
+# pool offsets: 0x8c03bcf6=0418 0x8c03bcf8=0414 0x8c03bcfa=04f8 0x8c03bd00=8c09dfe4
+```
+
+---
+
+## cart-patch-sites — cart/G1 register-mirror patch list (Task 6)
+
+The exact list Task 12 turns into patch definitions for the **register-mirror**
+cart-DMA shim (spec §3). Every game store/load to the Naomi cart/G1 registers
+(`0x5f7000`–`0x5f7014` cart offset/count, `0x5f7400`–`0x5f74ff` G1 DMA channel)
+must be repointed to a shim-owned **mirror block** so nothing hits the DC's
+real GD-ROM ATA registers at the same addresses (`naomi-vs-dreamcast.md` §3
+collision). Reads of the mirror are served by the shim; the `SB_GDST` trigger
+becomes a shim call (Task 12).
+
+### The mirror block
+
+A ≥ `0x500`-byte (round to `0x800`) block in shim home
+(`0x8cfc0000`–`0x8cffffff`, V2-verified), laid out so **`MIRROR + 0xYYY`
+stands in for register `0x5f7YYY`**. Repoint values use the **P2-uncached**
+alias (`0xA0000000 | mirror_phys`, written `MIRROR_P2` below) to match the
+game's original `0xa05f7xxx` accesses and to keep shim/game views coherent
+without cache flushes. Offsets actually used span `0x00c`–`0x4f8` (the V3 wait
+reads `base+0x4f8` at `0x8c03bc4a`); sizing unaffected — still ≥ `0x500`.
+
+### Method
+
+`scripts/ghidra/ListPoolWords.java` (new this task) raw-scans every 4-aligned
+32-bit word whose value masked to 29-bit phys lands in `[0x5f7000, 0x5f7800)`
+and prints its referencing instructions + functions; cross-checked against the
+Phase-3 operand+data scanner `FindMmioXrefs.java` (identical 13-site active
+set) and against `getReferencesTo` per word. Each active pool word was then
+confirmed via `DisasmRange` to be used **only** by cart/G1 config/streaming
+code (no unrelated sharer).
+
+```sh
+scripts/ghidra/run.sh script ListPoolWords.java 0x005f7000 0x005f7800 2>&1 | grep POOLWORD
+scripts/ghidra/run.sh script FindMmioXrefs.java 2>&1 | grep -E 'block=(cart|g1dma)'
+```
+
+### Patch #1 — descriptor-base source (PRIMARY; covers ALL runtime streaming)
+
+The runtime trigger `FUN_8c03bd08` and its wait/arm helpers read the G1
+register base from `[desc+0x58]` and add offsets (`boot-binary.md` §4). That
+base is set **once, at descriptor construction**, from a single pool word:
+
+- **Getter** `FUN_8c02d9a6` (`0x8c02d9a6`): `mov.l 0x8c02da74,r0; rts` — returns
+  `*0x8c02da74 = 0xa05f7000`. Pool word `0x8c02da74` is referenced **only** by
+  this getter (`getReferencesTo` → 1 ref).
+- **Constructor** `FUN_8c02dd20`: `0x8c02dd2c bsr 0x8c02d9a6` (getter → r0),
+  then `0x8c02dd30 mov #0x58,r1; add r14,r1; 0x8c02dd38 mov.l r0,@r1` →
+  **`*(desc+0x58) = 0xa05f7000`**. `FUN_8c02dd20` (via `FindRefs`) is the
+  getter's sole caller and the sole writer of `+0x58` (all other `+0x58`
+  accesses in the `0x8c03bxxx` cluster are reads).
+
+| pool word | value | ref | rewrite |
+|---|---|---|---|
+| `0x8c02da74` | `0xa05f7000` | `FUN_8c02d9a6` (only) | → `MIRROR_P2 + 0x000` |
+
+**Consumers auto-covered by patch #1** (all read `base=[desc+0x58]`, add a const):
+`FUN_8c03bd08` writes `base+0x414` (SB_GDEN, `0x8c03bd1e`) and `base+0x418`
+(SB_GDST trigger, `0x8c03bd26`); `FUN_8c03bc12`/`FUN_8c03bbe8` poll
+`base+0x418`; `FUN_8c03b81a` writes `base+0x404/0x408/0x40c/0x4b8`
+(`0x8c03b88e`–`0x8c03b8ea`, offsets `0x8c03b984..0x8c03b98a`). **Because these
+are `base + const`, once `base = MIRROR_P2` every one lands in the mirror
+automatically — confirmed.** (The `SB_GDST`/`SB_GDEN` computed writes the task
+flags in `FUN_8c03bd08` therefore need no separate patch.) This is the whole
+per-frame streaming path (dynamically: all 460 cart DMAs, `boot-binary.md` §4).
+
+### Patches #2–#13 — config-time absolute pool literals
+
+Config/region-setup code programs the G1 channel via **absolute** pool literals
+(no descriptor). Each would hit real ATA on DC; each pool word is exclusive to
+its function (cross-checked). `MIRROR_P2 + 0xYYY` = repoint target.
+
+| # | pool word | value | reg | function(s) @ load site | access | rewrite |
+|---|---|---|---|---|---|---|
+| 2 | `0x8c08071c` | `0xa05f74b8` | GDEN cfg `74b8` | `FUN_8c08063c` @`0x8c08063c` | WRITE | `MIRROR_P2+0x4b8` |
+| 3 | `0x8c080720` | `0xa05f7480` | GDSTAR `7480` | `FUN_8c08063c` @`0x8c080642` | WRITE | `MIRROR_P2+0x480` |
+| 4 | `0x8c080724` | `0xa05f7484` | GDLEN `7484` | `FUN_8c08063c` @`0x8c080648` | WRITE | `MIRROR_P2+0x484` |
+| 5 | `0x8c080728` | `0xa05f7490` | GDDIR `7490` | `FUN_8c08063c` @`0x8c080656` | WRITE | `MIRROR_P2+0x490` |
+| 6 | `0x8c08072c` | `0xa05f74a4` | `74a4` | `FUN_8c08063c` @`0x8c08065a` | WRITE | `MIRROR_P2+0x4a4` |
+| 7 | `0x8c0807d8` | `0xa05f7418` | SB_GDST `7418` | `FUN_8c08074a` @`0x8c08074a` | READ | `MIRROR_P2+0x418` |
+| 8 | `0x8c0808e4` | `0xa05f7418` | SB_GDST `7418` | `FUN_8c080868` @`0x8c080868` | READ | `MIRROR_P2+0x418` |
+| 9 | `0x8c080904` | `0xa05f700c` | cart `700c` | `FUN_8c080868` @`0x8c080874` | WRITE | `MIRROR_P2+0x00c` |
+| 10 | `0x8c080e3c` | `0xa05f700c` | cart `700c` | `FUN_8c080d18` @`0x8c080d3c` | WRITE | `MIRROR_P2+0x00c` |
+| 11 | `0x8c081d24` | `0xa05f7418` | SB_GDST `7418` | `FUN_8c081c76` @`0x8c081c78`, `FUN_8c081aee` @`0x8c081b90` | READ (poll) | `MIRROR_P2+0x418` |
+| 12 | `0x8c081e90` | `0xa05f7418` | SB_GDST `7418` | `FUN_8c081d68` @`0x8c081d6c`, `FUN_8c081d86` @`0x8c081d86` | READ (poll) | `MIRROR_P2+0x418` |
+| 13 | `0x8c081ff8` | `0xa05f7418` | SB_GDST `7418` | `FUN_8c081efc` @`0x8c081fac` | READ (poll) | `MIRROR_P2+0x418` |
+
+**Computed-offset writes inside `FUN_8c08063c` are auto-covered by #2–#6.** The
+function loads the pool literals as *bases* then reaches adjacent registers by
+constant arithmetic: `add #-0x30`/`add #0xc` off r2 (from `74b8`) → `7488`,
+`7494`; `add #0xc` off r3 (from `7480`) → `748c`; `add #0x10` off r7 (from
+`7490`) → `74a0` (`0x8c08064e`–`0x8c080748`). Since the deltas are constants
+and the mirror preserves relative layout, repointing the 5 base literals
+redirects the computed writes too — no extra patch.
+
+**Config-time `SB_GDST` reads (#7,#8,#11,#12,#13) share the wait-for-clear
+semantics of V3** (`tst r2,r2; bf` loops while `SB_GDST != 0`). With the shim
+holding `mirror+0x418 = 0` when idle, `FUN_8c08074a` returns "idle",
+`FUN_8c080868` proceeds, and the `0x8c081xxx` pollers exit immediately — no
+hang. These config-time sites were **not** observed in the dynamic capture
+(the `CARTDMAPC` hook logs `SB_GDST` *stores* only, and all 460 were inside
+`FUN_8c03bd08`); they are repointed defensively because they are live,
+statically-reachable code that would read real GD-ROM ATA on DC.
+
+### Flagged — NOT mirror-repointable (findings)
+
+1. **Generic multi-channel HW register tables** — hold G1 regs among unrelated
+   SH4/Maple/AICA/PVR regs, so the G1 entries cannot be blindly repointed (that
+   would desync a routine that walks the whole table). Two distinct tables:
+
+   - **Table 1 — `0x8c0a3980`–`0x8c0a39ec`**: `{register, value}` pairs, incl.
+     SB_GDST `0x5f7418` at `0x8c0a39b8` (also SB_MDST `0x5f6c18` @`0x8c0a39b0`,
+     AICA `0x5f7818` @`0x8c0a39c0`, G2 `0x5f7c0c/10/14` @`0x8c0a3980..`).
+     `getReferencesTo` = **zero** for every entry **and** no incoming pointer to
+     the table base → **genuinely dead**. No action.
+   - **Table 2 — `0x8c0a3f78`–`0x8c0a3fxx`**: a contiguous array of register
+     *addresses* — SH4 core `0xff0000xx`/`0xffa000xx` from `0x8c0a3f78`, then
+     the Holly run from `0x8c0a3fb8` (`0xa05f6800`…), incl. G1 `0x5f7404/08/40c`
+     at `0x8c0a3fd0/d4/d8`. `getReferencesTo` = zero **only because access is
+     computed** (base+index): it is walked by **`FUN_8c0467f4`** — table base
+     `pool[0x8c046a8c]=0x8c0a3f78` loaded at `0x8c0469ae`, `base + r12*4` at
+     `0x8c0469b0`–`b4`, register **address** read at `0x8c0469b8 mov.l @r10,r4`,
+     register **value** read at `0x8c0469c0 mov.l @r10,r4; 0x8c0469c4
+     mov.l @r4,r4`, both printed via `jsr @r13`/`@r14` — a **read-only
+     register-dump/log** routine. Caller: `pool[0x8c03b1b8]=0x8c0467f4`, called
+     at `0x8c03b104`, mode-gated. Because it only READS it cannot corrupt the
+     drive; on DC the G1 dereferences read real GD-ROM ATA regs and log
+     garbage — harmless.
+
+   **Neither table is mirror-repointable** (mixed-channel; Table 2's G1 entries
+   are reached by computed index, not a per-instruction pool load). If a fault
+   or bad log surfaces here, the fix is an *instruction-level* patch on
+   `FUN_8c0467f4` (or its mode-gate), **not** a blind repoint. **Task 12 / M2:**
+   confirm `FUN_8c0467f4` is read-only and whether its mode-gate is reachable in
+   retail. LOW risk: Table 1 dead; Table 2 read-only + the dynamic capture
+   (boot→attract→demo→play) never triggered a cart DMA outside `FUN_8c03bd08`.
+
+2. **Dead pool slots** holding cart/G1 addresses but with **zero** references
+   (confirmed `FindRefs`; not even Ghidra-defined data — raw literal-pool
+   filler): `0x8c080620` (`7418`), `0x8c080628` (`703c`), `0x8c080630`
+   (`7014`), `0x8c0807e0` (`7000`), `0x8c0807e4` (`7004`), `0x8c0807f0`
+   (`7008`), `0x8c0808e8` (`7004`), `0x8c0808f0` (`7000`), `0x8c0808f4`
+   (`7014`), `0x8c0808f8` (`7010`), `0x8c080908` (`7404`), `0x8c08090c`
+   (`7408`), `0x8c080910` (`740c`), `0x8c081eb4` (`7068`), `0x8c0821c8`
+   (`7418`). Not active programming sites → **no patch**; listed for
+   completeness so a future re-scan does not re-flag them.
+
+### Summary for Task 12
+
+**13 mirror repoints:** patch #1 (descriptor base `0x8c02da74`) covers the
+entire runtime streaming path (trigger + arm + wait, all base-relative);
+patches #2–#13 cover the config-time absolute literals. Plus the V3 entry-hook
+on `FUN_8c03bc12` (default). No branch-over patch needed (V3 = poll, not IRQ).
+Two flagged findings (generic reg tables; dead slots) need no mirror action now.
+
+### Reproduction
+
+```sh
+scripts/ghidra/run.sh script ListPoolWords.java 0x005f7000 0x005f7800 2>&1 | grep POOLWORD
+scripts/ghidra/run.sh script DisasmRange.java 0x8c02dd20 0x8c02dd3a 2>&1 | grep 'DisasmRange.java> 8c02'  # +0x58 base store
+scripts/ghidra/run.sh script DisasmRange.java 0x8c08063c 0x8c080760 2>&1 | grep 'DisasmRange.java> 8c08'  # FUN_8c08063c config writes
+# pool values read from tools/boot.bin (offset = VA-0x8c020000, LE):
+#   0x8c02da74=a05f7000  0x8c08071c=a05f74b8 ... 0x8c081ff8=a05f7418
+```
+
+---
+
+## V4 — MIE response templates + response buffer address
+
+**Question (task brief):** the input/EEPROM shim replaces the MIE (Maple cmd
+0x86) transactions. It needs (a) byte-exact reply templates to write, and
+(b) where to write them.
+
+### Method
+
+Instrumented Flycast, `core/hw/maple/maple_if.cpp` `maple_DoDma()` (MP_Start
+case): after `pDevice->RawDma()` produces the reply and after the `swap_msb`
+byte-order fixup — i.e. byte-identical to what the emulator then copies to
+guest RAM — log `MIERESP sub=%02x addr=%08x data=<64 bytes hex>` for every
+cmd-0x86 transaction. `addr` is the Maple transfer descriptor's second word
+(the receive/response address, `header_2`), `sub` is the JVS subcommand
+(first payload byte after the frame header). **Direction: these are the MIE's
+reply frames (device → host), NOT the game's request** — the dump is taken
+from the out-buffer after the reply is built, and its first byte 0x87
+(MDRS_JVSReply) confirms it. Extracted with
+`python3 scripts/parse_cart_log.py capture-attract.log --dump-mie build/`
+(first occurrence per sub → `build/mie_subXX.bin`, ROM-derived, gitignored).
+
+### Results (same 600 s boot+attract+demo capture as V2)
+
+Subcommands captured: 0x01, 0x03, 0x13, 0x15, 0x17, 0x21, 0x27, 0x31, 0x33,
+0xff. Templates written: `build/mie_sub01.bin` … `mie_subff.bin` (64 bytes
+each, zero-padded past the true reply length).
+
+First bytes (little-endian reply header `[resp][sender][reci][n_words]`,
+resp 0x87 = MDRS_JVSReply):
+
+| sub | first 16 bytes | reads as |
+|---|---|---|
+| 0x01 | `87002001 02000000 …` | 1-word ack, payload `02 00 00 00` (EEPROM ready/status) |
+| 0x03 | `87002020 50cb1042 45532009 101a0101` | 32-word EEPROM read: two identical 16-byte halves (`50cb…1111` ×2) — the classic Naomi dual-copy EEPROM image |
+| 0x15 | `87002009 16ffffff 00ffffff 00000000` | 9-word **boot JVS-handshake reply** (F1 set-address ack; JVS body `e0 00 04 01 01 05 0b`; the `ff` bytes are maple sub-header placeholders and **byte 0x20 = 0x0b is the JVS checksum, not a button word** — see §input-ABI) |
+| 0x33 | `87002005 32ffffff 00ffffff 00000000` | cold/empty receive (subresp `0x32` = no JVS data yet; the steady-state has-data 0x33 frame is `0x0f` words — see §input-ABI) |
+
+Counts: sub 0x15 ×376 (all in the first boot phase), sub 0x33 ×34,991 (the
+per-frame steady-state poll — **the input shim must serve sub 0x33, not just
+0x15**), sub 0x27 ×360, sub 0x01/0x03 ×2 each (boot-time EEPROM), rest <20.
+
+### Issuing sites per sub (MAPLEPC cross-reference)
+
+This capture ran dynarec ON, so its `MAPLEPC pc=` values are block-granular
+(Sh4cntx.pc updates at block boundaries), not instruction-exact; Phase 3's
+interpreter capture `capture-pc.log` is the instruction-exact reference.
+Both agree on the function attribution:
+
+| sub | this capture (dynarec, block PC) | Phase 3 `capture-pc.log` (interpreter, exact PC) | issuing site |
+|---|---|---|---|
+| 0x33 | **34,991× pc=8c03c3d6** (100%) | **23,762× pc=8c03c3e4** (100%) | **`FUN_8c03c2c6`** (`0x8c03c2c6`–`0x8c03c4a1`) |
+| 0x15 | 359× pc=0c0227a8, 7× 0c0315ca, 7× 8c03c3d6, rest 1–2× | 369× pc=0c03161e, 7× 8c03c3e4 | `0x8c0315ce` routine (369) + `FUN_8c03c2c6` (7) |
+| 0x27 | 359× pc=0c02283c | 360× pc=0c03161e | `0x8c0315ce` routine |
+| 0x01/0x03 | 1× 0c031570 + 1× 8c03c3d6 each | 1× 0c03161e + 1× 8c03c3e4 each | both sites, boot only |
+| 0x13/0x17/0x21/0x31 | ≤9× each, split across both | ≤9× each, split across both | both sites, boot only |
+
+(The dynarec-run sub-15/27 PCs `0c0227a8`/`0c02283c` are caller-side block
+entries — `FUN_8c027584` dispatches `0x8c0315ce` as a fn-ptr callback,
+`boot-binary.md` §5 — of the same interpreter-exact site `0c03161e`. Both
+`8c03c3d6` and `8c03c3e4` fall inside `FUN_8c03c2c6`.)
+
+**Primary/secondary inversion (supersedes the framing in `boot-binary.md` §5;
+dated addendum added there):** Phase 3's "primary 369× / minor 7×" counted
+only sub-0x15 traffic. The steady-state per-frame input poll is **sub 0x33
+from `FUN_8c03c2c6`** (34,991× this capture; 23,762× in Phase 3's own log);
+the `0x8c0315ce` site carries the **boot phase** (subs 0x15/0x27, one-off
+EEPROM 0x01/0x03). **Task 5 must disassemble BOTH sites**, and the input shim
+must answer sub 0x33 with the `mie_sub33.bin` template shape.
+
+### Response buffer address
+
+**Not a single constant.** Three receive buffers observed:
+
+| buffer (phys) | used by |
+|---|---|
+| `0x0c296220` | boot-phase transactions: sub 0x15 (369/376), 0x01, 0x03, 0x13, 0x17, 0x21, **0x27 (all 360)**, 0x31 |
+| `0x0c0fd8e0` / `0x0c1038e0` | steady-state sub 0x33 stream, strictly alternating (17,495 / 17,496× — a double buffer); also the minority boot occurrences of 0x15/0x17 etc. |
+| `0x0c1c99a0` | the single sub 0xff (reset broadcast) |
+
+→ **The input shim must take the response address from the Maple transfer
+descriptor's second word per-transaction** (as the real hardware does), not
+hardcode one. `0x0c296220` is the observed boot/EEPROM buffer;
+`0x0c0fd8e0`/`0x0c1038e0` is the per-frame input double buffer. These are
+inside the game's own RAM image — no conflict with the shim home.
+
+### Reproduction
+
+```sh
+python3 scripts/parse_cart_log.py capture-attract.log --dump-mie build/
+grep -oE '^MIERESP sub=[0-9a-f]+ addr=[0-9a-f]+' capture-attract.log | sort | uniq -c
+```
+
+---
+
+## input-ABI — the input-shim contract (Task 5)
+
+The exact ABI Task 11 compiles into the input shim. Two MIE Maple sites are
+characterized. Every claim is cited to an instruction address or template byte.
+Pool words were read from `tools/boot.bin` (file offset = VA − `0x8c020000`,
+little-endian; a pool that is an in-image pointer is dereferenced one level).
+Reply templates are `build/mie_subXX.bin` (V4). Full evidence chain:
+`.superpowers/sdd/task-5-report.md`.
+
+### Headline
+
+| Item | Boot site `0x8c0315ce` | Steady site `FUN_8c03c2c6` |
+|---|---|---|
+| Reached via | fn-ptr `pool[0x8c027618]=0x8c0315ce`, `jsr @r3` @`0x8c0275ee` | `jsr @r1`, `pool[0x8c02ed6c]=0x8c03c2c6` @`0x8c02ed1c` |
+| Subs carried | 0x15,0x27,0x01,0x03,0x13,0x17,0x21,0x31,0xff (boot) | **0x33 per-frame** + one-off boot subs |
+| Subcommand src | descriptor word3 low byte = `[cmdblk+0xc]`, cmdblk=`*0x8c0e6400` | descriptor word3 (input slot's frame) |
+| Reply-addr src | descriptor word1 = `[cmdblk+0x4]` (= `0x0c296220`) | word1 = `FUN_8c030fba([base+0x10a8+idx*4])` → `[desc+0x04]` @`0x8c03c3d6` (double buf `0x0c0fd8e0`/`0x0c1038e0`) |
+| Completion | maple DMA-done (SB_MDST reads 0); reply at recvaddr | `[desc+0x18]` bit0 pending flag; next call returns -1 while set |
+| BTN_OFF | **0x20/0x21** P1 word big-endian (P2 @0x22/0x23; JVS checksum @0x3a recomputed) | same |
+| EE_OFF | **4** (128-B EEPROM after 1-word header) | n/a |
+
+Both routines build the **same 8-word Maple transfer descriptor** (word0
+control, word1 recv-addr, word2 frame-header `cmd 0x86`/`dev 0x20`, word3
+subcommand, word4-7 payload). One shared reply-synthesis body serves both;
+the per-site differences are the entry hook **and the completion action**
+(see contract box).
+
+### Crown jewel — 0x33 vs 0x15 vs 0x27
+
+From the Flycast MIE handler `tools/flycast-src/core/hw/maple/maple_jvs.cpp`
+(`MIEImpl::handle_86_subcommand`), which produces the exact byte stream the game
+parses:
+- **0x15** = *Receive JVS data* (`:1807`) — return the latest completed scan.
+- **0x27** = *Transmit with repeat* (`:1854`) — kick a JVS scan (boot two-step:
+  0x27 then 0x15).
+- **0x33** = *Receive then transmit with repeat* (`:1878`) — return the latest
+  scan **and** kick the next in one transaction: the self-sustaining
+  steady-state per-frame poll.
+
+⇒ **0x33 is "read latest input + queue next", not "kick".** The shim must do a
+**real DC `GetCondition` on every 0x33 (once per frame)** and translate to the
+JVS word at reply offset 0x20. No caching needed (0x33 = ~1×/frame). The
+`build/mie_sub33.bin` template is the *cold-start empty* variant (subresp 0x32,
+no data — captured before any scan completed); the steady-state 0x33 reply is a
+has-data reply (subresp 0x16) with the button word at 0x20, identical to 0x15.
+
+### Site A — boot builder `0x8c0315ce` (`0x8c0315ce`–`0x8c03161c`)
+
+**Linkage.** Called as a function pointer from dispatcher `FUN_8c027584`:
+`0x8c0275da mov.l 0x8c027618,r5` (`r5 = pool[0x8c027618] = 0x8c0315ce` — the
+exact u32 slot; companion param `pool[0x8c027614]=0x00080028`; slot copied at
+`0x8c0276c8`), pushed `0x8c0275e0`, popped to r3 `0x8c0275ea`, `jsr @r3`
+`0x8c0275ee`. Chosen when `(r10 & 0x20)==0` (`bt`@`0x8c0275b8`,
+`pool[0x8c0275cc]=0x20`); sibling builder `pool[0x8c0275d4]=0x8c031640` for the
+0x20 case. **Arg r4** = `pool[0x8c027624]=0x8c0e62c8` or
+`pool[0x8c027628]=0x8c0a27f4` → descriptor payload words 4-7; r5–r7 unused.
+
+**Descriptor** at `buf = *(*0x8c0e6404)` (`pool[0x8c031620]=0x8c0e6404`;
+`+0x20` then eight `mov.l r,@-r5`), with `cmdblk = *0x8c0e6400`
+(`pool[0x8c031624]=0x8c0e6400`):
+
+| word | value | site |
+|---|---|---|
+| w0 `+0x00` control | `[cmdblk+0x00]` | `0x8c03160c-0e` |
+| w1 `+0x04` **recv addr** | `[cmdblk+0x04]` (=`0x0c296220`) | `0x8c031606-08` |
+| w2 `+0x08` frame hdr | `([cmdblk+0x08] & 0x03efffff) \| 0x20000000` | `0x8c0315fa-0602` (pools `0x8c031628`/`0x8c03162c`) |
+| w3 `+0x0c` **subcommand** (low byte) | `[cmdblk+0x0c]` | `0x8c0315f2-f4` |
+| w4-7 `+0x10..1c` payload | `[arg0+0x00..0x0c]` | `0x8c0315d0-ee` |
+
+**Completion.** Routine does no Maple MMIO (`mov.l r1,@r0`@`0x8c031618` targets
+RAM `pool[0x8c031630]=0x8c0e6670`). The real DMA is the shared maple driver
+(pool-literal register writes at `0x8c080e74-90`: `0xa05f6c14` SB_MDEN,
+`0xa05f6c04` buffer, `0xa05f6c18` SB_MDST — same static/dynamic split as cart
+DMA, §boot-binary §4). Completion = SB_MDST reads 0
+(`tools/netboot/docs/naomi.md:138`); the caller polls before reading the reply
+at `[cmdblk+0x4]`.
+
+### Site B — steady builder `FUN_8c03c2c6` (`0x8c03c2c6`–`0x8c03c4a1`)
+
+`base = *0x8c0e8410` (`pool[0x8c03c300]`). Per-frame **async** poll.
+
+**Call site.** `0x8c02ed1a mov.l 0x8c02ed6c,r1` (`pool[0x8c02ed6c]=0x8c03c2c6`),
+`0x8c02ed1c jsr @r1`, then `mov r0,r12; cmp/pz r12; bf 0x8c02ed70` — caller
+treats **return ≥ 0 as OK**, < 0 as retry / reuse-last-frame. Returns `-3`
+not-ready (`0x8c03c2e2`), `-1` pending (`0x8c03c312`), `-2` lock (`0x8c03c326`),
+`0` success (`0x8c03c490`). No meaningful register args (reads `base`).
+
+**Flow.** (1) `[base+0x0fc0]==1`? else -3 (`0x8c03c2d6-da`, `hwpool
+0x8c03c2e8=0x0fc0`). (2) `desc=[base+0x10f4]` (`hwpool 0x8c03c42a=0x10f4`); if
+`[desc+0x18]&1` → -1 (`0x8c03c30a-0c`) — **`[desc+0x18]` bit0 = completion
+flag**. (3) `tas.b @([pool 0x8c03c444=0x8c03c864]=0x8c03c868)` else -2. (4) frame
+build via pump `bsr 0x8c03c1c2`@`0x8c03c396`. (5) **recv addr**:
+`FUN_8c030fba([base+0x10a8 + idx*4])` (`idx=[base+0x10b8]`) → `[desc+0x04]`
+@`0x8c03c3d6`; `FUN_8c030fba = ptr & 0x0fffffff` (`pool[0x8c030fe8]`, P1→phys);
+idx toggled `xor`@`0x8c03c3f6` → alternating `0x0c0fd8e0`/`0x0c1038e0`. (6)
+`mov.l r12,@(0x18,r2)`@`0x8c03c3e2` **sets `[desc+0x18]=1`** (pending); return 0.
+(pc `8c03c3d6`/`8c03c3e4` = the V4/Phase-3 logged PCs.)
+
+**Completion (async).** The maple completion path (pump / maple-end IRQ) clears
+`[desc+0x18]` and copies the reply into game input state; the next frame's call
+reads it. **Shim (synchronous): on return, `recvaddr`(=`[desc+0x04]`) must hold
+a valid reply and `[desc+0x18]` bit0 must be 0**, else the routine returns -1
+forever.
+
+### Shared descriptor (Naomi/DC maple, `tools/netboot/docs/naomi.md:135-142,151`)
+
+```
+word0  transfer control (end bit | length)
+word1  RECV ADDRESS      <- reply DMA'd here     (shim writes here)
+word2  frame header      cmd 0x86, recipient 0x20 = MIE
+word3  payload[0]        low byte = SUBCOMMAND   (shim dispatches on this)
+word4+ payload[1..]      JVS command bytes (transmit subs)
+```
+
+### Reply offsets + per-sub actions
+
+**BTN_OFF = 0x20** (P1 button-word hi byte; the word is big-endian at
+0x20/0x21, P2 at 0x22/0x23; **JVS checksum at 0x3a — must be recomputed
+whenever a button byte changes**).
+
+*Authoritative frame — the steady-state has-data reply itself.*
+`capture-attract.log` carries **34,990 byte-identical** sub-0x33 has-data
+replies (all inputs idle); decoded byte-for-byte against the Flycast emitter
+that produced them (`tools/flycast-src/core/hw/maple/maple_jvs.cpp`):
+
+| off | bytes (observed) | meaning | emitter |
+|---|---|---|---|
+| 0x00 | `87 00 20 0f` | maple header, 0x0f words | `reply()` `:1716` |
+| 0x04 | `16` | subresp 0x16 = has JVS data | `:1717` |
+| 0x05 | `ff ff ff` | placeholder | `:1719-1721` |
+| 0x08 | `00 ff ff ff` | `w32(0xffffff00)` | `:1722` |
+| 0x0c | `00 ×8` | `w32(0) ×2` | `:1723-1724` |
+| 0x14 | `00 00 8e` | 0, channel, sense line | `:1732-1737` |
+| 0x17 | `01 00 21` | node 1, status ok, out_len 0x21 | `:1663-1665` |
+| 0x1a | `e0 00 1e` | JVS sync, master node, len 0x1e | `:2084-2086`, len fill `:2474` |
+| 0x1d | `01` | overall status | `:2220` |
+| 0x1e | `01` | report — cmd 0x20 digital read | `:2227` |
+| 0x1f | `00` | TEST byte | `:2232` |
+| **0x20** | `00 00` | **P1 buttons hi, lo** (`inputs[0]>>8`, `inputs[0]`) | `:2237`, `:2241` |
+| 0x22 | `00 00` | P2 buttons hi, lo | same loop, player 2 |
+| 0x24 | `01` + `00 ×4` | report + 2 coin slots (cmd 0x21) | `:2248-2267` |
+| 0x29 | `01` + `80 00 ×8` | report + 8 analog ch, idle 0x8000 (cmd 0x22) | `:2273`, `:2370-2371` |
+| 0x3a | `22` | **JVS checksum** | `:2476-2480` |
+
+Checksum formula (`:2476-2478`, `calc_crc` sums `buffer_out[1..]`, i.e.
+everything after the `E0` sync): `[0x3a] = (Σ bytes [0x1b..0x39]) & 0xff`.
+Verified on the observed frame: constant bytes sum to `0x22` = the logged
+checksum. The three report blocks also decode the game's boot-stored JVS
+repeat request (sub 0x13, stored len 7): `20 02 02 | 21 02 | 22 08` —
+digital 2 players × 2 bytes, coins 2 slots, analog 8 channels.
+
+⇒ **BTN_OFF = 0x20/0x21, P1 word big-endian** (`JVS_OUT(inputs[player]>>8)`
+then `JVS_OUT(inputs[player])`, `:2237`/`:2241`); P2 = 0x22/0x23. Active-high,
+idle `0x0000` (`input-map.md`); this game's 7 controls are all bits 8-15 ⇒
+presses land in byte 0x20 (P1) / 0x22 (P2). Same frame for steady 0x15 and
+0x33 replies (361 identical 0x15 frames in the same capture).
+
+**Template-file corrections (supersedes earlier annotations).**
+`build/mie_sub15.bin` is a **boot JVS-handshake reply, not a digital read**:
+its JVS body `e0 00 04 01 01 05 0b` is the F1 set-address ack (`JVS_OUT(5)`
+`:2093`) and **its byte 0x20 = 0x0b is the JVS checksum**
+(`(0x00+0x04+0x01+0x01+0x05)&0xff`), not a button word. Other boot 0x15
+replies in the capture carry the board-ID string
+`SEGA ENTERPRISES,LTD.;I/O BD JVS;` (cmd 0x10, `:2097-2102`).
+`build/mie_sub33.bin` is the cold/empty variant (subresp 0x32, no completed
+scan yet, `:1711-1713`) — its `00` at 0x20 is padding, not an idle button
+word. **Neither file is a valid button-read template**; the shim's 0x15/0x33
+template is the 34,990× frame above.
+
+*Caveats:* (a) the game's parser load of `recvaddr+0x20` was not pinned to an
+instruction (generic 24-slot maple engine `FUN_8c03c1c2`); BTN_OFF is
+source-derived from the emitter whose byte stream the game demonstrably
+parses correctly. (b) No capture contains a pressed button inside a MIERESP
+frame (the attract capture is 100% idle; the Phase-2 press captures predate
+MIERESP logging), so the bit placement at 0x20 rests on `input-map.md` +
+`:2237`, not an observed pressed frame. **M4 gate: press a control and
+confirm byte recvaddr+0x20 flips.**
+
+**EE_OFF = 4.** `0x03` reply = 1-word header + 128-B EEPROM (`:1925-1929`);
+`build/mie_sub03.bin` header `87 00 20 20` (0x20 words) then EEPROM at 0x04-0x83;
+two identical 18-B system copies at 0x04 and 0x16 (dual CRC copy,
+`naomi-vs-dreamcast.md` §5 / `naomi.md:174-181`). Coin byte at reply 0x0d & 0x1f
+= `0x1a` = **free-play** (`naomi.md:180`). The template is already valid
+free-play + correct serial → shim may **replay `mie_sub03.bin` verbatim**
+(and `mie_sub01.bin` for 0x01), or bake fresh via `naomi/eeprom.py`.
+
+| sub | meaning (maple_jvs.cpp) | shim action |
+|---|---|---|
+| 0x15, 0x33 | Receive (+kick) JVS input | **real GetCondition translate** → has-data template, P1 word big-endian @0x20/0x21, checksum recomputed @0x3a |
+| 0x03 | EEPROM read 128 B (`:1920`) | **baked free-play EEPROM** @+4 (or replay `mie_sub03.bin`) |
+| 0x01 | status / schedule EEPROM read | replay `mie_sub01.bin` (ready ACK) |
+| 0x27 | kick scan (`:1854`) | verbatim ACK `8700 2001 26 00 8e00` |
+| 0x17 | transmit no-repeat (`:1820`) | verbatim ACK `8700 2001 18 00 8e00` |
+| 0x21 | transmit repeat (`:1840`) | verbatim ACK `8700 2001 18 00 8e00` |
+| 0x13 | store repeated request (`:1793`) | verbatim ACK `8700 2001 14 00 0800` |
+| 0x31 | DIP switches (`:1933`) | verbatim `8700 2005 32 ffffff 00 ff f9 ff` |
+| 0xff | broadcast reset / dev req | verbatim ACK `8700 2000` |
+
+Only 0x15/0x33 carry live input; the rest are fixed/near-fixed ACKs replayed
+verbatim (the shim synthesizes input directly, so a real JVS scan `0x27` is a
+no-op ACK).
+
+### Shim contract (boxed — Task 11 implements this)
+
+```
+Entry: two hooks — 0x8c0315ce (boot) and 0x8c03c2c6 (steady) — OR one hook on
+       the shared SB_MDST store (0xa05f6c18). Both hand off a finished 8-word
+       maple descriptor; read:  recvaddr = word1 ;  sub = word3 & 0xff.
+Dispatch on sub:
+  0x15,0x33 -> real DC GetCondition (per frame); translate DC pad -> JVS bits
+               (Start 0x8000, Up 0x2000, Down 0x1000, Left 0x0800, Right 0x0400,
+                B1 0x0200, B2 0x0100). Copy the baked 0x3b-byte has-data
+               template (the 34,990x frame in the BTN_OFF table; maple header
+               87 00 20 0f) to recvaddr, then:
+                 [0x20..0x21] = P1 JVS word big-endian ([0x22..0x23] = P2);
+                 [0x3a] = (sum of bytes [0x1b..0x39]) & 0xff   (JVS checksum;
+                          for this template all variable bytes are 0, so
+                          = (0x22 + [0x1f] + [0x20]+[0x21]+[0x22]+[0x23]) & 0xff).
+               Do NOT zero-fill inside the frame — bytes 0x04..0x3a are
+               structural (maple sub-header, E0 sync @0x1a, len @0x1c,
+               status/report bytes, coin/analog blocks); only 0x3b.. is padding.
+  0x03      -> baked 128-B free-play EEPROM @recvaddr+4 (or replay mie_sub03.bin).
+  0x01      -> replay mie_sub01.bin (status/ready ACK).
+  0x13,0x17,0x21,0x27,0x31,0xff -> replay mie_subXX.bin verbatim.
+Completion state on return (DIFFERS per site):
+  - both:   reply bytes present at recvaddr (= descriptor word1).
+  - steady: clear [desc+0x18] bit0 ,  desc = [ *0x8c0e8410 + 0x10f4 ].
+  - boot:   leave maple DMA-done observable (SB_MDST reads 0); reply at
+            [ *0x8c0e6400 + 0x4 ].  NOTE: the boot-side completion poll is
+            inferred from the shared maple driver's SB_MDST semantics
+            (naomi.md:138), NOT pinned to a caller instruction — verify in M4.
+ONE shim body serves BOTH sites (same descriptor + reply format); per-site
+differences = the entry hook AND the completion action above. 0x33 is
+per-frame, so do a real GetCondition on every 0x33 — no caching.
+M4 gate: BTN_OFF is source-derived (maple_jvs.cpp:2237) — confirm live by
+pressing a control and watching recvaddr+0x20 flip.
+```
+
+### Reproduction
+
+```sh
+scripts/ghidra/run.sh script DisasmRange.java 0x8c027584 0x8c027612   # dispatcher
+scripts/ghidra/run.sh script DisasmRange.java 0x8c0315ce 0x8c03161c   # boot builder
+scripts/ghidra/run.sh script DisasmRange.java 0x8c03c2c6 0x8c03c4a1   # steady builder
+scripts/ghidra/run.sh script DisasmRange.java 0x8c02ecf0 0x8c02ed2c   # steady call site
+xxd build/mie_sub15.bin ; xxd build/mie_sub33.bin ; xxd build/mie_sub03.bin
+# the authoritative has-data frame (34,990 identical occurrences):
+grep '^MIERESP sub=33' capture-attract.log | sed 's/.*data=//' | sort | uniq -c
+```
+
+### input-ABI addendum (Task 14b) — two MIE transports + the real M3 blocker
+
+Task 14b set out to intercept the "config-time raw-maple JVS enumeration"
+(`FUN_8c04ae50 → FUN_8c080d18 → FUN_8c0809b2`). Disassembling that chain
+**refuted the premise** and located the real DC blocker. Full evidence:
+`.superpowers/sdd/task-14b-report.md`. Summary of the corrections:
+
+1. **The config-time raw-maple path is a Z80 MIE-firmware UPLOAD, not JVS
+   enumeration.** `FUN_8c080d18` (probe cmd 0x01) → `FUN_8c0809b2` uploads the
+   MIE bridge firmware in ≤0x1ff0-byte / 0x18-byte chunks via **maple cmd 0x80/0x81**
+   (`MDC_JVSUploadFirmware`), each chunk checksum-validated (`recv[1]&0xff ==
+   Σ chunk bytes`; game loop `0x8c080ae4-b2e`). The command template at
+   `0x8c0d5ee8` decodes as Z80 code (`f3`=DI, `d3 30`=OUT …). Frame header pool
+   `0x8c080d02=0x2086` (cmd 0x86), `0x8c080b34/bd4=0x2080` (cmd 0x80),
+   `0x8c080bd6=0x2001` (cmd 0x01). **Real `SB_MDST` self-clears on DC, so the
+   spins never hang** — the path runs to completion, the upload fails fast on the
+   garbage checksum, and its result is **dead**: `FUN_8c080d18`'s return is
+   discarded by `FUN_8c04ae50` (`0x8c04ae62 jsr; 0x8c04ae66 next jsr`, r0 unused)
+   and its result vars `0x8c1ca1b0`/`0x8c1ca1b8` are **write-only**
+   (`FindRefsTo`). ⇒ **The config-time path does NOT gate M3.**
+
+2. **The real DC M3 blocker is the runtime ASYNC maple engine.** The steady JVS
+   builder `FUN_8c03c2c6` is reached via **two** fn-pointers from dispatcher
+   `FUN_8c02ec08`: `pool[0x8c02ed6c]` (Mode A, `jsr @0x8c02ed1c`) **and
+   `pool[0x8c02ee88]` (Mode B, `jsr @0x8c02ed88`)** — both hold `0x8c03c2c6`.
+   Task 14 swapped only the first. In DC mode the game takes **Mode B** → the
+   real `FUN_8c03c2c6` → **real cmd-0x86 maple DMAs to MIE@0x20 returning
+   `fd0023`** (`MDRE_UnknownCmd`; DC has a controller, not an MIE, at 0x20),
+   looping the I/O-board poll. Evidence: `capture-dc-mie.log` — 16k `MDODMA
+   pc=8c03c3d6` (inside `FUN_8c03c2c6`) cmd=86 sub=31 all `data=fd0023…`.
+   `FUN_8c03c2c6`'s DMA is **async**: it runs the callback pump `FUN_8c03c1c2`
+   (a 24-slot event dispatcher that drives the boot state machine), queues the
+   maple frame (`[desc+0x18]=1` pending), and returns; a VBLANK/IRQ maple engine
+   completes it and clears `[desc+0x18]`.
+
+3. **Replacing the builder is the WRONG layer.** Swapping `pool[0x8c02ee88] →
+   shim_maple_entry` removes the cmd-86 garbage (0 real MIE DMAs, verified) but
+   **regresses boot to 0 cart reads** (was 147): `shim_maple_entry` replaces the
+   whole builder and **skips the pump `FUN_8c03c1c2`**, stalling the boot state
+   machine before cart streaming. So `shim_maple_boot`/`shim_maple_entry` are
+   valid only for a phase where skipping the pump is harmless (they were never
+   actually reached in DC mode — Mode B was taken).
+
+4. **Correct fix design (next iteration).** Intercept the async maple engine, not
+   the builder: mirror the maple register base `0xa05f6c00` that `FUN_8c030fc4`
+   (`@0x8c030fec`) stores into the engine's descriptor struct (the runtime path
+   accesses maple regs as `base+off`, computed — invisible to `ListPoolWords`),
+   and service the engine's completion (write the reply via `maple_reply` keyed
+   on the frame's real sub, clear `[desc+0x18]`), leaving `FUN_8c03c2c6` + its
+   pump to run. Pin the completion mechanism first (VBLANK-auto-DMA + maple-end
+   IRQ vs cross-frame poll of `[desc+0x18]`) — that determines whether a register
+   mirror alone suffices or an IRQ/engine hook is required. `maple_reply` +
+   `mie_jvs*`/`mie_sub*` blobs are reusable unchanged; only the transport is new.
+
+### Task 14f — async-Maple MIE service (input + EEPROM transport)
+
+Implements approach A from `.superpowers/sdd/task-14e-completion-mechanism.md`
+(completion pinned as AUTO/HARDWARE: `FUN_8c03c2c6` triggers a maple DMA and
+cross-frame-polls the hw `SB_MDST` busy bit, which the DC maple engine
+self-clears every DMA regardless of device — the transaction always "completes",
+just with garbage `fd0023`; the only defect is the DATA in the recv buffer).
+
+**Mechanism (register mirror + wrapper hook, 3 patches; 20 total).**
+
+1. *Maple-base mirror* — pool `0x8c030fec` (`0xa05f6c00`, the sole live maple-base
+   literal, stored by `FUN_8c030fc4` into engine `[struct+0x10f4]`) is repointed to
+   `MAPLE_MIRROR` (`shim_iface.h` = `SHIM_BASE+0x13000` = phys `0x0cfd3000`, P2
+   alias `0xacfd3000`, `0x100` bytes; above BIOS_DATA_1FFD00, below RAM top). After
+   this, `FUN_8c03c2c6`'s computed `base+0x04` (SB_MDSTAR), `base+0x14` (SB_MDEN),
+   `base+0x18` (SB_MDST) accesses land in shim RAM — the game engine triggers **no
+   real controller DMA**. The shim's own `maple.c` GetCondition uses hardcoded real
+   registers, unaffected; the config-time Z80 path uses its own literals
+   (`0x8c080e74/88/8c/90`), untouched.
+
+2. *Both fn-ptr slots* `pool[0x8c02ed6c]` (Mode A) and `pool[0x8c02ee88]` (Mode B,
+   DC takes this) are repointed from `0x8c03c2c6` to `shim_maple_steady`
+   (`shims/src/main.c`). Old-byte asserts: both = `0x8c03c2c6` in `tools/boot.bin`.
+
+3. *Loader* zeroes `MAPLE_MIRROR` (uncached P2, like the G1 mirror) so the engine's
+   first cross-frame `SB_MDST` poll (`0x8c03c30a`) sees bit0=0 and triggers.
+
+**`shim_maple_steady` — per-frame service, ordering from `DisasmRange
+0x8c03c2c6 0x8c03c4a2`:**
+
+```
+call the REAL FUN_8c03c2c6 (fn ptr @0x8c03c2c6), capture rc:
+  0x8c03c30a  read mirror_SB_MDST; bit0 set -> return -1, clear -> proceed (0x8c03c30e)
+  0x8c03c396  bsr FUN_8c03c1c2   (per-frame pump/state machine -- MUST run; 14b)
+  0x8c03c3d6  mov.l r0,@r8       mirror_SB_MDSTAR := phys(descriptor list)
+  0x8c03c3e2  mov.l r12,@(0x18,r2)  mirror_SB_MDST := 1 (trigger); returns 0 (0x8c03c490)
+if mirror_SB_MDST bit0 set (a DMA was triggered this frame):
+  addr = mirror_SB_MDSTAR & 0x1fffffe0
+  walk the maple command list (Flycast maple_DoDma, maple_if.cpp:184-311):
+    h1=[addr+0], recv=[addr+4]&0x1fffffe0, plen=(h1&0xff)+1, op=(h1>>8)&7
+    if op==0 (MP_Start) and [addr+8]&0xff==0x86 and ([addr+8]>>8)&0xff==0x20 (MIE):
+       sub=[addr+0x0c] low byte; transmit subs (0x17/0x19/0x21) latch JVS cmd
+       [addr+0x14]; 0x27 latches 0xff; then maple_reply(sub, recv)
+    if h1 bit31 (last) break; else addr += (2+plen)*4   (cap 32)
+  mirror_SB_MDST = 0     <- completion: next frame's poll (0x8c03c30a) sees done
+return rc
+```
+
+Ordering rationale: `FUN_8c03c2c6`'s pump runs at `0x8c03c396` **before** the
+trigger at `0x8c03c3e2`, so on frame N+1 the pump reads frame N's reply out of the
+recv buffer *before* re-triggering — exactly the async DMA-to-recv-buffer timing.
+So the wrapper calls the real engine first (pump + build + trigger into the
+mirror), then walks the just-programmed descriptor and synthesizes the reply into
+its recv addr, then clears `mirror_SB_MDST`. Recv addrs are taken live from the
+descriptor (double-buffered `0x0c0fd8e0`/`0x0c1038e0`, alternated by the engine's
+`xor` @`0x8c03c3f6`/`0x8c03c416`), never assumed. Reuses `maple_reply` + all
+`mie_sub*`/`mie_jvs*`/`eeprom.bin` blobs unchanged (sub `0x03` → baked free-play
+`eeprom.bin`, the only DC delivery route for it; sub `0x33`/`0x15` → live DC
+GetCondition → JVS has-data frame). `shim_maple_entry`/`shim_maple_boot` retained
+as documented boot-MIE ABI but no longer hooked.
+
+**Runtime evidence (DC-mode interpreter on `build/cleo.gdi`, `capture-14f.log`,
+130 s; vs baseline `capture-iochk.log` = same build minus 14f).**
+
+- *Build:* `make -C shims test` GREEN; `build_patch_table.py` → 20 patches, all
+  old-byte asserts pass; loader stdout shows all 20 applied (incl. `#16 maple
+  base → mirror`, `STEADY slot A/B → shim_maple_steady`), no PATCH MISMATCH.
+- *Mirror works:* the game engine's real-`SB_MDST` accesses (baseline: `HWW
+  pc=8c03c3e2` / `HWR pc=8c03c30a` / `HWR pc=8c03c4ba`, 817× each) are **gone**
+  from the `0x5f6c18` HW log; only the config-Z80 path (`pc=8c080xxx`, ~1× each)
+  remains. `MDODMA` from `pc=8c03c3d6/8c03c3e4` (817+ baseline) → **0**.
+  `MIERESP` (real cmd-0x86 MIE DMA) = **0** (baseline: 139). ⇒ the engine drives
+  the mirror, no real controller DMA from the game path.
+- *Shim services cleanly:* no `SHIMERR` on serial → `shim_die` never fired → every
+  MIE sub in every descriptor was handled (no unknown-sub / malformed frame).
+- *Past the crash:* all 61 `IOCHK` snapshots show scene object `*0x8c0c4510 =
+  0x8c0a2494` (**never null**); no jump to `0x0c10004c`, no exception, no `HANG`.
+- *Steady running loop:* 130 `PCSAMPLE` (1/s, whole run alive), **75 unique PCs
+  across 12+ code regions** (baseline stuck at 21, in the I/O-check scene). The
+  dominant loop `0x8c02bb80–0x8c02bc60` is the **VBLANK/IRQ context-switch
+  dispatcher** (save FP → `jsr` handler → restore banked regs/`SSR`/`SPC`) — the
+  per-frame game loop. A new region `0x8c061xxx–0x8c062xxx` (nested 7×16 object
+  loops = scene/content logic) appears only in the run's **second half** = phase
+  progression, not a spin. `SLEEPWAIT` (a `sleep` insn = vblank-paced idle) fires.
+- *Cart streaming:* 231 cart reads to `off=0x058ad000` (~92 MB of attract/demo
+  assets; baseline 147) — the game streams content for attract.
+- *Free-play EEPROM:* delivered by design (sub `0x03` → baked `eeprom.bin`); shim
+  confirmed running and handling the EEPROM/enum phase (game advanced past it). A
+  direct sub-`0x0b` re-init count is **not measurable** post-fix (the mirror
+  removes the real-DMA `MIERESP` log that carried it).
+- *Remaining gap (M4, user-visual):* live sub-`0x33` input polling was **not**
+  reached in the 130 s window (no shim `maple_getcond` → no `MDODMA pc=8cfc*`),
+  i.e. the running loop is a pre-interactive attract/boot-render phase; live
+  button response (M4) is the user's on-screen test. The input **transport** is
+  proven (the game advances on the shim's DIP/enum/EEPROM replies; a sub-`0x33`
+  frame would route through the same serviced walk → `jvs_digital`).
+
+⇒ **The async-Maple transport is fixed and drives the game to a steady, running,
+attract-streaming loop past the Task-14d crash.** Visual M3 (attract renders) and
+M4 (input responds) are the user's confirmation.
+
+### Task 15 — diagnose Start (M4) + free-play (M5); instrument the input path
+
+Full analysis: `.superpowers/sdd/task-15-report.md`. The input read path
+(`maple.c` GetCondition → `dc_to_jvs` → `jvs_digital` BTN_OFF `0x20/0x21` +
+checksum `0x3a`) is **correct by construction — no static bug to fix**. Rate-
+limited SCIF instrumentation was added to `shims/src/main.c` (input trace +
+EEPROM deliver/write logging); the break is runtime and pins down under the
+user's real Start press.
+
+**Confirmed this task (unattended DC-mode boot, serial + cart log):**
+- **Free-play EEPROM IS delivered** via the async path: `EE deliver rcv=0c1038e0
+  coin09=0x1a coin27=0x1a` (both copies FREE PLAY, `naomi.md:180`). **EE_OFF=4 +
+  sub 0x03 are correct — delivery is not the bug.**
+- **NEW: the game issues exactly 16× sub-0x0b EEPROM WRITES** (`EE
+  WRITE(reinit?)`, alternating recv buffers) — **absent from all five Naomi
+  captures** (§V-EEPROM claimed "0× 0x0b"). This is the EEPROM **re-init**: our
+  baked `eeprom.bin` game section is all-zero with an invalid CRC
+  (`crc(b"")=0x78ac ≠ 0x0000`), so the game detects the mismatch and
+  re-initialises (shim ACKs+drops the writes). Two live hypotheses for "9
+  credits": **H1** the re-init resets coin to ROM-default coin mode
+  (`coin_setting=1`); **H2** coin/credit state comes from a BIOS-maintained path
+  we don't replicate (the 16 writes being normal game-section init). Not
+  disambiguated; **not a quick fix**, deferred. Next step: log the 0x0b write
+  target offset/payload.
+- **M3 intact:** `MIERESP=0` (no real MIE DMA leaked), no `SHIMERR`, `IOCHK …
+  conn=1 specs=1 mir=1`, cart streaming ~218 MB.
+- **sub-0x33 not reached in 195 s interpreter** (0 `IN` lines) — same
+  interpreter-speed artifact as 14f; the user's dynarec run reaches it.
+
+**Concrete Start finding — keyboard-profile mismatch (Link 2b).** `cleo.gdi`
+boots as a **Dreamcast** disc, so Flycast uses `mappings/SDL_Keyboard.cfg` where
+**Start = "/" (SDL scancode 56)** and **Enter (40) is unbound**; the
+**arcade** profile (`SDL_Keyboard_arcade.cfg`, used for the raw Naomi ROM) binds
+Start to **Enter (40)**. A user habituated to Enter=Start presses Enter →
+unbound → nothing. Most-likely cause; the `IN raw=…` trace confirms whether the
+press reaches the emulated port-A controller.
+
+---
+
+## Task 16 — free-play (M5): SUPERSEDES the Task-15 H1/H2 free-play hypotheses
+
+Full analysis + evidence: `.superpowers/sdd/task-16-freeplay-report.md`.
+
+**Both Task-15 hypotheses were wrong, and the re-init writes are NOT the
+free-play blocker.** Decoding the 16 sub-0x0b payloads (extended shim logging:
+`EE WR a=<off> n=<size> d=<bytes>`; MIE write layout `dma_buffer_in=frame+4` →
+`frame+0x0d`=addr, `+0x0e`=size, `+0x10..`=data, Flycast `maple_jvs.cpp:1888`)
+showed the game rewrites the **full 128-byte EEPROM** whose **only** delta from
+our delivered image is the coin byte: game writes `0x00` (coin mode), we deliver
+`0x1a` (FREE PLAY). Our free-play system section is **CRC-valid**
+(`crc(free-play data)=0x50cb` = our stored value; `crc(coin data)=0x6afa` = the
+game's written value → the game's CRC algo **is** `naomi/eeprom.py`). So the
+re-init is **not** a CRC failure of our EEPROM. It is **content-independent**
+(a 0xFF-blank eeprom.py-`validate()`-True game section re-inited identically) and
+the ROM-header per-region defaults (`0x1e0`) are **not** consulted (patching them
+to coin_setting=27 did not change the written coin).
+
+**Root cause #1 — async config EEPROM read (fixed).** The settings validator
+`FUN_8c080094` (called from `FUN_8c081aee`) reads the 93C46 via `FUN_8c080f50`,
+which issues the read through the **shared async maple engine** (`FUN_8c03000c`
+queue / `FUN_8c02f158` result / `FUN_8c0342c0` flush — the same struct
+`*0x8c0e8410` as the runtime engine). Its reply lands a-frame-later via
+`shim_maple_steady`, **after** the validator CRC's its buffers → both copies
+"fail" → re-init. This is the **same synchronous-vs-async config-read gap as Task
+15c** (which only hooked the JVS-enum wrappers `FUN_8c081562/1626`, not this raw
+read). CRC routine = shared `FUN_8c07fa10` (`0xDEBDEB00`/`0x10210000`).
+**Fix:** hook `FUN_8c080f50` → `shim_ee_read`, which fills the validator's three
+output buffers (`0x8c1c954c` full 128B, `0x8c1c9528` copy1, `0x8c1c953a` copy2)
+directly from the baked free-play image. Verified: `EE VAL r=0` — validator now
+**accepts** free-play, no validator re-init.
+
+**Root cause #2 — DC config-time coin reset (the real "9 CREDITS" cause).** Even
+with the validator accepting free-play, `FUN_8c081aee` parses the coin into the
+runtime settings struct field `0x8c1c9794` (=EEPROM byte 9; parser `FUN_8c0811f2`,
+reverse-parser `FUN_8c0811a4`), then a **runtime vtable method** (`*(0x8c0804d0)`
+dispatched by `FUN_8c080418/426/446/456`) **resets it to the coin-mode default
+`0x00`** and the settings-commit `FUN_8c080124` writes it (the 16 writes). The
+vtable is runtime-populated → not statically patchable. The per-frame credit
+handler `FUN_8c07a22a → FUN_8c081eec` reads this struct, so the display follows
+`0x8c1c9794`. **Fix:** `shim_maple_steady` re-stamps `*(u32*)0x8c1c9794 = 0x1a`
+every frame (it already runs per-frame in the same scene loop). Verified held at
+`0x1a` at steady state.
+
+**Writes did NOT drop** (still 16×): they are the config commit, **cosmetic** (DC
+has no EEPROM persistence; the shim re-serves the baked free-play image each boot;
+the display coin is pinned independently). NOP-ing the commit is unsafe (tail-call
+return propagates to the boot scene loop `FUN_8c04ae50`). Patch count 27→28
+(1 new hook). M2/M3/M4 intact (boot reaches `IN raw`, cart streams, CFG enum ×6,
+no SHIMERR). **FREE PLAY on-screen needs USER visual confirmation.**
+
+---
+
+## Task 18 — free-play re-diagnosis + FIX (M5, SUPERSEDES Task 16) + screenshot tool
+
+Full report: `.superpowers/sdd/task-18-report.md`. **Task 16 pinned the WRONG
+variable.** User confirmed the Task-16 (commit 70919dd) build still showed
+"CREDIT(S) 9" and Start decremented → genuine coin mode. This task **proved**
+(via a new headless screenshot tool + a shim memory dump + Ghidra) the real
+free-play flag and **shipped a screenshot-confirmed fix**.
+
+### Job 1 — headless framebuffer → PNG screenshot tool (self-verify the display)
+
+macOS TCC blocks OS screen capture, so Task 16 could not confirm the pixels.
+Added `gui_dumpFramebuffer()` in Flycast `core/ui/gui.cpp` (called from
+`core/ui/mainui.cpp:mainui_rend_frame()` on the render thread after
+`emu.render()`), which **reuses the emulator's own screenshot readback**
+`getScreenshot()` → `OpenGLRenderer::GetLastFrame()`
+(`core/rend/gles/gldraw.cpp:814`) then `stbi_write_png`. Enable with env
+`FLYCAST_SHOT=/abs/shot.png`; dumps every `FLYCAST_SHOT_EVERY` frames (default
+60) **and** on `SIGUSR1`. No OS permission needed. Full usage: `docs/kb/tooling.md`
+§"Headless framebuffer → PNG screenshot". In `patches/flycast-instrument.diff`.
+
+### Job 2 — the REAL free-play flag: settings-struct `+0xc` = `0x8c1c9790`
+
+**Proof (dynamic, not inferred).** A one-shot shim dump of the settings struct
+`0x8c1c9784` at steady attract, cross-checked with a screenshot of the same boot:
+
+| field | addr | value (coin mode) | meaning |
+|---|---|---|---|
+| `+0x00` | `0x8c1c9784` | `9` | (credit-count mirror) |
+| **`+0x0c`** | **`0x8c1c9790`** | **`0`** | **free-play flag (0=coin, 1=free)** |
+| `+0x10` | `0x8c1c9794` | `0x1a` | coin byte — Task16's pin, **confirmed working but IRRELEVANT** |
+
+Credit counter = `9` at `structA 0x8c1c97c8 +0x10..+0x1c` (4 copies) and global
+`0x8c1c976c`. Task 16's coin pin **was working** (`+0x10`=0x1a in the dump) yet
+the game stayed in coin mode → the free-play decision does **not** re-read the
+coin byte; it is **cached at settings-init into `+0xc`**, which resolves to `0`
+(coin mode) on DC.
+
+**`+0xc` drives BOTH the display and the decrement (proven):**
+- Decrement gate: `FUN_8c081efc` @ `0x8c081f48-52` — `mov.l @(0xc,r4),r0;
+  cmp/eq #0x1,r0; bt/s 0x8c081f86` skips the credit `sub` (`0x8c081f82`) when
+  `*(+0xc)==1`. (r4 = `0x8c1c9784` from pool `0x8c081fe4`.)
+- Display: pinning `*(u32*)0x8c1c9790 = 1` flipped the on-screen corner from
+  "CREDIT(S) 9" to **"FREE PLAY"** (screenshot-confirmed, both the title and the
+  how-to-play attract screens).
+- The three `cmp/eq #0x1a,r0` sites in the ROM (`0x8c04ebea`, `0x8c066e94`,
+  `0x8c067246`) are all **test-menu coin-assignment dispatchers** (0x1a is one
+  selectable option of 0x07..0x28), NOT the runtime free-play check. `+0x10` has
+  **zero pool refs** — only read as `base+0x10` inside the `0x8c081xxx` credit
+  library. So no EEPROM value or coin-byte code patch (the naomi.md canonical
+  free-play patch) can fix this game's display — it caches `+0xc`, not `+0x10`.
+  This is why **Option A (correct EEPROM) and the DragonMinded coin-load patch
+  are both dead ends here.**
+
+### Fix (Option B — force the correct runtime flag): SHIPPED
+
+`shim_maple_steady` (per-frame, same scene loop as before) now re-stamps
+`*(u32*)0x8c1c9790 = 1` and the **coin-byte pin was removed** (confirmed dead:
+free-play persists without it). `shim_ee_read` (Task 16) is **kept** (it makes
+the validator accept the EEPROM — orthogonal, low-risk to leave). Patch count
+unchanged at **28** (the fix is shim-internal; no new patch-table entry).
+`build_patch_table.py` still asserts pool `0x8c081d14 == 0x8c1c9784` (guards the
+`+0xc` pin's base against a ROM shift).
+
+**Verified (final build, DC boot, screenshot):** title + attract show
+**"FREE PLAY"** (was "CREDIT(S) 9"); `0 SHIMERR`, 231 cart DMAs, `CFG enum ×6`,
+`IN raw` reached, `EE READ sync coin09=0x1a` → **M2/M3/M4 intact, M5 FIXED**.
+(Decrement-stop not separately tested headless — no Start injection — but it is
+the *same* `+0xc==1` gate as the display, proven above.)
+
+---
+
+## V5 — battery-SRAM reference scan (spec §3 out-of-scope check)
+
+**Question (task brief / spec §3):** the game uses Naomi battery SRAM
+(`0x00200000`–`0x00207fff`, 32 KB, high scores etc.; `naomi-vs-dreamcast.md`
+§2/§5). On DC that address lands on flashrom. Spec §3 declares high-score
+persistence OUT of Phase 4 scope on the assumption that the game **tolerates**
+garbage there (CRC fails → re-init defaults in RAM → continue). V5 confirms the
+game does not instead **hang/spin** waiting on an SRAM value. If it had an
+unguarded dependency, score handling would enter Phase 4 via a shim-home RAM
+mirror (same mechanic as the G1 mirror).
+
+### Method
+
+`scripts/ghidra/run.sh script ListPoolWords.java 0x00200000 0x00220000`
+(widened to `0x220000` to cover the full documented battery region; naomi.cpp
+maps only `0x00200000`–`0x00207fff` = 32 KB, so **any hit with masked phys
+≥ `0x208000` is above real SRAM**). The scanner masks *every* 4-aligned word to
+29-bit phys, so it flags code bytes and constants too; 1463 words matched but
+only ~40 are actually referenced. Each referenced site was `DisasmRange`d to
+classify the access (real SRAM pointer deref vs. coincidental constant/code),
+and every genuine SRAM function was read far enough to see its failure path.
+Pool values read from `tools/boot.bin` (offset = VA − `0x8c020000`, LE).
+
+### Reference list — only TWO code sites touch real SRAM
+
+The genuine SRAM accesses use the **P2-uncached** base `0xa0200000` (phys
+`0x00200000`) plus small constant offsets — all within the 32 KB region:
+
+| pool word | value | offset | function(s) | role |
+|---|---|---|---|---|
+| `0x8c07fb38`,`0x8c07fc6c` | `a0200000` | +0x000 | `FUN_8c07fac4`/`FUN_8c07fa66` (clear), `FUN_8c07fbd8` (validate) | SRAM base |
+| `0x8c07fc74` | `a0200008` | +0x008 | `FUN_8c07fbd8` | copy-1 stored checksum |
+| `0x8c07fc78` | `a0200100` | +0x100 | `FUN_8c07fbd8` | copy-2 stored checksum |
+| `0x8c07fe88` | `a020000c` | +0x00c | `FUN_8c07fcb0` | copy-1 valid flag |
+| `0x8c07fe8c` | `a0200104` | +0x104 | `FUN_8c07fcb0` | copy-2 valid flag |
+| `0x8c07fe90`,`0x8c07fe94*`… | `a02001f8`/`a0200208`/`a0200218` | +0x1f8… | `FUN_8c07fce8`/`d16`/`d2e`/`d46`/`d64`/`d86`/`da4`/`e5a`/`e70` | record read/write ↔ RAM work bufs |
+| `0x8c081d4c` | `a0200000` | +0x000 | `FUN_8c081bf0` | header read |
+| `0x8c081d50` | `a0200004` | +0x004 | `FUN_8c081bf0` | header mirror |
+
+(`FUN_8c07f*` is one cohesive **SRAM persistence library**; it also dereferences
+SRAM through RAM work-pointers `[0x8c1c94dc/e0/e4/e8/ec/f4/…]` that are *seeded*
+from the base pool `a0200000` + offsets above — so the direct pool scan catches
+the seed of every access and does **not** undercount.)
+
+### Access-pattern classification
+
+**1. `FUN_8c07fbd8` (`0x8c07fbd8`) — dual-copy checksum validator. BENIGN.**
+Reads two SRAM copies and their stored checksums, recomputes via `FUN_8c07fa10`
+(a bounded byte-hash, loops `cmp/hs r5,r1` over the length — no spin), then:
+- `0x8c07fc36 cmp/eq r0,r3` — stored checksum @SRAM+8 vs recomputed copy-1;
+- `0x8c07fc3c cmp/eq r5,r4` — stored checksum @SRAM+0x100 vs recomputed copy-2;
+- both match → `bra 0x8c07fc82`, return **0** (use SRAM);
+- copy-1 only → `bsr 0x8c07fb62` (repair copy-2 from copy-1), return 1;
+- copy-2 only → `bsr 0x8c07fb9c` (repair copy-1 from copy-2), return 2;
+- **both mismatch → `0x8c07fc7c bsr 0x8c07fac4`** = `FUN_8c07fac4` zero-fills the
+  entire 32 KB SRAM (`mov #0x0,r4; mov.l r4,@r6; add #0x4,r6` × `0x2000` words,
+  `0x8c07fae0`) and recomputes fresh checksums, return **3**.
+
+This is the textbook read → CRC → re-init-defaults-on-mismatch → continue path
+(mirrors the EEPROM handling). On DC the flashrom garbage fails both checksums →
+`FUN_8c07fac4` reinitializes → returns 3 → play continues. No hang.
+
+**2. `FUN_8c07fcb0`/`FUN_8c07fce8…e70` — flag reads + bounded record copies.
+BENIGN.** `FUN_8c07fcb0` reads valid-flags @SRAM+0xc / +0x104 and returns a
+plain boolean (`0`/`1`) — no spin. The `FUN_8c07fce8`/`d16`/`d2e`/`d46`/… family
+are fixed-count `mov.l @r6+,r3; mov.l r3,@r5` copy loops (counts `#0x4`, etc.)
+moving records between SRAM and RAM work buffers; `FUN_8c07fdc8`/`fe0a` stamp a
+`FUN_8c07fa10` checksum before writing back. All bounded, no value-gated wait.
+
+**3. `FUN_8c081bf0` (`0x8c081bf0`) — header read + mirror. BENIGN.**
+`0x8c081bfe mov.l @r3,r0` reads `*(0xa0200000)` (SRAM+0), `0x8c081c02 mov.l r0,@r2`
+mirrors it to `*(0xa0200004)` (SRAM+4), and hands it to `FUN_8c0803a4` (via thunk
+`FUN_8c081ae8` → `jmp @[0x8c081cd0]=0x8c0803a4`). `FUN_8c0803a4` is a **bounded**
+8-iteration table search (`cmp/ge r7,r5`, r7=8, `0x8c0803be-c0`) reading its own
+pool table — the SRAM value is not a loop key. No spin, no fallback-less
+control-flow dependency.
+
+### False positives (≈30 hits — NOT SRAM)
+
+The value-mask flags any word whose low 29 bits land in range. Verified
+non-SRAM:
+- **`0x00200000` (×18, P0)** — `0x00200000` = 2 MB. Used as a **bitmask**
+  (`FUN_8c021910 0x8c021ad4 tst r2,r1` = test bit 21) or a **comparison
+  threshold** (`FUN_8c045a24 0x8c045a2a cmp/ge`; `FUN_8c049008 0x8c049020/2a
+  cmp/gt` = bounds-check vs 2 MB). Never dereferenced.
+- **`0x00200020/70/80/b8/d8/e0`, `0x00200200`** — data-table entries in the ROM
+  image data segment (`0x8c0ab6d8`, `0x8c0b5160`, `0x8c0d52dc`, …), reached by
+  pointer-table indirection (e.g. `0x8c0527a6 mov.l 0x8c052930,r5` → r5 = table
+  base `0x8c0ab6d8`); packed dimensions/flags, not SRAM pointers.
+- **`0x20202020`** (`0x8c0c40f8`) — ASCII spaces in a string/format buffer
+  (`FUN_8c09efe4` printf-family). Not SRAM.
+- **`0x40200000`** (`0x8c08cc9c`) — IEEE-754 `2.5f`, loaded as a **float**
+  literal (`0x8c08cc34 fmov.s @r0,fr13`). Not a pointer.
+- **`0x6020d21a`,`0x6020d232`,`0xa021d20c`,`0xa02185ef`,`0xa021d410`,
+  `0x40216132`,`0xa020e200`** — **code bytes at branch targets**. Each "ref" is
+  a `bt`/`bf`/`bt.s` into that address (dispatch/jump tables: `0x8c06cefa bt
+  0x8c06cf28`; `0x8c0473f8 bt 0x8c04745c`; `0x8c073bf4 bt/s 0x8c073c88`; …); the
+  instruction bytes there just happen to mask into range. Also, all seven have
+  phys ≥ `0x208000` — **above** the mapped 32 KB SRAM — so they could not be SRAM
+  even if dereferenced.
+
+### VERDICT
+
+**Spec assumption HOLDS — no Phase 4 SRAM handling needed.** Of ~40 referenced
+pool words in the scanned range, only the `FUN_8c07f*` SRAM persistence library
+and `FUN_8c081bf0` touch real battery SRAM. The library's entry validator
+`FUN_8c07fbd8` **re-initializes the entire SRAM to defaults on checksum failure**
+(`bsr 0x8c07fac4`), and every other SRAM site is a bounded copy, a boolean flag
+read, or a one-shot header read — **none spins or blocks on an SRAM value, and
+none has a fallback-less control-flow dependency**. On DC the flashrom garbage
+at `0x00200000` fails the CRC and the game re-inits scores in RAM each boot,
+exactly as spec §3 assumes.
+
+**GATE NOT TRIPPED.** High-score persistence stays OUT of Phase 4. No shim-home
+SRAM mirror, no `§patch-sites` entry, no `0x8c02da74`-style base repoint for
+SRAM. (Low-priority future nicety, not Phase 4: if persistent high scores are
+ever wanted, redirect the SRAM base pool words `0x8c07fb38`/`0x8c07fc6c`/
+`0x8c081d4c` to a shim-owned RAM mirror + flashrom save — same mechanic as the
+G1 mirror. Not required for the playable bar.)
+
+### Reproduction
+
+```sh
+# scan (masks values to phys; only lines with non-empty refs= matter):
+scripts/ghidra/run.sh script ListPoolWords.java 0x00200000 0x00220000 2>&1 \
+  | grep POOLWORD | grep -E 'refs=[0-9a-f]'
+# the SRAM library + its validator/clear/checksum:
+scripts/ghidra/run.sh script DisasmRange.java 0x8c07fa10 0x8c07fee0 2>&1 | grep 'java> 8c07f'
+# FUN_8c081bf0 header read + its callee bound-check:
+scripts/ghidra/run.sh script DisasmRange.java 0x8c081bf0 0x8c081c1c 2>&1 | grep 'java> 8c081'
+scripts/ghidra/run.sh script DisasmRange.java 0x8c0803a4 0x8c0803da 2>&1 | grep 'java> 8c080'
+# pool values (tools/boot.bin, LE): 0x8c07fb38=a0200000  0x8c07fc74=a0200008
+#   0x8c07fc78=a0200100  0x8c081d4c=a0200000  0x8c081d50=a0200004
+```
+
+---
+
+## V-EEPROM — baked free-play 93C46 image (Task 8)
+
+Deliverable: `shims/data/eeprom.bin` — the exact 128-byte Naomi main-board
+93C46 image the input/EEPROM shim replays for MIE sub `0x03`. **Gitignored**
+(ROM-derived runtime data — never committed; only this provenance record is).
+Task 11 embeds it.
+
+### Source (provenance)
+
+Reconstructed **from the captured MIE replies the game already read and
+accepted** — the strongest possible guarantee (no hand-editing, so CRCs are
+correct by construction):
+
+* **Bytes 0x00–0x23 (0–35): system section**, copied verbatim from
+  `build/mie_sub03.bin` at `EE_OFF=4` (`eeprom.bin[0:60] == mie_sub03.bin[4:64]`,
+  verified). This is the two-copy CRC-protected system block
+  (`naomi.md:174-181`, `naomi-vs-dreamcast.md` §5).
+* **Bytes 0x24–0x7F (36–127): all `0x00`** — the game section as the game read
+  it. Bytes 36–59 are the captured zeros; 60–127 continue them (the 0x40-byte
+  MIERESP instrumentation dump, `maple_if.cpp:242`, truncates the 128-byte
+  reply, so 60–127 weren't logged — but see acceptance proof below; the game
+  ignores this region).
+
+The Flycast on-disk `.nvmem` (`…/data/Cleopatra Fortune Plus.dat.nvmem`, 0x8000
+bytes) is the **game SRAM**, not the 93C46 — a full-filesystem scan (294k files)
+for the system signature `50cb104245532009101a` found it **only** in
+`build/mie_sub03.bin`. Flycast persists the 93C46 to a `…​.eeprom` file
+(`maple_jvs.cpp:1449-1451,1617-1640`); Cleopatra (`cleoftp`) ships **no** built-in
+default (`naomi_roms.cpp:5043`, last field `nullptr`), and no `.eeprom` file
+exists on disk now — so the capture is the sole authoritative source.
+
+### Free-play confirmation (decode + citation)
+
+System data byte at EEPROM **offset 9** (copy 1) and **offset 27** (copy 2) =
+`0x1A`. Per `naomi.md:180`, the coin-assignment byte is zero-indexed and
+`0x1A` = assignment #27 = **FREE PLAY**. Cross-checked against
+`naomi/eeprom.py` `default()` (`system_array[7] = coin_setting − 1`, so
+`0x1A → 27`). Both CRC copies carry `0x1A`, so free-play survives either
+power-loss-recovery copy. Decoded system block:
+
+| off | bytes | meaning |
+|---|---|---|
+| 0x00 | `50 cb` | CRC-16 over 0x02–0x11 (**recomputed = match**) |
+| 0x02 | `10` | attract sound on (`naomi.md:178`) |
+| 0x03 | `42 45 53 20` = "BES " | game serial (= ROM hdr `0x134`, verified) |
+| 0x07 | `09 10` | additional settings |
+| 0x09 | **`1a`** | **coin assignment = FREE PLAY** (`naomi.md:180`) |
+| 0x0a | `01 01 01 00 11 11 11 11` | remaining settings |
+| 0x12 | `50 cb` + copy | identical second copy (0x12–0x23) |
+
+Because the ROM header default-settings block is **coin-mode**
+(`rom.defaults`: `apply_settings=False, coin_setting=1`, all 5 regions), free-play
+is **not** ROM-forced — it was configured in the test menu and captured, which
+is exactly why the harvest (not regeneration) is authoritative.
+
+### CRC status
+
+* **System section: CRC-valid, recomputed and confirmed** — both copies'
+  stored CRC `0x50cb` equals `crc(data[2:18])`/`crc(data[20:36])` using the
+  algorithm in `tools/netboot/naomi/eeprom.py` (`0xDEBDEB00` seed +
+  `0x10210000` round, trailing `0x00`).
+* **Game section: all-zero, accepted by the game as-is.** The netboot tool's
+  stricter `__validate_game` flags it (`crc(b"")=0x78ac ≠ 0x0000`), but
+  Cleopatra stores nothing in the 93C46 game section: **0× sub `0x0B` (write)
+  across all five captures** (attract/demo/input/play/pc) — the game read this
+  image and never re-initialised (sub `0x03` reads: attract 4, pc 2, others 0).
+  The empirical acceptance (game booted to attract+demo, free-play) outranks
+  the general-purpose validator.
+
+**Task 11 — embed the RAW 128 bytes** (`xxd -i` / the plan's Makefile), do
+**not** route `eeprom.bin` through `naomi/eeprom.py` `NaomiEEPRom()` /
+`validate()`. That library's `__validate_game` (`eeprom.py:278-305`) requires
+the game header to be either a valid CRC or the `0xFF` blank marker; our header
+is intentionally `00 00` (offset 0x24), so `NaomiEEPRom()` would raise
+"Invalid EEPROM CRC!" on load. This is **expected and harmless** — the real
+game read that same zeroed header and never wrote (0× `0x0B`), and the part
+that must be valid, the system section, passes `__validate_system`
+(`eeprom.py:262-276`). The shim replays the 128 bytes verbatim; nothing
+re-validates them.
+
+### First 16 bytes
+
+`50cb 1042 4553 2009 101a 0101 0100 1111` (values gitignored elsewhere).
+
+### Consistency with Tasks 4/5
+
+`EE_OFF=4` (Task 5) holds: `eeprom.bin[0:60] == mie_sub03.bin[4:64]`, so the
+shim replaying the image at `recvaddr+4` hands the game the identical bytes it
+accepted. Sub `0x01` (schedule-read ACK) is unaffected — shim replays
+`mie_sub01.bin` verbatim as before.
+
+### Reproduction
+
+```sh
+# rebuild + full self-check (asserts length, both system CRCs, free-play,
+# serial, and EE_OFF consistency); writes gitignored shims/data/eeprom.bin
+python3 - <<'PY'
+import struct
+def _c(d):
+    rc=0xDEBDEB00
+    for b in bytes(d)+b"\x00":
+        rc=(rc&0xFFFFFF00)+(b&0xFF)
+        for _ in range(8):
+            rc=(rc*2)&0xFFFFFFFF if rc<0x80000000 else ((rc*2)&0xFFFFFFFF)+0x10210000&0xFFFFFFFF
+    return struct.pack("<H",(rc>>16)&0xFFFF)
+s=open("build/mie_sub03.bin","rb").read(); assert s[0]==0x87
+ee=bytearray(s[4:64])+b"\x00"*68; assert len(ee)==128
+assert ee[0:2]==_c(ee[2:18]) and ee[18:20]==_c(ee[20:36])   # system CRCs
+assert ee[2:18]==ee[20:36] and ee[3:7]==b"BES "
+assert ee[9]==0x1A and ee[27]==0x1A                          # free-play #27
+assert bytes(ee[:60])==s[4:64]                               # EE_OFF=4 consistency
+open("shims/data/eeprom.bin","wb").write(bytes(ee)); print("ok 128B free-play")
+PY
+# writes are absent from every capture (proves accept-as-is):
+grep -c 'sub=0b' capture-*.log   # -> 0
+```
+
+---
+
+## M2 boot-hang — Naomi BIOS-data dependency + fix design (Task 13b)
+
+The M2 DC-mode instrumented run (`.superpowers/sdd/task-13-hang-confirmation.md`)
+pinned the boot hang to two config-time consumers that read **Naomi BIOS-ROM
+data** (phys `0x60000` and `0x1ffd00`) which Flycast maps as *unused* on
+Dreamcast (`addrspace.cpp`: `{0x00000000, 0x00800000, …, false} // Area 0 ->
+unused`). On DC both reads return `0`. This section disassembles both consumers,
+bounds the exact extents, identifies the BIOS data, and specifies the fix. It
+promotes the boot-binary §7 "low-risk watch item" (`0xa0060000` / `0xa01ffd00`)
+to a **confirmed required dependency**.
+
+**Both consumers exit early on DC (they do *not* self-hang):** each reads zeros,
+fails its check, and returns "not found". The hang is *downstream* — the
+unpopulated vtable and the cleared flag drive the terminal RAM-side loop
+task-13 §4 could not pin to one instruction. Supplying the BIOS data makes both
+checks pass, which is the fix.
+
+### Consumer 1 — `FUN_8c0803a4`: verify-then-copy of a BIOS code+vtable library
+
+Disassembly (`DisasmRange.java 0x8c080380 0x8c0804e0`); pool words read from
+`tools/boot.bin`:
+
+```
+8c0803a4 mov.l 0x8c0804d0,r2   ; r2 = &object      (*0x8c0804d0 = 0x8c1c9764)
+8c0803a6 mov #0x8,r7           ; r7 = 8            (verify count)
+8c0803a8 mov.l 0x8c0804cc,r3   ; r3 = 0xac018000   (vtable value = phys 0x0c018000, main RAM)
+8c0803aa mov #0x0,r5           ; r5 = 0            (verify index)
+8c0803ac mov.l 0x8c0804d8,r0   ; r0 = 0x0c010000   (signature target)
+8c0803ae mov.l 0x8c0804dc,r6   ; r6 = 0x0fff0000   (signature mask)
+8c0803b0 mov.l 0x8c0804d4,r1   ; r1 = 0xa0060000   (SOURCE, BIOS phys 0x60000)   <-- patch site
+8c0803b2 mov.l r3,@r2          ; object->vtptr = 0xac018000
+8c0803b4 mov.l @r1+,r4         ; r4 = *r1; r1+=4   <-- BIOS read (hang fingerprint)
+8c0803b6 and r6,r4             ; r4 &= 0x0fff0000
+8c0803b8 cmp/eq r0,r4          ; (word & 0x0fff0000) == 0x0c010000 ?
+8c0803ba bf 0x8c0803d8         ; MISMATCH -> rts (returns, no copy)   << taken on DC (0!=target)
+8c0803bc add #0x1,r5
+8c0803be cmp/ge r7,r5
+8c0803c0 bf 0x8c0803b4         ; verify up to 8 words
+8c0803c2 mov.l 0x8c0804cc,r5   ; r5 = 0xac018000   (copy dest)
+8c0803c4 mov.l 0x8c0804d4,r6   ; r6 = 0xa0060000   (copy source, reset)          <-- patch site (2nd ref)
+8c0803c6 mov.w 0x8c0804c8,r4   ; r4 = 0x1c00 = 7168 (copy count N, signed word)
+8c0803c8 bra 0x8c0803d2
+8c0803cc mov.l @r6+,r3         ; copy loop body: read word from BIOS, r6+=4
+8c0803ce mov.l r3,@r5          ; store to 0x0c018000.., r5+=4
+8c0803d0 add #0x4,r5
+8c0803d2 tst r4,r4             ; loop while r4 != 0  (runs N=7168 iterations)
+8c0803d4 bf/s 0x8c0803cc
+8c0803d6 _add #-0x1,r4
+8c0803d8 rts
+```
+
+Pool table (`tools/boot.bin`, LE):
+`0x8c0804c8=0x1c00`(word) `0x8c0804cc=0xac018000` `0x8c0804d0=0x8c1c9764`
+`0x8c0804d4=0xa0060000` `0x8c0804d8=0x0c010000` `0x8c0804dc=0x0fff0000`
+`0x8c0804e0=0xa0000000`.
+
+**What it reads / for what:** a **verify-then-copy** of a BIOS-resident
+code+vtable library. First it verifies 8 longwords at `0x60000` each satisfy
+`(word & 0x0fff0000) == 0x0c010000` (i.e. look like `0x?c01????` pointers). If
+all 8 pass, it copies **N = 0x1c00 = 7168 longwords = `0x7000` bytes** from
+`0x60000` to `0xac018000` (phys `0x0c018000`). The library's own vtable is the
+first 14 longwords (`0x0c018374, 0x0c01837a, …` — pointers back into the copied
+`0x0c018xxx` block); the bytes at each target decode as SH-4 code (blob off
+`0x374`: `d306 000b f038 6643 …` = `mov.l @(disp,pc),r3; rts; …`). It is
+**position-dependent** (absolute `0x0c018xxx` pointers), so it must land at
+`0x0c018000` — which the game's own copy guarantees.
+
+The C++ vtable-dispatch family then calls into it:
+`FUN_8c0803f8 / 0x8c080418 / 0x8c080426 / 0x8c080446 / 0x8c080456 / 0x8c080464 /
+0x8c080484 / 0x8c080492 / 0x8c0804a0` all do
+`mov.l @object,r2 (=0x0c018000); mov.l @(disp,r2),r3; jmp @r3` — reading a method
+pointer from the copied vtable and jumping to it (`0x8c0804a0` OR-s
+`0xa0000000` from pool `0x8c0804e0` to jump the uncached alias).
+
+**Reconciles Task 7's "bounded 8-iter search":** the *verify* is the bounded
+8-iter search (it reads its own signature check). The *copy* it gates is the real
+extent — **`0x7000` bytes, deterministic** (fixed count at `0x8c0804c8`), not
+data-dependent. On DC the verify fails on word 0 (`0 != 0x0c010000`) → `rts`, no
+copy → `0x0c018000` stays garbage → the later vtable `jmp` dispatches into
+garbage. That is the hang, not this function looping.
+
+**Extent read from `0x60000`: `0x7000` bytes** (`0x60000`–`0x67000`).
+
+### Consumer 2 — `FUN_8c081438`: validate the BIOS copyright string
+
+Disassembly (`DisasmRange.java 0x8c081400 0x8c0814e0`):
+
+```
+8c081438 mov.l 0x8c0814c8,r3   ; r3 = &flag        (*0x8c0814c8 = 0x8c1c9768)
+8c08143a mov #0x0,r4           ; r4 = i = 0
+8c08143c mov.l 0x8c0814cc,r5   ; r5 = 0x8c0d7ed9   (game's expected string, in-image)
+8c08143e mov #0x70,r7          ; r7 = 0x70 = 112   (compare length)
+8c081440 mov.l 0x8c0814d0,r6   ; r6 = 0xa01ffd00   (SOURCE, BIOS phys 0x1ffd00)   <-- patch site
+8c081442 mov.l r4,@r3          ; flag = 0
+8c081444 mov r4,r0             ; loop: r0 = i
+8c081446 cmp/pz r0             ; i >= 0 (always, for 0..0x6f)
+8c081448 bf/s 0x8c081450       ; (neg-i path unused here)
+8c08144a _mov.b @r5,r2         ;   r2 = (s8) game[i]
+8c08144c bra 0x8c08145a
+8c08144e _and #0x7,r0          ;   r0 = i & 7
+8c08145a mov.b @r6,r1          ; r1 = (s8) bios[0x1ffd00 + i]   <-- BIOS read (hang fingerprint)
+8c08145c sub r0,r2             ; r2 = game[i] - (i & 7)
+8c08145e cmp/eq r1,r2          ; bios[i] == game[i] - (i & 7) ?
+8c081460 bf 0x8c081472         ; MISMATCH -> rts (flag stays 0)   << taken on DC (byte 0)
+8c081462 add #0x1,r4           ; i++
+8c081464 cmp/ge r7,r4          ; i >= 0x70 ?
+8c081466 add #0x1,r5
+8c081468 bf/s 0x8c081444       ; loop for 112 bytes
+8c08146a _add #0x1,r6
+8c08146c mov.l 0x8c0814c8,r2
+8c08146e mov #0x1,r3
+8c081470 mov.l r3,@r2          ; flag = 1  (validation OK)
+8c081472 rts
+```
+
+Pool: `0x8c0814c8=0x8c1c9768`(flag) `0x8c0814cc=0x8c0d7ed9`(expected string)
+`0x8c0814d0=0xa01ffd00`(BIOS source).
+
+**What it reads / for what:** a **byte-compare** of the NAOMI BIOS copyright
+string against an obfuscated in-image copy — `bios[i] == game[i] - (i & 7)` for
+`i = 0..0x6f`. All-match sets `flag (0x8c1c9768) = 1`; any mismatch leaves it 0.
+Cross-check against `tools/boot.bin @0x8c0d7ed9` and `epr-21576h @0x1ffd00`:
+**0 mismatches — the loop terminates and sets flag=1.** On DC (zeros) it fails at
+byte 0 and leaves flag=0.
+
+**Extent read from `0x1ffd00`: max `0x70` = 112 bytes** (`0x1ffd00`–`0x1ffd70`),
+bounded by `r7 = 0x70`; deterministic.
+
+### BIOS data identity + extents
+
+BIOS ROM used: **`epr-21576h.ic27`** — Flycast's default Japan BIOS
+(`naomi_roms.cpp:89` `ROM_SYSTEM_BIOS(0,"bios0","epr-21576h (Japan)")`), and
+Cleopatra Fortune Plus is Japan region. 2 MB ROM, `0x0`–`0x1fffff` = phys
+`0x0`–`0x1fffff`.
+
+| slice | phys | size | identity | md5 (epr-21576h) |
+|---|---|---|---|---|
+| BIOS_DATA_60000 | `0x60000` | `0x7000` | BIOS code+vtable library (14-ptr vtable @ `+0` → `0x0c018374…`, then SH-4 code; last non-zero at `+0x6ff5`) | `d818d07251906e4529e58713e1ad3549` |
+| BIOS_DATA_1FFD00 | `0x1ffd00` | `0x70` | `"COPYRIGHT (C)SEGA ENTERPRISES,LTD.\0…NAOMI BOOT ROM\0\0"` | `7b5dbe6d88a81fc947c0357fff56427a` |
+
+Cross-revision check (`epr-2157[6-9]*.ic27`, all 20 present):
+- `0x1ffd00` `0x70` is **byte-identical across every revision & region** (the
+  copyright/ID string). Any dump yields the same bytes.
+- `0x60000` `0x7000` **differs per revision** (it embeds absolute `0x0c018xxx`
+  code pointers; layout shifts across BIOS builds) — but every revision passes
+  Consumer 1's 8-word verify, and the game never compares `0x60000` to a fixed
+  expected value. Use the project's canonical **epr-21576h** slice so the
+  supplied library matches the BIOS the M2 boot runs under.
+
+### The fix
+
+**1 — RAM region (in shim home, spec §1, V2-verified clean `0x8cfc0000+`).**
+Shim code+data tops out at `SHIM_BASE + 0xa800`; place a contiguous BIOS-data
+block above it (single memcpy + single purge):
+
+```
+BIOS_DATA_60000   = SHIM_BASE + 0xb000  = 0x8cfcb000   size 0x7000  (ends 0x8cfd2000)
+BIOS_DATA_1FFD00  = SHIM_BASE + 0x12000 = 0x8cfd2000   size 0x70    (ends 0x8cfd2070)
+```
+
+Both under `0x8d000000` (KOS stack top); ≥ `0x800` clear of the shim; loader
+already writes only `SHIM_BASE`..`+0x9000` + this new block. No shim-layout move.
+(The copy *dest* `0x0c018000` is the game's own hardcoded, unpatched address —
+below the game image, in the dead loader region post-handoff — same as on Naomi;
+runtime watch item, not blocking.)
+
+**2 — Two new pool patches** (append to `scripts/build_patch_table.py`; both
+current values verified from `tools/boot.bin`, so the old-byte assertion passes).
+Keep **P2 uncached** to match the original access semantics (game reads these via
+`mov.l @r1+` / `mov.b @r6`; the copy dest is uncached too):
+
+```python
+# §M2 BIOS-data: redirect the two BIOS-ROM data pointers to the loader's RAM copies.
+pool(0x8C0804D4, 0xA0060000, BIOS_60000_P2,  "#14 BIOS 0x60000 lib   -> shim-home copy")
+pool(0x8C0814D0, 0xA01FFD00, BIOS_1FFD00_P2, "#15 BIOS 0x1ffd00 str  -> shim-home copy")
+```
+where (parse from `shim_iface.h` like `G1_MIRROR`, do not hardcode):
+```python
+def _sb_off(name):  # "#define NAME (SHIM_BASE + 0xNNNN)"
+    m = re.search(rf"#define\s+{name}\s+\(SHIM_BASE\s*\+\s*(0x[0-9a-fA-F]+)\)", iface)
+    return SHIM_BASE + int(m.group(1), 16)
+BIOS_60000_P2  = _sb_off("BIOS_DATA_60000")  | 0xA0000000   # 0xacfcb000
+BIOS_1FFD00_P2 = _sb_off("BIOS_DATA_1FFD00") | 0xA0000000   # 0xacfd2000
+```
+Net: 17 patches (1 hook, 15 pool, 2 ptr). Old→new:
+`*0x8c0804d4: 0xa0060000 → 0xacfcb000`; `*0x8c0814d0: 0xa01ffd00 → 0xacfd2000`.
+
+**3 — `shim_iface.h`** (single source of truth):
+```c
+#define BIOS_DATA_60000   (SHIM_BASE + 0xb000)   /* 0x7000: Naomi BIOS 0x60000 lib (FUN_8c0803a4 copies it) */
+#define BIOS_DATA_1FFD00  (SHIM_BASE + 0x12000)  /* 0x70:   Naomi BIOS 0x1ffd00 copyright (FUN_8c081438 validates it) */
+#define BIOS_DATA_LEN     0x7070                  /* contiguous: 0x7000 + 0x70 */
+```
+
+**4 — Loader** (`loader/main.c`, after the `shim_bin` copy, before the purges):
+```c
+extern uint8 bios_data[];   /* build/bios_data.bin = [0x7000 @0x60000][0x70 @0x1ffd00] */
+memcpy((void *)BIOS_DATA_60000, bios_data, BIOS_DATA_LEN);   /* one contiguous copy */
+dcache_purge_range(BIOS_DATA_60000, BIOS_DATA_LEN);          /* game reads it via P2 uncached */
+```
+
+**5 — Embedded slice** (gitignored ROM bytes, extract-at-build like the
+`mie_*`/eeprom blobs). Add to `loader/Makefile`: a `bios_data.o` objcopy blob
+(same pattern as `shim_blob.o`) from `../build/bios_data.bin`, generated by a
+small extractor that `dd`s the two slices from `bios/naomi/epr-21576h.ic27` and
+concatenates them (slice sizes `0x7000` + `0x70`). Add `bios_data.o` to `OBJS`.
+`build/` and `bios/` are already gitignored — no ROM bytes enter git.
+
+### Any other BIOS reads? — NO, only these two
+
+`ListPoolWords.java 0x00000000 0x00200000` returns a large list, but it scans
+*raw 4-aligned words* and cannot tell code from data: the SH-4 `bra` opcode is
+`0xaXXX`, so **every `bra`/`bt` target whose code starts with a branch decodes as
+a fake `0xa0XXYYZZ` "pointer"** with phys `< 0x200000`. Verified by disassembly:
+`0x8c02929c` (val `a013dc15`) is the target of `8c0291c6 bra 0x8c02929c` /
+`8c029216 bt 0x8c02929c` — its bytes are `bra …; mov.l @(disp,pc),r12` code, not
+a pool word; `0x8c0263c8` (val `a00b9324`, 4-aligned) is likewise the target of
+`8c0263aa bt 0x8c0263c8`. These are false positives, not dereferenced pointers.
+
+Genuine BIOS-data pool words are those loaded by `mov.l @(disp,pc),rN` and then
+**dereferenced** — exactly the 6 `POOLBIOS` from boot-binary §7:
+
+| pool word | value | phys | kind | read? |
+|---|---|---|---|---|
+| `0x8c02e9f0` | `0x80000200` | `0x200` | VBR general-exc vector const (written to VBR setup) | no |
+| `0x8c04afbc` | `0x80000038` | `0x038` | VBR TLB-miss vector const | no |
+| `0x8c04b37c` | `0x80000038` | `0x038` | same | no |
+| `0x8c080e94` | `0x80000300` | `0x300` | VBR interrupt vector const | no |
+| **`0x8c0804d4`** | **`0xa0060000`** | **`0x60000`** | **Consumer 1 source** | **YES → fixed** |
+| **`0x8c0814d0`** | **`0xa01ffd00`** | **`0x1ffd00`** | **Consumer 2 source** | **YES → fixed** |
+
+(`0x8c0804e0=0xa0000000` and the many `0x8c……=0xa0000000/0x80000000` hits are
+uncached/cached base OR-masks, not reads — e.g. `0x8c0804e0` converts a vtable
+pointer to its P2 alias at `0x8c0804a4`.) The M2 DC-mode run corroborates
+dynamically: the only area-0 `HWR` lines it logged are `a0060000` and
+`a01ffd00`. **These two are the complete set of BIOS data reads.**
+
+### Runtime confirmation (what the M2 re-boot must show)
+
+After the fix, the config init should: pass Consumer 1's verify at `0x8c0803b4`,
+run the `0x7000` copy to `0x0c018000`, set `flag (0x8c1c9768) = 1` at Consumer 2,
+and proceed past the config-init hang (no terminal RAM-side loop). Residual risk:
+the copied library is BIOS *code* the game `jmp`s into via its vtable; if that
+code itself touches further BIOS ROM/hardware absent on DC, a **new** hang would
+surface at a `0x0c018xxx` (`0xac018xxx`) PC — the next iteration's target. The
+blob is self-contained (vtable + code, all within `0x0c018000`–`0x0c01f000`), so
+this is unlikely but must be re-instrumented on the M2 re-boot to confirm.
+
+### Reproduction
+
+```sh
+# Consumers (Ghidra headless; project cleo3 already imported):
+scripts/ghidra/run.sh script DisasmRange.java 0x8c080380 0x8c0804e0   # Consumer 1
+scripts/ghidra/run.sh script DisasmRange.java 0x8c081400 0x8c0814e0   # Consumer 2
+
+# Pool words + cross-checks + slice extraction (bios/ gitignored):
+python3 - <<'PY'
+import struct
+b=open('tools/boot.bin','rb').read(); BASE=0x8c020000
+rom=open('bios/naomi/epr-21576h.ic27','rb').read()
+# extents
+assert struct.unpack('<h', b[0x8c0804c8-BASE:0x8c0804c8-BASE+2])[0]==0x1c00     # N=7168 -> 0x7000 B
+assert struct.unpack('<I', b[0x8c0804d4-BASE:0x8c0804d4-BASE+4])[0]==0xa0060000 # patch #14 old
+assert struct.unpack('<I', b[0x8c0814d0-BASE:0x8c0814d0-BASE+4])[0]==0xa01ffd00 # patch #15 old
+# Consumer 1 verify passes on the BIOS blob
+w=struct.unpack('<8I', rom[0x60000:0x60000+32]); assert all((x&0x0fff0000)==0x0c010000 for x in w)
+# Consumer 2 string matches game's obfuscated copy -> flag=1
+loc=0x8c0d7ed9-BASE
+assert all(rom[0x1ffd00+i]==((b[loc+i]-(i&7))&0xff) for i in range(0x70))
+print("OK: extent 0x7000 + 0x70; verify passes; string matches (0 mismatches)")
+PY
+```
+
+---
+
+## M3 attract-mode boot — result (Task 14): BLOCKED on JVS boot handshake
+
+**Verdict: M3 NOT achieved. Game boots, streams all assets, and RENDERS, but
+halts on the game's own I/O-board detection error instead of entering attract.**
+This is real progress past M2 (render path proven end-to-end), with the blocker
+localized to the input shim's boot handshake. Full report:
+`.superpowers/sdd/task-14-report.md`.
+
+### Regression oracle — `scripts/check_triples.py`
+
+New this task. Reads `docs/kb/cart-streaming-map.csv`; for every `mode==DMA`
+triple asserts `cart_offset + length <= CART_SIZE` (`CART_SIZE = 0x6800000` =
+the real ROM size, `Cleopatra Fortune Plus.dat` = 109,051,904 B = `0x6800000`)
+and `0x0c000000 <= dest && dest+length <= 0x0d000000` (main RAM). Result:
+**`CHECK triples_servable: PASS`** — 388 DMA triples, max cart end `0x609c000`
+(< `0x6800000`), all dests in `[0x0c0e6a00, 0x0cb378e0)`. (The brief's step-1
+sketch used `CART_SIZE = 0x6D00000`; the real ROM is `0x6800000`, so the oracle
+uses the stricter true size. The one PIO row is skipped.) `--selftest` proves
+the assertion can fail (feeds an out-of-ROM read + a non-RAM dest → 2 flagged).
+
+### Boot is clean through M2 (serial)
+
+Full clean rebuild (`shims` → `build_patch_table.py` → `loader` →
+`make_gdi.py`) → 18 patches (1 V3 hook, 15 pool, 2 BIOS ptr). Release Flycast
+on `build/cleo.gdi` (DC profile, reios HLE BIOS — no DC BIOS file, falls back to
+reios; the Naomi BIOS-data slices are supplied by patches #14/#15). Serial:
+loader places shim + BIOS data, applies all 18 patches, `jumping to 8c04ae2c`,
+then **147 CART reads** (cart `0x800000`→`0x58b4800`, dest `0x0c21c3c0`,
+identical to M2), then quiescent. **No SHIMERR** — every MIE subcommand the game
+issued got a structurally-valid reply (nothing reached `main.c`'s
+`default: shim_die(3,…)`).
+
+### The screenshot settles it — render works, but it's an error screen
+
+Screenshot method: macOS `screencapture` is TCC-blocked for the `claude` parent
+process ("could not create image from display"; `TCC.db` read also denied), so
+the framebuffer was captured **in-process** via Flycast's savestate-embedded PNG
+(`renderer->GetLastFrame` → `dc_savestate`, `nullDC.cpp:403`): launch with
+`-config config:Dreamcast.AutoSaveState=yes -config config:Dreamcast.SavestatePath=<dir>`,
+let it render, `kill -TERM` (SDL2 default posts `SDL_QUIT` → clean
+`emu_flycast_term` → `unloadGame` autosave), then carve the 640×479 PNG from the
+`.state` header (`magic[8]"FLYSAVE1" + u64 date + u32 version + u32 pngSize`,
+then PNG bytes).
+
+**On screen: black background, centred white text
+`I/O BD IS NOT CONNECTED TO NAOMI BD.`** — the game's own error string (in
+`tools/boot.bin` @ file offset `657126`; "I/O BD" @ `657116`/`657156`; the
+expected board-ID `SEGA ENTERPRISES,LTD.;I/O BD JVS;…` @ `679724`). The game
+renders it via PVR/TA, so **the DC render pipeline works end-to-end** (not a
+black stall). The game reached its **JVS I/O-board detection and failed it.**
+
+### Root cause — boot JVS handshake is a single-frame stub
+
+`shims/src/main.c` `shim_maple_boot` dispatches every boot-phase MIE sub through
+`maple_reply`, which returns the **digital-read `jvs_hasdata` frame for every
+sub-0x15 receive** (`main.c:34`, `src/jvs.c` `jvs_hasdata`) and captured verbatim
+ACK templates for the transmit subs (0x27/0x17). It never returns the
+**context-specific** JVS boot responses the multi-step handshake requires: the
+board-ID string (JVS read-ID cmd `0x10` → the game compares it against its
+expected `SEGA ENTERPRISES,LTD.;I/O BD JVS;…` @ `0x679724`), and the
+cmd/JVS/comm-version + feature-list replies (JVS `0x11`–`0x14`). The game
+transmits those JVS commands (sub 0x27/0x17), receives with sub 0x15, gets a
+digital-read frame instead of the identity/feature reply, and concludes no board
+is connected. This is exactly the **"boot completion is M4-gated"** deferral the
+`shim_maple_boot`/`shim_maple_entry` comments (`main.c:71,84`) already flag: the
+input shim's boot handshake was never completed. `maple_getcond` (DC-side
+`GetCondition`) and the steady-state `shim_maple_entry` are fine; the gap is
+strictly the boot-phase receive dispatch.
+
+### Next step (Phase 4 M4 / input shim)
+
+Make `shim_maple_boot` track which JVS command was last transmitted (the game's
+transmit subs carry the JVS command bytes in descriptor payload words 4-7,
+`§input-ABI` site A) and return the matching board response for the following
+sub-0x15 receive: JVS reset ack (`0xF0`), set-address ack (`0xF1`), board-ID
+string (`0x10`), cmd/JVS/comm version (`0x11`/`0x12`/`0x13`), feature list
+(`0x14`), before falling through to the digital-read frame for steady polling.
+The Flycast MIE emitter `tools/flycast-src/core/hw/maple/maple_jvs.cpp`
+(`get_id()` @ `:394`, cmd handlers) is the authoritative byte source. Everything
+downstream (cart streaming, render, EEPROM free-play, BIOS data) is confirmed
+working, so completing the boot handshake is the single remaining gate to M3.
+
+### Reproduction
+
+```sh
+python3 scripts/check_triples.py                 # -> CHECK triples_servable: PASS
+# clean build
+source tools/kos/environ.sh && make -C shims clean && make -C loader clean
+make -C shims && python3 scripts/build_patch_table.py && make -C loader && python3 scripts/make_gdi.py
+# boot + in-process framebuffer capture (screencapture is TCC-blocked here)
+defaults write com.flyinghead.Flycast ApplePersistenceIgnoreState -bool YES
+/Applications/Flycast.app/Contents/MacOS/Flycast -config config:rend.vsync=no \
+  -config config:Dreamcast.AutoSaveState=yes -config config:Dreamcast.SavestatePath=/tmp \
+  "$PWD/build/cleo.gdi" &                          # wait ~40s for the 147-read stream
+kill -TERM %1                                      # clean quit -> autosave with embedded PNG
+# carve PNG: skip 24-byte FLYSAVE1 header, take next u32 pngSize bytes -> shows the error screen
+```
+
+
+---
+
+## M3 I/O-check force (Task 14c) — spec-check gate forced; game advances past the I/O screen
+
+**Result: the I/O-board-detected screen is UNBLOCKED by one 2-byte instruction
+patch.** Contrary to the "I/O BD IS NOT CONNECTED" premise, dynamic evidence on
+the current 18-patch build shows the board registers as **CONNECTED**; the halt
+is the sibling gate **"DOES NOT FULFILL THE GAME SPECS."** Forcing the spec gate
+lets the game leave the I/O-check scene loop and stream further.
+
+### How the decision was located (dynamic, instrumented DC-mode interpreter)
+
+`patches/flycast-instrument.diff` adds two read-only probes (Task 14c):
+- **STRWATCH** (`core/hw/mem/addrspace.cpp readt`): logs guest reads of the I/O
+  status-string block phys `0x0c0ca6dc–0x0c0ca740` (the strings have no static
+  xref — computed resource base+offset). Caught the screen build at copy PC
+  `0x8c094a2e`, caller `0x8c04b508` (inside render `FUN_8c04b4c4`), grandparent
+  `0x8c04b0b0` inside the boot scene loop **`FUN_8c04ae50`**.
+- **IOCHK** (`core/hw/sh4/interpr/sh4_interpreter.cpp ReadNexOp`): at the scene
+  decision PCs `0x8c04b08a/090/1fa/200`, snapshots the scene object
+  (`*0x8c0c4510`), its vtable methods, and the enumeration flags.
+
+IOCHK on the baseline build (repeats every frame at `0x8c04b1fa/200`):
+`obj=8c0a2494 m10=8c02469e m7c=8c024bf8 conn=00000001 specs=00000001 mir=00000001`.
+So **conn (I/O board present) = 1**, and the bad flag is **specs
+(`0x8c0d541c`) = 1** ("no feature ID").
+
+### The flags (static, boot.bin)
+
+- **Connection flag** `[0x8c1c9774]` (= struct `*0x8c0814c4`=`0x8c1c9770`, field
+  `+4`), written only by the registration fn `FUN_8c0813e6` @`0x8c081416`. On DC
+  the config path registers a board present → **conn = 1** (mirror `0x8c127b0c`
+  set at `FUN_8c04ae50` `0x8c04b088`).
+- **Spec-compat result** `[0x8c0d541c]`, computed once in `FUN_8c04ae50`
+  `0x8c04b00c–b066`: `0`=OK, `1`=no-id (feature-id `[0x8c1ca474]`==0), `2`=fail.
+  On DC the JVS feature/board-ID enumeration is garbage → feature-id 0 → **specs
+  = 1** ("DOES NOT FULFILL THE GAME SPECS.").
+
+### The gate (the forced check)
+
+`FUN_8c07a22a` is the per-frame I/O-status handler, called **only** from the
+boot scene loop `FUN_8c04ae50` @`0x8c04b176` (`FindRefsTo` = 1 caller). It reads
+the spec result and branches:
+
+```
+8c07a262  mov.l 0x8c07a2d8,r0   ; r0 = &spec_result (0x8c0d541c)
+8c07a264  mov.l @r0,r1          ; r1 = spec_result
+8c07a266  tst  r1,r1            ; T = (spec == 0 == OK)      <-- PATCH SITE
+8c07a268  bt   0x8c07a302       ; OK -> FUN_8c07c144 builds the normal display & proceeds
+          (fall-through: spec 1/2 -> draw the error, loop forever)
+```
+
+### The force patch (`scripts/build_patch_table.py`, patch #19, `insn16`)
+
+`0x8C07A266`: `tst r1,r1` (`0x2118`) → `sett` (`0x0018`, T:=1) so the spec test
+is always treated as OK. Minimal (2 bytes), old-opcode-verified; single-caller
+site. This is the "force the result to board-present/OK" strategy applied to the
+spec gate.
+
+### Evidence it works (instrumented DC-mode interpreter, `build/cleo.gdi`)
+
+| | baseline (18 patches) | + force patch (19) |
+|---|---|---|
+| IOCHK `0x8c04b1fa/200` (in-loop) | fires every frame (stuck) | **absent** (loop left) |
+| IOCHK `0x8c04b08a/090` (one-time entry) | 1× | 1× |
+| CART reads | 147 | **149** (M2 intact + more) |
+| MIE sub=31 DIP poll | floods forever | tapers |
+| new maple | — | controller DeviceRequest cmd 01/0b to ports 1&2 |
+
+⇒ the game **leaves the I/O-check scene loop** and advances.
+
+### New downstream blocker (report, not fixed — per "force one gate")
+
+After the check passes, the game invokes the boot MIE builder (fn-ptr
+`0x8c027618` → `shim_maple_boot`) **once** with an unhandled subcommand:
+`cmdblk=0x8c0e62e0 hdr(cmdblk+8)=0x940004f6 sub=0x00 recv=0xc8000000
+arg0=0x8c0a27f4` → `maple_reply` default → `shim_die(3)` (spins). Note the boot
+enumeration itself does **not** go through this fn-ptr (0 `shim_maple_boot`
+calls before the check — it uses the raw-maple path, confirming Task 14/14b);
+`shim_maple_boot` is reached only here. A diagnostic run tolerating the unknown
+sub (complete without writing the bad recvaddr) advanced the game to **CART=180**
+(+31 reads) with execution moving to new regions (`0x8dfffxxx`, `0x8c00f500`)
+and the DIP-poll flood gone — so the path forward is real; the next step is to
+service this MIE sub (same "force the consumer" technique). Reverted before ship.
+
+### Reproduction
+
+```sh
+# build the forced image
+source tools/kos/environ.sh && make -C shims && python3 scripts/build_patch_table.py \
+  && make -C loader && python3 scripts/make_gdi.py
+# DC-mode interpreter (probes need the interpreter for exact PC)
+BIN=tools/flycast-src/build/Flycast.app/Contents/MacOS/Flycast
+FLYCAST_CARTLOG=cap.log "$BIN" -config config:rend.vsync=no -config config:Dynarec.Enabled=no \
+  -config config:Debug.SerialConsoleEnabled=yes build/cleo.gdi &
+grep -oE 'IOCHK pc=[0-9a-f]+' cap.log | sort | uniq -c   # in-loop 1fa/200 absent = check passed
+# decision disasm
+scripts/ghidra/run.sh script DisasmRange.java 0x8c07a22a 0x8c07a2e0
+scripts/ghidra/run.sh script FindRefsTo.java 0x8c07a22a    # single caller FUN_8c04ae50
+```
+
+## Task 14d — post-check MIE frame is a RED HERRING; real M3 blocker pinned
+
+Task 14c left a "post-check `shim_maple_boot` sub=0 recv=0xc8000000 → `shim_die(3)`"
+blocker and hypothesised it was a misparse or a servable MIE frame. **Both refuted
+by evidence.** The frame is a non-MIE transaction the shim was never meant to touch,
+and handling it (any way) does not advance the game.
+
+### The frame, precisely (dumped + disassembled)
+
+`shim_maple_boot` (hooked at `pool[0x8c027618]=0x8c0315ce`) parses `sub=[cmdblk+0xc]`
+low byte and `recv=[cmdblk+0x4]`, `cmdblk=*0x8c0e6400`. Disasm of the real builder
+`FUN_8c0315ce` (`0x8c0315ce–0x8c03161c`) confirms **the shim reads exactly what the
+builder reads — no offset misparse.** At the post-check call:
+
+- `cmdblk = 0x8c0e62e0` (a static scratch command block, zero-filled in the image,
+  refilled per transaction; boot.bin off `0xc62e0`).
+- `[cmdblk+0x00]=control`, `[cmdblk+0x04]=recv=0xc8000000`, `[cmdblk+0x08]=0x940004f6`,
+  `[cmdblk+0x0c]` low byte `=0x00` (sub).
+- The builder's frame header = `([cmdblk+0x08] & 0x03efffff) | 0x20000000 = 0x200004f6`
+  → per Flycast `maple_if.cpp maple_DoDma`: **cmd `0xf6`, reci `0x04`** — NOT an MIE
+  frame (MIE = cmd `0x86`, reci `0x20`). `recv 0xc8000000 & 0x1fffffe0 = 0x08000000`
+  (area 2, invalid → Flycast discards the reply). `arg0 = 0x8c0a27f4` = **float data**
+  (`3f800000`×4), a graphics/matrix payload, not a JVS command.
+
+So `sub=0 / recv=0xc8000000` are **real fields of a non-MIE transaction**, not a
+misread. `pool[0x8c027618]` feeds the **generic** dispatcher `FUN_8c027584`
+(`FindRefsTo` = 160+ callers); its builder `0x8c0315ce` serves ALL `(r10&0x20)==0`
+transactions. Hooking it made the shim mis-treat every such frame as MIE.
+
+### Three experiments → the frame is a red herring (instrumented DC interpreter)
+
+| shim_maple_boot handling | cart reads | outcome |
+|---|---|---|
+| shim_die(3) (Task 14c ship) | **149** | clean halt at first non-MIE call (masks the real crash) |
+| tolerate (fake completion) | **180** | `EXC epc=0c10004c evn=180` crash loop |
+| **unhooked / real builder runs** | **180** | **identical** `EXC epc=0c10004c` crash |
+
+Tolerate and unhook reach the **byte-identical** crash (`SLEEPWAIT pc=8c016928`, then
+`EXC epc=0c10004c evn=180 newpc=8c00f500`). The frame does not even generate a maple
+DMA when the real builder runs (no `cmd=0xf6` in `rawdma_call`; `FUN_8c027eac` routes
+it elsewhere / drops it). ⇒ the sub=0 frame is irrelevant to progress.
+
+### Real M3 blocker (deep — deferred, = Task-14b async-MIE)
+
+After the forced I/O check, the game stays in the I/O-status scene loop
+`FUN_8c04ae50` and polls steady input through the **still-unhooked Mode-B builder**
+`pool[0x8c02ee88]=0x8c03c2c6` (`pc=8c03c3e4`), which returns garbage `fd0023` MIE
+responses (no real MIE on DC — the exact Task-14b deferral). The scene object
+`*0x8c0c4510` (healthy `0x8c0a2494`) goes **null** and the game wild-jumps to
+**unloaded, zero-filled RAM `0x0c10004c`** (never a cart-DMA dest; boot image = `0x0000`
+= illegal instruction) → `evn=0x180` exception loop the game's own handler cannot
+recover from. Root cause: **the force-check advances into code that genuinely needs a
+working I/O board (real MIE input); faking the result flag is insufficient.** Reaching
+attract requires the deferred Task-14b fix — service the async maple engine so the
+steady input returns real controller data (§input-ABI addendum step 4), not the
+sub=0 frame.
+
+### Ship (Task 14d)
+
+`build_patch_table.py`: **un-hook the boot slot** (drop the `ptr(0x8c027618 → shim_maple_boot)`
+swap) — the root-cause fix for the reported symptom: stop intercepting a generic
+dispatcher with MIE logic. 18 patches (was 19). Effect: no false `SHIMERR=3`; game
+advances 149 → **180** cart reads (M2's 147 intact); reaches the real blocker instead
+of masking it. `shim_maple_boot` kept in the shim as the documented boot-MIE ABI +
+re-hook target. Reproduce: `scripts/../ (build)` then
+`FLYCAST_CARTLOG=cap.log <instrumented Flycast> -config config:Dynarec.Enabled=no
+-config config:Debug.SerialConsoleEnabled=yes build/cleo.gdi`;
+`grep -c '^CART ' <serial>` = 180, `grep 'EXC epc' cap.log` = the crash.
+
+## Task 14e — async-Maple completion mechanism PINNED (A) + fix spec
+
+**Verdict: HYPOTHESIS (A), decisively, with runtime evidence.** The runtime
+input/EEPROM engine detects maple completion by **cross-frame polling of the
+hardware `SB_MDST` busy bit**, which the maple DMA engine self-clears **regardless
+of whether an MIE device answers**. On DC the transaction completes every frame
+(with garbage `fd0023`); the game does NOT hang waiting for a real reply. ⇒ the
+fix is the SIMPLE class — supply valid data in the recv buffer, no
+poll-satisfying transport needed. Nuance vs. the (A) framing: completion is
+**not** VBLANK-auto-DMA and **not** the maple-end IRQ — it is the game's own
+`SB_MDST=1` manual trigger + the hardware `SB_MDST` self-clear, polled next frame.
+Full evidence: `.superpowers/sdd/task-14e-completion-mechanism.md`.
+
+### Key reinterpretation (corrects the "[desc+0x18]" framing of 14/14b/14d)
+
+The steady engine's "descriptor" is the **maple register block itself**:
+`FUN_8c030fc4` (`0x8c030fc4`) stores `*(struct+0x10f4) = 0xa05f6c00` (pool
+`0x8c030fec = a05f6c00`, the **only** runtime-referenced maple-base literal;
+`ListPoolWords 0x5f6c00 0x5f6c20`). In `FUN_8c03c2c6`, `desc = *(struct+0x10f4) =
+0xa05f6c00`, so **`[desc+0x18]` = `SB_MDST`** and **`[desc+0x04]` = `SB_MDSTAR`**.
+The "pending flag `[desc+0x18]` bit0" is literally the hardware `SB_MDST` bit 0;
+"queue the frame / set pending" is the game **triggering the DMA** (`SB_MDST=1`).
+
+### SB_MDTSEL + trigger (static)
+
+`SB_MDTSEL` (`0xa05f6c10`) is written once, in the config-time Z80-upload driver
+`FUN_8c080d18`: `0x8c080d26 mov #0x0,r7` … `0x8c080d96 mov.l 0x8c080e88,r1`
+(`r1=a05f6c10`), `0x8c080d98 mov.l r7,@r1` → **`SB_MDTSEL=0` (manual trigger)**.
+Never set to 1 anywhere → **no VBLANK-auto** (Flycast `maple_if.cpp:54` takes the
+vblank branch only when `SB_MDTSEL==1`). The runtime engine triggers its own DMA.
+
+### Completion path (disasm, `FUN_8c03c2c6`)
+
+```
+8c03c308  mov.l @(r0,r2),r3      ; r0=0x10f4 -> r3 = [struct+0x10f4] = 0xa05f6c00
+8c03c30a  mov.l @(0x18,r3),r1    ; r1 = *(0xa05f6c18) = SB_MDST          <- READ SB_MDST
+8c03c30c  tst r12,r1 (r12=1)     ; test SB_MDST bit0 (DMA busy)
+8c03c30e  bt 0x8c03c314          ; CLEAR (done) -> build+trigger ; SET -> return -1
+8c03c3d6  mov.l r0,@r8 (r8=0xa05f6c04)  ; SB_MDSTAR := phys(descriptor)  <- program DMA
+8c03c3e2  mov.l r12,@(0x18,r2)   ; *(0xa05f6c18)=1 = SB_MDST := 1        <- TRIGGER DMA
+```
+
+Completion = polling `SB_MDST` bit0 at the *start* of the next frame's call. No
+IRQ dependency; the pump `FUN_8c03c1c2` only assembles frames (no maple MMIO).
+Reached ~1×/frame via **both** fn-ptr slots `pool[0x8c02ed6c]` and
+`pool[0x8c02ee88]` (both `=0x8c03c2c6`); DC takes Mode B (mode-select `0x8c02ec90`
+tests `SB_ISTERR & 0x0f00` = maple-error bits, all clear on DC).
+
+### Runtime confirmation (`capture-dc-mie.log`, this 18-patch build)
+
+`16,283 MDODMA enter … pc=8c03c3d6` = 16k maple DMAs triggered from inside
+`FUN_8c03c2c6` (`maple_DoDma` fires only on a guest `SB_MDST=1`). If completion
+were (B) poll-until-real-reply, there would be exactly ONE DMA then an infinite
+`-1` spin. The **16,283 re-triggers prove `SB_MDST` self-cleared every frame** →
+(A). Replies alternate `0c0fd8e0`/`0c1038e0` (8143/8140 = double buffer). EEPROM
+(01/03), DIP (31), JVS (15/17) all land in these runtime buffers → **all route
+through `FUN_8c03c2c6` on DC** (not the fn-ptr boot builder, not the config path).
+
+### Result buffer + crash dependency
+
+- **Result buffer** = maple frame recv addr = double-buffer `0x0c0fd8e0` /
+  `0x0c1038e0`; **BTN_OFF `+0x20`** (P1 word big-endian; checksum `+0x3a`).
+  `SB_MDSTAR` holds the *descriptor* buffer phys (log `mdstar=0c109900`), whose
+  word-1 = the recv addr.
+- **Crash needs BOTH input AND EEPROM (and DIP)** — all garbage `fd0023` on DC,
+  all through the same engine; the null scene object `*0x8c0c4510` → wild jump
+  `0x0c10004c` is the game advancing toward attract with garbage settings+input.
+- **EEPROM MUST route through this path** — the fn-ptr EEPROM handler never fires
+  on DC; sub 01/03 are serviced by `FUN_8c03c2c6` (log), so the async-engine fix
+  is the only delivery route for the baked free-play `eeprom.bin`.
+
+### Fix spec — approach A (data, not transport). Complexity: MEDIUM.
+
+1. **Maple-base mirror (1 pool repoint):** `0x8c030fec: a05f6c00 →
+   MIRROR_MAPLE_P2+0x000` (shim-home block, P2-uncached). Redirects the runtime
+   engine's `SB_MDST`/`SB_MDSTAR` (computed `base+off`) into a shim mirror → the
+   game triggers no real maple DMA. Shim's own `maple.c` (real regs) untouched;
+   config Z80 path (own literals `0x8c080e74/88/8c/90`) left as-is (self-completing
+   red herring).
+2. **Steady-engine service (wrapper hook, 2 ptr patches):** `pool[0x8c02ed6c]` and
+   `pool[0x8c02ee88]` → `shim_maple_steady`, which (a) **calls the real
+   `FUN_8c03c2c6`** first (MUST — 14b proved replacing it skips the pump → 0 cart
+   reads), (b) walks the descriptor at `mirror_SB_MDSTAR` (model on
+   `maple_DoDma`), synthesizes each cmd-0x86/reci-0x20 reply into its recv addr via
+   the existing `maple_reply` + `mie_sub*`/`mie_jvs*` blobs (0x33/0x15 → real DC
+   GetCondition→JVS; **0x03 → baked free-play `eeprom.bin`**; others verbatim), and
+   (c) clears `mirror_SB_MDST=0`. Synchronous, reply ready same frame.
+
+Reuses all reply data unchanged; only the descriptor walk (~50–80 lines) is new.
+Verify (impl task): (1) no game code *blocks on* the real maple-end IRQ (the
+poll-based `FUN_8c03c2c6` is IRQ-independent; ISTNRM/ISTERR refs are the general
+Holly dispatcher) — if any does, fallback = let the real DMA run + overwrite the
+recv buffer next frame; (2) re-test whether the forced I/O-check patch #19 is
+still needed once valid enumeration is returned.
+
+### Reproduction
+
+```sh
+scripts/ghidra/run.sh script DisasmRange.java 0x8c03c2c6 0x8c03c4a2 2>&1 | grep -E 'java> 8c03c3(08|0a|0e|d6|e2)'
+scripts/ghidra/run.sh script ListPoolWords.java 0x005f6c00 0x005f6c20 2>&1 | grep POOLWORD   # only live base = 8c030fec
+grep -oE 'MDODMA enter[^ ]* pc=[0-9a-f]+' capture-dc-mie.log | sort | uniq -c | sort -rn | head -3   # 16283 pc=8c03c3d6
+python3 - <<'PY'
+b=open('tools/boot.bin','rb').read(); base=0x8c020000
+w32=lambda va:int.from_bytes(b[va-base:va-base+4],'little'); w16=lambda va:int.from_bytes(b[va-base:va-base+2],'little')
+assert w32(0x8c030fec)==0xa05f6c00 and w16(0x8c03c42a)==0x10f4 and w32(0x8c080e88)==0xa05f6c10
+assert 0xa05f6c00+0x18==0xa05f6c18 and 0xa05f6c00+0x04==0xa05f6c04
+assert w32(0x8c02ed6c)==0x8c03c2c6 and w32(0x8c02ee88)==0x8c03c2c6
+print("OK: desc+0x18=SB_MDST, desc+0x04=SB_MDSTAR, SB_MDTSEL=0, both slots->FUN_8c03c2c6")
+PY
+```
+
+## Task 15b — the sub-0x33 input-poll gate PINNED + M4 fix spec (DIAGNOSIS)
+
+**The Start button does nothing because the game never issues the per-frame JVS
+digital-input poll (MIE sub-0x33). Gate = the config-time JVS enumeration
+(gate 1), not the EEPROM (gate 2).** Root flag: JVS-node-count
+`[0x8c1ca474] = 0` on DC. Full report + reproduction:
+`.superpowers/sdd/task-15b-report.md`.
+
+### The refined smoking gun: sub-0x31 vs sub-0x33 (not "stalled")
+
+The steady per-frame poll IS running on DC — it just polls the wrong device
+class. MIE-sub distribution:
+
+| sub | Naomi `capture-attract.log` | DC `capture-dc-mie.log` | meaning |
+|---|---|---|---|
+| **0x33** | **69,982** | **0** | digital inputs from an enumerated JVS board |
+| **0x31** | 6 | **16,283** | MIE on-board / direct read (no JVS board) |
+
+Start = JVS **digital word** bit `0x8000` at `BTN_OFF=0x20`, carried only by a
+sub-0x33/0x15 reply. sub-0x31 (direct/DIP class) never carries it. (Task-15's
+trace logs only subs 0x33/0x15/0x03/0x0b, so the sub-0x31 steady poll is real but
+invisible to it — why the user "sees no input sub.")
+
+### The gate flag + branch (static, boot.bin)
+
+Node-count `[0x8c1ca474]` is written in **one** function, `FUN_8c082fd8` (the
+config-time JVS-scan commit; `FindRefsTo` = 1 writer):
+
+```
+8c083112  bsr 0x8c082bc4       ; FUN_8c082bc4 = JVS bus probe -> node count (x3 tries)
+8c083124  cmp/ge r10(=1),r13   ; found >=1 node?
+8c083126  bt/s 0x8c08312e      ;  yes -> node-count := r13     (Naomi)
+8c08312c  _mov.l r14,@r4       ;  no  -> node-count := r14 = 0  (DC)  <-- GATE
+   ; r4 = 0x8c1ca474
+```
+
+`FUN_8c082bc4` (probe) and `FUN_8c082aa4` (per-node builder) are called only from
+`FUN_8c082fd8`; `FUN_8c082fd8` + config maple/MIE init `FUN_8c080d18` are called
+from boot init `FUN_8c04ae50` (`0x8c04af76` / `0x8c04ae62`). All config-time.
+
+### Why the probe reads garbage: the config maple path is still UNSERVED on DC
+
+The scan drives raw maple by **absolute** literal (Task 14f mirrored only the
+*runtime* base pool `0x8c030fec`, not these):
+
+| literal | value | reg |
+|---|---|---|
+| `0x8c080e8c` | `0xa05f6c04` | SB_MDSTAR |
+| `0x8c080e88` | `0xa05f6c10` | SB_MDTSEL |
+| `0x8c080e74` | `0xa05f6c14` | SB_MDEN |
+| `0x8c080e90` | `0xa05f6c18` | SB_MDST (spin @`0x8c080da4`/`e14`) |
+| `0x8c080a00` | `0xa05f6c14` | SB_MDEN (FUN_8c0809b2; descriptors RAM `0x8c1ca1a0`; spin @`0x8c080a1c`) |
+
+→ config DMA hits real DC maple → no MIE responder → probe 0 → node-count 0.
+
+### specs `[0x8c0d541c]=1` corroborates but does NOT gate input
+
+Spec-compute (`FUN_8c04ae50` `0x8c04b01c` `tst r11,r11`, r11=node-count) sets
+specs=1 exactly when node-count==0 — so `IOCHK specs=1` confirms node-count=0.
+But `FindRefsTo 0x8c0d541c` → **sole reader** `FUN_8c07a22a` @`0x8c07a264` = the
+error-**screen** gate Task 14c forced (`sett` @`0x8c07a266`). 14c hid the screen;
+node-count=0 still disabled sub-0x33. The runtime engine (`0x8c030xxx`) reads
+node-count *indirectly* (input-init registers a JVS-board slot in the engine's
+24-slot table only when nodes>0); 0 nodes → no JVS-board slot → sub-0x31 only.
+
+### (1) vs (2): it is (1)
+
+EEPROM free-play is already delivered on DC (`EE deliver coin09=0x1a`) and the
+16× sub-0x0b re-init writes are ACKed — yet sub-0x33 stays 0. If EEPROM (2) gated
+input, correct EEPROM would have re-enabled it. node-count (JVS scan, config
+maple — the one thing still unserved) is the gate. The EEPROM re-init is a
+separate cosmetic "9 credits" issue.
+
+### M4 fix — make the config enum succeed. Complexity: MEDIUM (parallels 14f)
+
+1. **Mirror the 5 config maple literals** above → `MAPLE_MIRROR` (reuse 14f's
+   `0xacfd3000`, offset-preserving: MDSTAR→+0x04, MDTSEL→+0x10, MDEN→+0x14,
+   MDST→+0x18). Stops the config DMA hitting real DC maple. (RAM-descriptor
+   literals `0x8c080a04/08/fc`, `0x8c0809ec/f0` left alone.)
+2. **Wrapper-hook `FUN_8c0809b2`** (raw JVS scan; trigger + spin @`0x8c080a1c`) —
+   like `shim_maple_steady`: after the real fn triggers into the mirror, write a
+   **valid JVS enumeration response** into the config recv buffer(s)
+   (`0x8c1ca1a0/a8/ac`, `0x8c0d5ee8`, `0x8c0d7ed8`): 1 board, ≥2 players, ≥8
+   switches, so `FUN_8c082bc4` counts ≥1 and the board struct `[0x8c1ca47c]`
+   passes spec-compute (`byte0≥2, byte1≥8, byte0x97≥2, byte0x98≥0`). Hook site:
+   repoint `FUN_8c080d18`'s `bsr FUN_8c0809b2` @`0x8c080e9e` through the wrapper.
+3. **Result:** node-count≥1 → specs=0 → JVS-board slot registered → engine emits
+   **sub-0x33** → the existing 14f `shim_maple_steady` case 0x33 →`jvs_digital`→
+   `maple.c` GetCondition delivers live input. 14c specs-force becomes redundant
+   (keep as belt). Extra effort vs 14f: 5 absolute repoints + synthesizing the
+   correct JVS feature-response bytes (capture a working-Naomi config-enum reply,
+   or RE `FUN_8c082bc4`/`FUN_8c082aa4`).
+   **Fallback (riskier, rejected as primary):** force node-count nonzero + fake
+   board struct — a fake board with no responder can hang the runtime JVS
+   handshake the engine then runs against it.
+
+**Runtime delivery once enabled — confirmed OK:** `shim_maple_steady` sub-0x33 →
+`jvs_digital` → GetCondition (port A, real regs) → `dc_to_jvs` bit3→Start
+`0x8000` → `BTN_OFF=0x20` is correct by construction (Task 15 §1); only the poll
+being emitted is missing.
+
+## Task 15c — service the CONFIG-TIME JVS enumeration → node-count≥1 → sub-0x33 (M4 UNBLOCK)
+
+**DONE. node-count [0x8c1ca474] flips 0→≥1, sub-0x33 now fires per-frame, input
+poll enabled.** Full report: `.superpowers/sdd/task-15c-report.md`.
+
+### The Task-15b premise was WRONG — re-RE corrects it (cite disasm)
+
+15b/the task brief said the config JVS scan drives raw maple by **absolute
+literals** in `FUN_8c080d18`/`FUN_8c0809b2` that 14f didn't mirror → real DC maple
+→ 0 nodes, and the fix = mirror those + hook `FUN_8c0809b2`. **Disassembly refutes
+this:**
+
+1. **The node-count probe uses the shared, already-mirrored engine — not the Z80
+   path.** The gate writer `FUN_8c082fd8` (`0x8c08312c`) calls probe `FUN_8c082bc4`
+   (`0x8c083112`), parser `FUN_8c082c98` (`0x8c08315a`) and per-node builder
+   `FUN_8c082aa4` (`0x8c0831b8`). All three transmit via `FUN_8c081562` (pool
+   `0x8c082c8c`/`bb0`/`d10`/`e4c`) and receive via `FUN_8c081626` (pool
+   `0x8c082c94`/`bb8`/`d18`), which funnel through `FUN_8c03000c` (queue-add) /
+   `FUN_8c02f158` (slot index) on the **shared maple engine struct** `*0x8c03004c =
+   0x8c0e8410` — the **SAME** struct the runtime engine `FUN_8c03c2c6` uses (`base =
+   *0x8c0e8410`), whose maple base `[struct+0x10f4]=0xa05f6c00` is **already mirrored
+   by patch #16**. So the config DMA never hit real DC maple; mirroring the
+   `0x8c080e74..90` / `0x8c080a00`/`b40`/`be0`/`d0c` literals does nothing for the
+   gate. `ListPoolWords 0x5f6c00 0x5f6c20`: those 8 literals ref only
+   `FUN_8c080d18`/`FUN_8c0809b2` = the **dead Z80 firmware upload** (Task 14b was
+   right — its result vars are write-only).
+2. **node-count was empirically still 0 WITH the 14f mirror.** `capture-14f.log`
+   (20-patch) — all **61 `IOCHK specs=1`** (`specs=[0x8c0d541c]`, which spec-compute
+   sets to 1 exactly when node-count==0). So the mirror alone did not open the gate.
+3. **Why: cooperative-multitask completion, not served at probe read time.** The
+   config primitives queue a frame (`FUN_8c03000c`) and the probe reads the reply
+   right after, with only `FUN_8c082a96` → `FUN_8c0342c0` (a scheduler yield)
+   between TX and RX; the frame is flushed by the async engine (`FUN_8c03c2c6` =
+   `shim_maple_steady`) across the yield, which on DC does not deliver the reply at
+   the synchronous read → probe reads empty → 0 nodes.
+
+### The fix (parallels 14f, at the CONFIG layer): 7 ptr repoints + 2 shim routines
+
+`build_patch_table.py` repoints the **7 pool words** holding `FUN_8c081562` (TX, 4)
+and `FUN_8c081626` (RX, 3) — used **only** by the enum cluster `0x8c082aa4..e4c`
+(boot.bin scan: no other holders) — to `shim_cfg_tx` / `shim_cfg_rx`
+(`shims/src/main.c`). `shim_cfg_tx` latches the JVS command (payload[0]);
+`shim_cfg_rx` replays the **captured Naomi** reply at `+0x15` (the real
+`FUN_8c081626` returns `*(slot+8)+0x15`; probe/parser read `reply[k]=frame[0x15+k]`):
+
+| JVS cmd | blob | probe/validator check → effect |
+|---|---|---|
+| F1 (set-addr) | `mie_jvsf1` | `reply[3]=0,reply[8]=1,reply[4]=7,reply[1]=0x8e` → probe `FUN_8c082bc4` returns 1 → **node-count=1** |
+| 0x10..0x14 | `mie_jvs10..14` | parser `FUN_8c082c98` fills board struct; `mie_jvs14` = 2 players / 13 switches / 2 coin / 8 analog → **spec byte0≥2, byte1≥8 → specs=0** |
+| default (0x21 etc.) | `mie_jvsf1` | validator `FUN_8c082654` passes for node 1 (`reply[2]=0x01==node`); result doesn't gate node-count/spec |
+
+All blobs have `[0x17]=0x01` so `reply[2]==node(1)`. This reproduces the EXACT
+Naomi 1-board enumeration through the game's own probe/parse/register path (not a
+fake struct — the 15b fallback's "no responder hangs the runtime handshake" risk
+does not apply: 14f's `shim_maple_steady` IS the runtime sub-0x33/0x15/0x17
+responder). Patch total 20→27. 14c specs-force (patch #19) is now redundant
+(specs=0 naturally) but harmless — left in place.
+
+### Runtime evidence (DC-mode interpreter on `build/cleo.gdi`, `capture-15c.log`)
+
+DECISIVE, vs `capture-14f.log` baseline:
+- **`IOCHK specs=00000000`** all 61 snapshots (was `specs=1`) → **node-count
+  [0x8c1ca474] ≥ 1. GATE OPEN.**
+- **Config enum serviced by the shim:** serial `CFG enum cmd=` f1/10/11/12/13/14
+  each ×1 (probe + parser got the captured replies).
+- **sub-0x33 NOW FIRES:** 485 shim GetCondition DMAs (`MDODMA cmd=09 reci=20
+  pc=8cfc09ba`) = per-frame input poll running (was **0×** sub-0x33 in 14f/15b);
+  serial `IN raw=0000ffff jvs=00000000 sub=00000033` (idle controller). The engine
+  switched from sub-0x31 (no-board fallback) to sub-0x33 (JVS-board digital poll).
+- Clean: **0** `SHIMERR`/`shim_die`; 35 `PCSAMPLE` regions (alive, running); cart
+  streaming intact (M2/M3 not regressed). `make -C shims test` GREEN; all 27
+  old-byte asserts pass.
+
+⇒ **Input poll is enabled (M4 unblocked).** Delivery is correct by construction
+(14f/Task 15 §1): sub-0x33 → `jvs_digital` → GetCondition (port A) → `dc_to_jvs`
+bit3→Start `0x8000` → `BTN_OFF=0x20`. Final on-screen confirmation (press Start →
+game starts) is the **user's** test on a dynarec run.
+
+### Reproduction
+
+```sh
+source tools/kos/environ.sh && make -C shims && python3 scripts/build_patch_table.py \
+  && make -C loader && python3 scripts/make_gdi.py         # 27 patches, asserts pass
+BIN=tools/flycast-src/build/Flycast.app/Contents/MacOS/Flycast
+FLYCAST_CARTLOG=capture-15c.log "$BIN" -config config:rend.vsync=no \
+  -config config:Dynarec.Enabled=no -config config:Debug.SerialConsoleEnabled=yes \
+  build/cleo.gdi > capture-15c.stdout.log 2>&1 &                # kill after ~120 s
+grep -a IOCHK capture-15c.log | grep -oE 'specs=[0-9a-f]+' | sort | uniq -c   # 61 specs=0
+grep -a 'MDODMA cmd=09' capture-15c.log | wc -l                # sub-0x33 GetConditions
+grep -a 'CFG enum' capture-15c.stdout.log                      # f1/10..14 serviced
+# static: probe/parser/builder use FUN_8c081562/081626 on shared struct *0x8c0e8410
+python3 - <<'PY'
+b=open('tools/boot.bin','rb').read(); base=0x8c020000
+w32=lambda va:int.from_bytes(b[va-base:va-base+4],'little')
+assert w32(0x8c03004c)==0x8c0e8410                     # config TX shares runtime engine struct
+for w in (0x8c082c8c,0x8c082bb0,0x8c082d10,0x8c082e4c): assert w32(w)==0x8c081562  # TX pool words
+for w in (0x8c082c94,0x8c082bb8,0x8c082d18):           assert w32(w)==0x8c081626  # RX pool words
+print("OK: config enum uses FUN_8c081562/081626 on shared (already-mirrored) engine")
+PY
+```

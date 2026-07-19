@@ -6,3 +6,10 @@ bios/
 .venv/
 /capture-*.log
 __pycache__/
+build/
+shims/data/
+loader/*.o
+loader/*.elf
+
+# SDD scratch (briefs, reports, review packages, progress ledger)
+.superpowers/

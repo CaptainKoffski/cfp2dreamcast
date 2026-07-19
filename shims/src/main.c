@@ -1,0 +1,378 @@
+#include "shim_iface.h"
+typedef unsigned int u32;
+typedef unsigned char u8;
+void shim_die(u32, u32, u32);
+void *xmemcpy(void *, const void *, u32);
+/* shim_cart_service lives in src/cart.c (Task 10) */
+
+unsigned short maple_getcond(unsigned int port);   /* DC Maple GetCondition: port A=0, B=1 */
+unsigned short dc_to_jvs(unsigned short);
+unsigned char  jvs_checksum(const unsigned char *);
+extern const unsigned char jvs_hasdata[];               /* src/jvs.c */
+void scif_puts(const char *); void scif_puthex(unsigned int); void scif_putc(char);  /* src/scif.c */
+
+/* MIE reply templates + free-play EEPROM, embedded at build (Makefile xxd rules;
+ * gitignored source blobs). Verbatim ACKs replayed as captured (§input-ABI 4a). */
+extern const unsigned char eeprom_img[];
+extern const unsigned char mie_sub01[]; extern const u32 mie_sub01_len;
+extern const unsigned char mie_sub13[]; extern const u32 mie_sub13_len;
+extern const unsigned char mie_sub17[]; extern const u32 mie_sub17_len;
+extern const unsigned char mie_sub27[]; extern const u32 mie_sub27_len;
+extern const unsigned char mie_sub31[]; extern const u32 mie_sub31_len;
+extern const unsigned char mie_subff[]; extern const u32 mie_subff_len;
+
+/* JVS I/O-board enumeration replies (scripts/extract_jvs_replies.py). Keyed on
+ * the JVS command the game transmits; the matching one is replayed on the
+ * following receive so the board passes enumeration (M3). */
+extern const unsigned char mie_jvsf1[]; extern const u32 mie_jvsf1_len;  /* F1 set-addr */
+extern const unsigned char mie_jvs10[]; extern const u32 mie_jvs10_len;  /* 10 board ID */
+extern const unsigned char mie_jvs11[]; extern const u32 mie_jvs11_len;  /* 11 cmd rev  */
+extern const unsigned char mie_jvs12[]; extern const u32 mie_jvs12_len;  /* 12 JVS rev  */
+extern const unsigned char mie_jvs13[]; extern const u32 mie_jvs13_len;  /* 13 comm rev */
+extern const unsigned char mie_jvs14[]; extern const u32 mie_jvs14_len;  /* 14 features */
+
+/* Last JVS command transmitted (sub 0x17/0x19/0x21) -> selects the enumeration
+ * reply the next receive (sub 0x15) returns. 0xff = "not an enumeration command"
+ * (digital read). Initialised non-zero so it lands in .data (the loader copies
+ * .data but does NOT zero .bss). */
+static u8 pending_jvs = 0xff;
+
+/* Task 15c: last JVS command the CONFIG-TIME enumeration transmitted through
+ * FUN_8c081562 -> selects the reply FUN_8c081626 returns. .data (non-zero). */
+static u8 pending_cfg = 0xf1;
+static u8 cfg_seen    = 0;               /* one-shot SCIF log bitmap of served cmds */
+
+/* Task 15 instrumentation state. ALL forced non-zero so they land in .data
+ * (the loader copies .data but does NOT zero .bss -- see pending_jvs above; a
+ * .bss static would boot with garbage and break the rate-limit / one-shot). */
+static unsigned int in_last = 0xffffffffu;   /* last (raw<<16 | jvs); sentinel forces first log */
+static unsigned int in_hb   = 1;             /* sub-0x33/0x15 poll heartbeat counter */
+static u8 ee_logged = 1;                     /* 1 = still need to log the sub-0x03 EEPROM deliver */
+static u8 wr_left   = 32;                     /* remaining sub-0x0b (EEPROM write / re-init) log budget */
+
+#define SB_MDST (*(volatile u32 *)0xa05f6c18)
+#define GW(a)   (*(volatile u32 *)((a) | 0x80000000u))  /* cached word: game control state */
+#define GB(a)   (*(volatile u8  *)((a) | 0x80000000u))  /* cached byte */
+
+/* Live DC GetCondition -> JVS digital-read has-data frame at recvaddr.
+ * Task 15: rate-limited SCIF trace ("IN raw=<getcond> jvs=<jvsword> sub=<sub>")
+ * on CHANGE or every 256th poll, so a user press is visible on serial without
+ * flooding the ~60Hz poll. raw=0000ffff idle = controller all-released or no pad;
+ * a Start press flips raw (bit3 low) and yields jvs=00008000. */
+static void jvs_digital(u32 sub, void *rx) {
+    unsigned short raw  = maple_getcond(0);              /* port A -> P1 */
+    unsigned short j    = dc_to_jvs(raw);
+    unsigned short raw2 = maple_getcond(1);             /* port B -> P2 (0xffff=no pad -> idle) */
+    unsigned short j2   = dc_to_jvs(raw2);
+    unsigned int   key  = ((unsigned int)raw << 16) | raw2;   /* log on either pad's change */
+    if (key != in_last || (++in_hb & 0xffu) == 0u) {
+        in_last = key;
+        scif_puts("IN raw=");   scif_puthex(raw);
+        scif_puts(" jvs=");     scif_puthex(j);
+        scif_puts(" p2raw=");   scif_puthex(raw2);
+        scif_puts(" p2jvs=");   scif_puthex(j2);
+        scif_puts(" sub=");     scif_puthex(sub);
+        scif_puts("\n");
+    }
+    u8 f[64];
+    xmemcpy(f, jvs_hasdata, 64);
+    f[0x20] = (u8)(j >> 8);                 /* BTN_OFF: P1 word big-endian (hi) */
+    f[0x21] = (u8)(j & 0xff);              /*          (lo; this game: 0)      */
+    f[0x22] = (u8)(j2 >> 8);               /* P2 word big-endian (hi) -- emitter maple_jvs.cpp:2237/2241 */
+    f[0x23] = (u8)(j2 & 0xff);            /*          (lo)                    */
+    f[0x3a] = jvs_checksum(f);              /* recompute JVS checksum @0x3a (now covers P2 bytes) */
+    xmemcpy(rx, f, 64);
+}
+
+/* Shared reply synthesizer for both MIE sites. recvaddr is a game main-RAM phys
+ * address; the reply is written UNCACHED (P2) because it stands in for a Maple
+ * DMA-to-RAM write -- the game's reply reader treats recvaddr as a DMA buffer
+ * (reads it uncached / post-invalidate), so an uncached store is what it sees. */
+static void maple_reply(u32 sub, u32 recvaddr, u32 frame) {
+    void *rx = (void *)P2ADDR(recvaddr);
+    switch (sub) {
+    case 0x33:                              /* steady per-frame poll: always live */
+        jvs_digital(0x33, rx);
+        break;
+    case 0x15:                              /* boot receive: enumeration reply or live */
+        switch (pending_jvs) {              /* keyed on the last transmitted JVS cmd */
+        case 0xf1: xmemcpy(rx, mie_jvsf1, mie_jvsf1_len); break;
+        case 0x10: xmemcpy(rx, mie_jvs10, mie_jvs10_len); break;
+        case 0x11: xmemcpy(rx, mie_jvs11, mie_jvs11_len); break;
+        case 0x12: xmemcpy(rx, mie_jvs12, mie_jvs12_len); break;
+        case 0x13: xmemcpy(rx, mie_jvs13, mie_jvs13_len); break;
+        case 0x14: xmemcpy(rx, mie_jvs14, mie_jvs14_len); break;
+        default:   jvs_digital(0x15, rx);   break;  /* digital read (0x20/0x21/0x22/none) */
+        }
+        break;
+    case 0x03: {                            /* EEPROM read: 1-word hdr + 128 B @ EE_OFF=4 */
+        u8 hdr[4] = { 0x87, 0x00, 0x20, 0x20 };   /* 0x20 words */
+        xmemcpy(rx, hdr, 4);
+        xmemcpy((u8 *)rx + 4, eeprom_img, 128);
+        if (ee_logged) {                    /* Task 15: confirm free-play EEPROM is delivered (once) */
+            ee_logged = 0;
+            scif_puts("EE deliver rcv="); scif_puthex(recvaddr);
+            scif_puts(" coin09=");   scif_puthex(eeprom_img[9]);   /* 0x1a = FREE PLAY */
+            scif_puts(" coin27=");   scif_puthex(eeprom_img[27]);
+            scif_puts("\n");
+        }
+        break;
+    }
+    case 0x01: xmemcpy(rx, mie_sub01, mie_sub01_len); break;   /* EEPROM ready ACK */
+    case 0x13: xmemcpy(rx, mie_sub13, mie_sub13_len); break;   /* store repeat req ACK */
+    case 0x17: case 0x21:
+               xmemcpy(rx, mie_sub17, mie_sub17_len); break;   /* transmit ACK */
+    case 0x27: xmemcpy(rx, mie_sub27, mie_sub27_len); break;   /* kick-scan ACK */
+    case 0x31: xmemcpy(rx, mie_sub31, mie_sub31_len); break;   /* DIP switches */
+    case 0xff: xmemcpy(rx, mie_subff, mie_subff_len); break;   /* broadcast/reset ACK */
+    case 0x0b: {                            /* EEPROM write: MIE sub-0x0b. Payload (Flycast
+                                               maple_jvs.cpp:1888-1896, dma_buffer_in=frame+0xc):
+                                               [+0x0d]=byte addr, [+0x0e]=size, [+0x10..]=data. */
+        u32 ee_addr = GB(frame + 0x0d);
+        u32 ee_size = GB(frame + 0x0e);
+        u8 ack[8] = { 0x87, 0x00, 0x20, 0x01, 0x0c, 0x00, 0x8e, 0x00 };
+        xmemcpy(rx, ack, 8);
+        if (wr_left) {                      /* Task 16: decode the re-init payload (addr/size/data) */
+            wr_left--;
+            scif_puts("EE WR a="); scif_puthex(ee_addr);
+            scif_puts(" n=");     scif_puthex(ee_size);
+            scif_puts(" d=");
+            for (u32 k = 0; k < ee_size && k < 32u; k++) {
+                u8 b = GB(frame + 0x10 + k);
+                scif_putc("0123456789abcdef"[b >> 4]);
+                scif_putc("0123456789abcdef"[b & 15]);
+            }
+            scif_puts("\n");
+        }
+        break;
+    }
+    default:   shim_die(3, sub, recvaddr);
+    }
+}
+
+/* ponytail: currently UNHOOKED (Task 14d). pool[0x8c027618] feeds the generic
+ * dispatcher FUN_8c027584 (160+ callers), not an MIE-only site, so hooking it made
+ * the shim shim_die on the first post-check NON-MIE frame (cmd 0xf6, recv 0xc8000000).
+ * Kept as the documented boot-MIE ABI + re-hook target once a MIE-only call site is
+ * isolated. See scripts/build_patch_table.py §Task 14d + phase4-conversion.md §Task 14d.
+ *
+ * Boot MIE builder (0x8c0315ce, reached via fn-ptr pool[0x8c027618]). Sub +
+ * recvaddr are read from the command block *0x8c0e6400 (word3 low byte = sub,
+ * word1 = recvaddr). Completion: leave the Maple DMA observably done, i.e.
+ * SB_MDST reads 0. [KB §input-ABI site A -- boot completion is M4-gated.]
+ *
+ * arg0 = r4 = the transmit payload block the dispatcher passes to the builder
+ * (FUN_8c027584 @0x8c0275ee, jsr @r3 with r4 = pool 0x8c0e62c8 / 0x8c0a27f4).
+ * On a transmit (sub 0x17/0x19/0x21) the JVS command byte lives at arg0+4
+ * (descriptor word5 byte0 -> maple frame byte 12 -> Flycast dma_buffer_in[8],
+ * maple_jvs.cpp:1780); we latch it so the following receive (sub 0x15) returns
+ * the matching enumeration reply. sub 0x27 (transmit-with-repeat) is only ever
+ * the digital-read setup -> latch "not enumeration". */
+void shim_maple_boot(u32 arg0) {
+    u32 cmdblk = GW(0x8c0e6400);
+    u32 sub    = GB(cmdblk + 0x0c);
+    u32 recv   = GW(cmdblk + 0x04);
+    switch (sub) {
+    case 0x17: case 0x19: case 0x21: pending_jvs = GB(arg0 + 4); break;
+    case 0x27:                       pending_jvs = 0xff;         break;
+    }
+    maple_reply(sub, recv, cmdblk);
+    SB_MDST = 0;
+}
+
+/* Steady per-frame MIE builder (FUN_8c03c2c6, reached via pool[0x8c02ed6c]).
+ * Always sub 0x33 (real GetCondition every frame). Reproduces the game's own
+ * recvaddr computation from the input double buffer, writes it to descriptor
+ * word1, then clears the [desc+0x18] pending bit so the caller sees "done".
+ * Caller treats return >= 0 as OK. [KB §input-ABI site B -- M4-gated.] */
+int shim_maple_entry(void) {
+    u32 base = GW(0x8c0e8410);
+    if (GW(base + 0x0fc0) != 1) return -3;         /* input subsystem not ready */
+    u32 raw  = GW(base + 0x10b8);                  /* double-buffer index */
+    u32 recv = GW(base + 0x10a8 + (raw & 1) * 4) & 0x0fffffff;  /* FUN_8c030fba: P1->phys */
+    u32 desc = GW(base + 0x10f4);
+    GW(desc + 0x04) = recv;                        /* descriptor word1 = recvaddr */
+    GW(base + 0x10b8) = raw ^ 1u;                  /* toggle index (as the game does) */
+    maple_reply(0x33, recv, 0);                     /* 0x33 only: no EEPROM write payload */
+    GW(desc + 0x18) &= ~1u;                        /* clear pending bit0 = completion */
+    return 0;
+}
+
+/* Task 14f: async-Maple MIE service -- the input+EEPROM transport (M3/M4).
+ *
+ * The steady engine FUN_8c03c2c6 (0x8c03c2c6-0x8c03c4a1) is reached via two
+ * fn-ptr slots (pool[0x8c02ed6c] Mode A, pool[0x8c02ee88] Mode B); both are
+ * repointed here. The sole live maple-base pool word 0x8c030fec (0xa05f6c00) is
+ * repointed to MAPLE_MIRROR, so the engine's SB_MDSTAR/MDEN/MDST accesses hit
+ * shim RAM, not real maple regs -> the game path triggers NO real controller DMA.
+ *
+ * Per-frame ordering, verified against DisasmRange 0x8c03c2c6-0x8c03c4a2:
+ *   0x8c03c30a  read [desc+0x18]=mirror_SB_MDST; bit0 set (busy) -> return -1,
+ *               bit0 clear -> proceed (0x8c03c30e).
+ *   0x8c03c396  bsr FUN_8c03c1c2  -- the per-frame pump/state machine (MUST run;
+ *               14b: replacing the builder skips it -> 0 cart reads).
+ *   0x8c03c3d6  mov.l r0,@r8      -- mirror_SB_MDSTAR := phys(descriptor list).
+ *   0x8c03c3e2  mov.l r12,@(0x18,r2) -- mirror_SB_MDST := 1 (trigger); returns 0.
+ * So we call the REAL engine first (pump + build + trigger into the mirror), then
+ * -- if it triggered (mirror_SB_MDST bit0 set) -- walk the descriptor list it just
+ * programmed, synthesize each MIE reply into its recv addr, and clear
+ * mirror_SB_MDST so next frame's cross-frame poll (0x8c03c30a) sees completion.
+ * The reply is ready the same frame; the pump reads it on the following frame,
+ * exactly as the real async DMA-to-recv-buffer would land it (double-buffered
+ * recv addrs alternate 0x0c0fd8e0/0x0c1038e0 -- taken live from the descriptor).
+ *
+ * Descriptor list = maple command list (Flycast maple_DoDma, maple_if.cpp:184-311):
+ *   +0x00 header_1 : bit31=last, [7:0]=plen-1, [10:8]=maple_op (0=MP_Start), [17:16]=bus
+ *   +0x04 header_2 : recv addr (& 0x1fffffe0)
+ *   +0x08 frame_hdr: [7:0]=cmd (0x86=MIE), [15:8]=reci (0x20=MIE)
+ *   +0x0c payload[0] low byte = subcommand
+ *   +0x14 frame byte 12 = JVS command (transmit subs; = boot builder arg0+4)
+ *   next frame at +(2+plen)*4. Reuses maple_reply + blobs unchanged. */
+extern int shim_maple_steady(void);   /* both fn-ptr slots point here (ptr patches) */
+#define MMIR(off) (*(volatile u32 *)P2ADDR(MAPLE_MIRROR + (off)))   /* mirror reg (uncached, game view) */
+
+int shim_maple_steady(void) {
+    /* Task18 (M5, SUPERSEDES Task16's coin-byte pin): force FREE PLAY every frame.
+     * PROVEN by screenshot (task-18-report): the free-play flag the credit display
+     * AND the credit-decrement read is the settings-struct field at +0xc =
+     * 0x8c1c9790 (base 0x8c1c9784 + 0xc), NOT the coin byte at +0x10 (0x8c1c9794)
+     * Task16 pinned. The decrement gate FUN_8c081efc @0x8c081f48-52 skips the
+     * `sub` (credit -= cost) when *(+0xc)==1; the attract/title credit display
+     * shows "FREE PLAY" instead of "CREDIT(S) N" on the same flag. On DC the game
+     * re-derives coin-mode at settings-init so +0xc lands 0 (coin mode); the coin
+     * byte +0x10=0x1a alone does NOT flip it (the free-play decision is cached at
+     * init, not re-read from the coin byte). shim_maple_steady runs once per frame
+     * in the scene loop, so re-stamping +0xc=1 holds free-play. build_patch_table
+     * asserts pool 0x8c081d14==0x8c1c9784 so a ROM shift fails the build. */
+    *(volatile u32 *)0x8c1c9790 = 1;               /* settings+0xc = FREE PLAY */
+    int rc = ((int (*)(void))0x8c03c2c6)();        /* real engine: pump + build + trigger into mirror */
+    if (MMIR(0x18) & 1u) {                          /* mirror_SB_MDST bit0 = a DMA was triggered this frame */
+        u32 addr = MMIR(0x04) & 0x1fffffe0u;        /* mirror_SB_MDSTAR = phys(descriptor list) */
+        u32 i;
+        for (i = 0; i < 32u; i++) {                 /* walk cmd list (<=24 slots); cap guards a runaway list */
+            u32 h1   = GW(addr + 0x00);             /* transfer control (cached: pump wrote it cached, same core) */
+            u32 rcv  = GW(addr + 0x04) & 0x1fffffe0u;   /* recv addr (phys) */
+            u32 plen = (h1 & 0xffu) + 1u;
+            if (((h1 >> 8) & 7u) == 0u) {           /* MP_Start command frame */
+                u32 fh = GW(addr + 0x08);           /* frame header */
+                if ((fh & 0xffu) == 0x86u && ((fh >> 8) & 0xffu) == 0x20u) {  /* MIE: cmd 0x86 / reci 0x20 */
+                    u32 sub = GB(addr + 0x0c);      /* payload[0] low byte = subcommand */
+                    switch (sub) {                  /* transmit subs: latch JVS cmd (frame byte 12 = desc+0x14) */
+                    case 0x17: case 0x19: case 0x21: pending_jvs = GB(addr + 0x14); break;
+                    case 0x27:                       pending_jvs = 0xff;            break;
+                    }
+                    maple_reply(sub, rcv, addr);    /* synthesize reply; addr=frame base (EEPROM write payload) */
+                }
+            }
+            if (h1 >> 31) break;                    /* last-transfer bit -> end of list */
+            addr += (2u + plen) * 4u;
+        }
+        MMIR(0x18) = 0;                             /* completion: next frame's poll sees SB_MDST bit0 clear */
+    }
+    return rc;
+}
+
+/* Task 15c: service the CONFIG-TIME JVS enumeration so node-count [0x8c1ca474]>=1
+ * and the board struct [0x8c1ca47c] populates -> the runtime engine registers a
+ * JVS-board slot and emits sub-0x33 (the per-frame input poll 14f already routes
+ * to jvs_digital). This UNBLOCKS input (M4).
+ *
+ * ROOT CAUSE (re-RE'd; corrects the Task-15b/task-brief premise). The config JVS
+ * probe FUN_8c082bc4 does NOT drive raw maple by absolute literal, and it does
+ * NOT use the Z80-firmware-upload path FUN_8c080d18/FUN_8c0809b2 (that path is the
+ * dead-result Z80 upload -- Task 14b was right; its result vars are write-only).
+ * The probe/parser/per-node-builder (FUN_8c082bc4 / FUN_8c082c98 / FUN_8c082aa4,
+ * all reached from the node-count commit FUN_8c082fd8) transmit via FUN_8c081562
+ * and receive via FUN_8c081626, which funnel through FUN_8c03000c / FUN_8c02f158
+ * on the SHARED maple engine struct *0x8c0e8410 -- the SAME struct the runtime
+ * engine FUN_8c03c2c6 uses, whose base [struct+0x10f4]=0xa05f6c00 is ALREADY
+ * mirrored (patch #16). So the config DMA never hit real DC maple; mirroring more
+ * literals does nothing. Yet node-count stays 0 (capture-14f.log: all 61 IOCHK
+ * specs=1) because the config frames are queued (FUN_8c03000c) and only flushed by
+ * the async engine across a cooperative yield (FUN_8c082a96 -> FUN_8c0342c0) --
+ * which does not deliver the reply at the probe's synchronous read time on DC.
+ *
+ * FIX (parallels 14f -- hook the transport, synthesize the reply, at the CONFIG
+ * layer). build_patch_table repoints the 7 pool words that hold FUN_8c081562 (TX,
+ * 4 words) and FUN_8c081626 (RX, 3 words) -- used ONLY by the enum cluster
+ * 0x8c082aa4..0x8c082e4c (boot.bin scan) -- to these routines. shim_cfg_tx latches
+ * the JVS command (payload[0]); shim_cfg_rx returns the matching captured Naomi
+ * reply at +0x15 (FUN_8c081626 returns *(slot+8)+0x15; probe/parser read
+ * reply[k]=frame[0x15+k]). This reproduces the EXACT Naomi 1-board enumeration:
+ *   F1  -> mie_jvsf1 : reply[3]=0,reply[8]=1,reply[4]!=0,reply[1]=0x8e
+ *          => probe FUN_8c082bc4 returns 1 => node-count=1.
+ *   10..14 -> mie_jvs10..14 : parser FUN_8c082c98 fills the board struct; the
+ *          mie_jvs14 feature list (2 players / 13 switches / 2 coin / 8 analog)
+ *          satisfies spec-compute (byte0>=2, byte1>=8) => specs=0.
+ *   default (incl. cmd 0x21 from FUN_8c082aa4) -> mie_jvsf1 : validator
+ *          FUN_8c082654 passes for node 1 (reply[2]=0x01==node, reply[3]=0,
+ *          reply[8]=1, reply[4]!=0); its result does not gate node-count/spec.
+ * All blobs have [0x17]=0x01 so reply[2]==node(1). 14c specs-force (patch #19)
+ * becomes redundant (specs=0 naturally) but is harmless -- left in place. */
+int shim_cfg_tx(u32 node, u32 arg1, u32 len, u32 payload);   /* FUN_8c081562 replacement */
+const unsigned char *shim_cfg_rx(void);                      /* FUN_8c081626 replacement */
+
+int shim_cfg_tx(u32 node, u32 arg1, u32 len, u32 payload) {
+    (void)node; (void)arg1; (void)len;
+    pending_cfg = GB(payload);          /* payload[0] = JVS command byte */
+    return 0;                            /* callers ignore r0 */
+}
+
+const unsigned char *shim_cfg_rx(void) {
+    const unsigned char *b;
+    u8 bit;
+    switch (pending_cfg) {
+    case 0x10: b = mie_jvs10; bit = 0x01; break;
+    case 0x11: b = mie_jvs11; bit = 0x02; break;
+    case 0x12: b = mie_jvs12; bit = 0x04; break;
+    case 0x13: b = mie_jvs13; bit = 0x08; break;
+    case 0x14: b = mie_jvs14; bit = 0x10; break;
+    case 0xf1: b = mie_jvsf1; bit = 0x20; break;
+    default:   b = mie_jvsf1; bit = 0x40; break;   /* cmd 0x21 per-node builder etc. */
+    }
+    if (!(cfg_seen & bit)) {            /* one-shot serial trace per command */
+        cfg_seen |= bit;
+        scif_puts("CFG enum cmd="); scif_puthex(pending_cfg); scif_puts("\n");
+    }
+    return b + 0x15;                     /* reply base: game reads reply[k]=frame[0x15+k] */
+}
+
+/* Task 16 (M5): config-time EEPROM read for the settings validator FUN_8c080094.
+ *
+ * ROOT CAUSE of "9 CREDITS" (instrumented DC boot + Ghidra RE). The validator
+ * FUN_8c080094 reads the 93C46 via FUN_8c080f50 (hooked here), recomputes both
+ * system-section CRC copies, and on a double mismatch re-inits the system section
+ * to ROM coin-mode defaults (coin byte 0x00) via FUN_8c07ffee -> writes it back
+ * (the observed EE WR x16, coin=0x00), discarding our delivered free-play (0x1a).
+ * FUN_8c080f50 issues the read through the SHARED async engine (FUN_8c03000c queue
+ * / FUN_8c02f158 result / FUN_8c0342c0 flush) whose reply is delivered a-frame-
+ * later by shim_maple_steady -- AFTER the validator has already read its buffers.
+ * So on DC the validator always sees garbage -> both CRCs fail -> re-init. This is
+ * the SAME synchronous-vs-async config-read gap Task 15c fixed for JVS enum; the
+ * EEPROM read hits it too because it uses the raw engine funcs, not the FUN_8c081562
+ * /FUN_8c081626 wrappers 15c hooked. Naomi never showed this (0x 0x0b): real MIE
+ * delivers synchronously (KB §V-EEPROM).
+ *
+ * FIX (parallels 15c -- hook the config transport, synthesize the reply
+ * synchronously): replace FUN_8c080f50 with a direct fill of its three output
+ * buffers from the baked free-play image, so the validator sees valid free-play
+ * (both copies' CRC = 0x50cb) -> returns 0 (both valid), no re-init, no write.
+ * Buffer layout is from the FUN_8c080f50 disasm (pool words 0x8c08107c/1080/1084;
+ * validator pool 0x8c080184/0188): full 128 B at 0x8c1c954c, system copy1 (bytes
+ * 0..17) at 0x8c1c9528, system copy2 (bytes 18..35) at 0x8c1c953a. These are
+ * ordinary game-RAM work buffers read cached, so cached writes are coherent. The
+ * async transport is intentionally skipped (its late reply was the bug); the game
+ * section (bytes 36..127) is copied through verbatim, matching Naomi. build_patch_
+ * table asserts these buffer pool words so a ROM shift fails the build. */
+void shim_ee_read(void);
+static u8 eeread_logged = 1;
+void shim_ee_read(void) {
+    xmemcpy((void *)0x8c1c954c, eeprom_img, 128);      /* full 128-B image */
+    xmemcpy((void *)0x8c1c9528, eeprom_img, 18);       /* system copy1 (CRC+data) */
+    xmemcpy((void *)0x8c1c953a, eeprom_img + 18, 18);  /* system copy2 (CRC+data) */
+    if (eeread_logged) {                                /* one-shot proof the sync read ran */
+        eeread_logged = 0;
+        scif_puts("EE READ sync: coin09="); scif_puthex(*(volatile u8 *)(0x8c1c9528 + 9));
+        scif_puts("\n");
+    }
+}
