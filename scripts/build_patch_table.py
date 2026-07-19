@@ -78,6 +78,13 @@ def ptr(addr, expect, target, comment=""):
     assert got == expect, f"ptr @{addr:#x}: found {got:#010x}, expected {expect:#010x}"
     patches.append((addr, old, struct.pack("<I", target), comment))
 
+def insn16(addr, expect, value, comment=""):
+    """16-bit SH-4 instruction patch with old-opcode verification."""
+    old = rd(addr, 2)
+    got = struct.unpack("<H", old)[0]
+    assert got == expect, f"insn16 @{addr:#x}: found {got:#06x}, expected {expect:#06x}"
+    patches.append((addr, old, struct.pack("<H", value), comment))
+
 def hook(fn, target, comment=""):
     # SH-4 entry thunk: mov.l @(disp,PC),r0 ; jmp @r0 ; nop ; [nop pad] ; .long target
     #   mov.l @(disp,PC),r0 = 0xD000|disp ; EA = disp*4 + (PC&~3) + 4  (PC=fn)
@@ -135,6 +142,24 @@ pool(0x8C0814D0, 0xA01FFD00, BIOS_1FFD00_P2, "#15 BIOS 0x1ffd00 str -> shim-home
 # whole redirect).
 ptr(0x8C027618, 0x8C0315CE, sym("shim_maple_boot"),  "input BOOT slot -> shim_maple_boot")
 ptr(0x8C02ED6C, 0x8C03C2C6, sym("shim_maple_entry"), "input STEADY slot -> shim_maple_entry")
+# §Task 14c: FORCE the I/O-board-detected check to pass (M3 unblock).
+# Dynamic evidence (instrumented DC-mode interpreter on build/cleo.gdi): the current
+# 18-patch build registers the I/O board as PRESENT (conn flag 0x8c1c9774 = 1) but its
+# JVS feature/ID enumeration returns garbage on DC, so the feature-id 0x8c1ca474 = 0 ->
+# the spec-compat result 0x8c0d541c is set to 1 ("no id"), i.e. "DOES NOT FULFILL THE
+# GAME SPECS." The per-frame I/O-status handler FUN_8c07a22a (called only from the boot
+# scene loop FUN_8c04ae50 @0x8c04b176) reads that result at 0x8c07a262:
+#     8c07a262 mov.l 0x8c07a2d8,r0   ; r0 = &spec_result (0x8c0d541c)
+#     8c07a264 mov.l @r0,r1          ; r1 = spec_result
+#     8c07a266 tst  r1,r1            ; T = (spec == 0 == OK)
+#     8c07a268 bt   0x8c07a302       ; OK -> build normal display (FUN_8c07c144) & proceed
+# spec!=0 falls through to the error-draw path. Force the OK branch always taken by
+# replacing `tst r1,r1` (0x2118) with `sett` (0x0018, T:=1) -> the handler treats the
+# board's specs as fulfilled every frame, exactly the "force board present/OK" the M3
+# strategy calls for. Minimal (2 bytes), old-opcode-verified, and FUN_8c07a22a has a
+# single caller so no other path is affected.
+insn16(0x8C07A266, 0x2118, 0x0018, "Task14c: I/O spec-check OK (tst r1,r1 -> sett)")
+
 # NOTE (Task 14b, REFUTED approach — do NOT re-add without the pump fix):
 # FUN_8c03c2c6 (steady JVS builder) is reached via a SECOND fn-pointer pool[0x8c02ee88]
 # (Mode B, jsr @0x8c02ed88 in dispatcher FUN_8c02ec08); Task 14 only swapped
@@ -162,5 +187,5 @@ out.append(f"enum {{ CLEO_NPATCHES = {len(patches)} }};")
 (ROOT / "build").mkdir(exist_ok=True)
 (ROOT / "build/patch_table.h").write_text("\n".join(out) + "\n")
 print(f"OK patch_table.h: {len(patches)} patches "
-      f"(1 hook, 15 pool, 2 ptr); MIRROR_P2={MIRROR_P2:#010x} "
+      f"(1 hook, 15 pool, 2 ptr, 1 insn16); MIRROR_P2={MIRROR_P2:#010x} "
       f"BIOS_60000_P2={BIOS_60000_P2:#010x} BIOS_1FFD00_P2={BIOS_1FFD00_P2:#010x}")

@@ -1501,3 +1501,104 @@ kill -TERM %1                                      # clean quit -> autosave with
 # carve PNG: skip 24-byte FLYSAVE1 header, take next u32 pngSize bytes -> shows the error screen
 ```
 
+
+---
+
+## M3 I/O-check force (Task 14c) — spec-check gate forced; game advances past the I/O screen
+
+**Result: the I/O-board-detected screen is UNBLOCKED by one 2-byte instruction
+patch.** Contrary to the "I/O BD IS NOT CONNECTED" premise, dynamic evidence on
+the current 18-patch build shows the board registers as **CONNECTED**; the halt
+is the sibling gate **"DOES NOT FULFILL THE GAME SPECS."** Forcing the spec gate
+lets the game leave the I/O-check scene loop and stream further.
+
+### How the decision was located (dynamic, instrumented DC-mode interpreter)
+
+`patches/flycast-instrument.diff` adds two read-only probes (Task 14c):
+- **STRWATCH** (`core/hw/mem/addrspace.cpp readt`): logs guest reads of the I/O
+  status-string block phys `0x0c0ca6dc–0x0c0ca740` (the strings have no static
+  xref — computed resource base+offset). Caught the screen build at copy PC
+  `0x8c094a2e`, caller `0x8c04b508` (inside render `FUN_8c04b4c4`), grandparent
+  `0x8c04b0b0` inside the boot scene loop **`FUN_8c04ae50`**.
+- **IOCHK** (`core/hw/sh4/interpr/sh4_interpreter.cpp ReadNexOp`): at the scene
+  decision PCs `0x8c04b08a/090/1fa/200`, snapshots the scene object
+  (`*0x8c0c4510`), its vtable methods, and the enumeration flags.
+
+IOCHK on the baseline build (repeats every frame at `0x8c04b1fa/200`):
+`obj=8c0a2494 m10=8c02469e m7c=8c024bf8 conn=00000001 specs=00000001 mir=00000001`.
+So **conn (I/O board present) = 1**, and the bad flag is **specs
+(`0x8c0d541c`) = 1** ("no feature ID").
+
+### The flags (static, boot.bin)
+
+- **Connection flag** `[0x8c1c9774]` (= struct `*0x8c0814c4`=`0x8c1c9770`, field
+  `+4`), written only by the registration fn `FUN_8c0813e6` @`0x8c081416`. On DC
+  the config path registers a board present → **conn = 1** (mirror `0x8c127b0c`
+  set at `FUN_8c04ae50` `0x8c04b088`).
+- **Spec-compat result** `[0x8c0d541c]`, computed once in `FUN_8c04ae50`
+  `0x8c04b00c–b066`: `0`=OK, `1`=no-id (feature-id `[0x8c1ca474]`==0), `2`=fail.
+  On DC the JVS feature/board-ID enumeration is garbage → feature-id 0 → **specs
+  = 1** ("DOES NOT FULFILL THE GAME SPECS.").
+
+### The gate (the forced check)
+
+`FUN_8c07a22a` is the per-frame I/O-status handler, called **only** from the
+boot scene loop `FUN_8c04ae50` @`0x8c04b176` (`FindRefsTo` = 1 caller). It reads
+the spec result and branches:
+
+```
+8c07a262  mov.l 0x8c07a2d8,r0   ; r0 = &spec_result (0x8c0d541c)
+8c07a264  mov.l @r0,r1          ; r1 = spec_result
+8c07a266  tst  r1,r1            ; T = (spec == 0 == OK)      <-- PATCH SITE
+8c07a268  bt   0x8c07a302       ; OK -> FUN_8c07c144 builds the normal display & proceeds
+          (fall-through: spec 1/2 -> draw the error, loop forever)
+```
+
+### The force patch (`scripts/build_patch_table.py`, patch #19, `insn16`)
+
+`0x8C07A266`: `tst r1,r1` (`0x2118`) → `sett` (`0x0018`, T:=1) so the spec test
+is always treated as OK. Minimal (2 bytes), old-opcode-verified; single-caller
+site. This is the "force the result to board-present/OK" strategy applied to the
+spec gate.
+
+### Evidence it works (instrumented DC-mode interpreter, `build/cleo.gdi`)
+
+| | baseline (18 patches) | + force patch (19) |
+|---|---|---|
+| IOCHK `0x8c04b1fa/200` (in-loop) | fires every frame (stuck) | **absent** (loop left) |
+| IOCHK `0x8c04b08a/090` (one-time entry) | 1× | 1× |
+| CART reads | 147 | **149** (M2 intact + more) |
+| MIE sub=31 DIP poll | floods forever | tapers |
+| new maple | — | controller DeviceRequest cmd 01/0b to ports 1&2 |
+
+⇒ the game **leaves the I/O-check scene loop** and advances.
+
+### New downstream blocker (report, not fixed — per "force one gate")
+
+After the check passes, the game invokes the boot MIE builder (fn-ptr
+`0x8c027618` → `shim_maple_boot`) **once** with an unhandled subcommand:
+`cmdblk=0x8c0e62e0 hdr(cmdblk+8)=0x940004f6 sub=0x00 recv=0xc8000000
+arg0=0x8c0a27f4` → `maple_reply` default → `shim_die(3)` (spins). Note the boot
+enumeration itself does **not** go through this fn-ptr (0 `shim_maple_boot`
+calls before the check — it uses the raw-maple path, confirming Task 14/14b);
+`shim_maple_boot` is reached only here. A diagnostic run tolerating the unknown
+sub (complete without writing the bad recvaddr) advanced the game to **CART=180**
+(+31 reads) with execution moving to new regions (`0x8dfffxxx`, `0x8c00f500`)
+and the DIP-poll flood gone — so the path forward is real; the next step is to
+service this MIE sub (same "force the consumer" technique). Reverted before ship.
+
+### Reproduction
+
+```sh
+# build the forced image
+source tools/kos/environ.sh && make -C shims && python3 scripts/build_patch_table.py \
+  && make -C loader && python3 scripts/make_gdi.py
+# DC-mode interpreter (probes need the interpreter for exact PC)
+BIN=tools/flycast-src/build/Flycast.app/Contents/MacOS/Flycast
+FLYCAST_CARTLOG=cap.log "$BIN" -config config:rend.vsync=no -config config:Dynarec.Enabled=no \
+  -config config:Debug.SerialConsoleEnabled=yes build/cleo.gdi &
+grep -oE 'IOCHK pc=[0-9a-f]+' cap.log | sort | uniq -c   # in-loop 1fa/200 absent = check passed
+# decision disasm
+scripts/ghidra/run.sh script DisasmRange.java 0x8c07a22a 0x8c07a2e0
+scripts/ghidra/run.sh script FindRefsTo.java 0x8c07a22a    # single caller FUN_8c04ae50
+```

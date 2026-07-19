@@ -152,7 +152,7 @@ index d01240f..cf0b4a6 100644
  						LOGJVS("btns ");
  						for (int player = 0; player < buffer_in[cmdi + 1]; player++)
 diff --git a/core/hw/mem/addrspace.cpp b/core/hw/mem/addrspace.cpp
-index c08cb8e..ad1bbdf 100644
+index c08cb8e..fcf3fc6 100644
 --- a/core/hw/mem/addrspace.cpp
 +++ b/core/hw/mem/addrspace.cpp
 @@ -4,6 +4,7 @@
@@ -163,7 +163,7 @@ index c08cb8e..ad1bbdf 100644
  #include "oslib/oslib.h"
  #include "oslib/virtmem.h"
  #include <cassert>
-@@ -101,11 +102,39 @@ void *writeConst(u32 addr, bool& ismem, u32 sz)
+@@ -101,11 +102,59 @@ void *writeConst(u32 addr, bool& ismem, u32 sz)
  	}
  }
  
@@ -193,17 +193,37 @@ index c08cb8e..ad1bbdf 100644
 +	cartlog("HW%c pc=%08x addr=%08x val=%08x\n", rw, pc - 2, addr, val);
 +}
 +
++// Phase 4 (Task 14c): I/O-board decision hunt. The "I/O BD IS NOT CONNECTED"
++// status strings live at phys 0x0c0ca6dc..0x0c0ca740 (VA 0x8c0ca6dc, no static
++// xref -- computed resource base+offset). Catch the read of that block (the
++// screen-build / text-draw), log the reading PC, PR and a heuristic guest-stack
++// backtrace (code-looking return addrs) so the decision function that selected
++// the string can be traced. Dedup by reading PC so each site logs once.
++static inline void cartlog_strwatch(u32 addr)
++{
++	const u32 pa = addr & 0x1fffffff;
++	if (pa < 0x0c0ca6dc || pa >= 0x0c0ca740)
++		return;
++	const u32 pc = Sh4cntx.pc;
++	static u32 seen[256]; static int nseen = 0;
++	for (int i = 0; i < nseen; i++)
++		if (seen[i] == pa) return;          // dedup by ADDRESS: see every string byte touched
++	if (nseen < 256) seen[nseen++] = pa;
++	cartlog("STRWATCH pa=%08x pc=%08x pr=%08x\n", pa, pc - 2, Sh4cntx.pr);
++}
++
  template<typename T>
  T DYNACALL readt(u32 addr)
  {
  	constexpr u32 sz = sizeof(T);
  
 +	cartlog_hwaccess('R', addr, 0);
++	cartlog_strwatch(addr);
 +
  	u32 page = addr >> 24;	//1 op, shift/extract
  	uintptr_t iirf = (uintptr_t)memInfo_ptr[page]; //2 ops, insert + read [vmem table will be on reg ]
  	void *ptr = (void *)(iirf & ~HANDLER_MAX);     //2 ops, and // 1 op insert
-@@ -150,6 +179,24 @@ void DYNACALL writet(u32 addr, T data)
+@@ -150,6 +199,24 @@ void DYNACALL writet(u32 addr, T data)
  {
  	constexpr u32 sz = sizeof(T);
  
@@ -419,7 +439,7 @@ index 4011837..0d2f910 100644
  		DmaOffset += size;
  	}
 diff --git a/core/hw/sh4/interpr/sh4_interpreter.cpp b/core/hw/sh4/interpr/sh4_interpreter.cpp
-index 54a2b02..6b99bc0 100644
+index 54a2b02..8b9ca81 100644
 --- a/core/hw/sh4/interpr/sh4_interpreter.cpp
 +++ b/core/hw/sh4/interpr/sh4_interpreter.cpp
 @@ -3,6 +3,8 @@
@@ -501,16 +521,38 @@ index 54a2b02..6b99bc0 100644
  void Sh4Interpreter::ExecuteOpcode(u16 op)
  {
  	if (ctx->sr.FD == 1 && OpDesc[op]->IsFloatingPoint())
-@@ -29,6 +94,8 @@ void Sh4Interpreter::ExecuteOpcode(u16 op)
+@@ -26,9 +91,30 @@ void Sh4Interpreter::ExecuteOpcode(u16 op)
+ 	sh4cycles.executeCycles(op);
+ }
+ 
++// Phase 4 (Task 14c): I/O-board decision probe. FUN_8c04ae50 (scene loop) tests
++// the I/O-check scene at a few PCs. Snapshot the scene object (*0x8c0c4510), its
++// vtable methods (+0x10 "scene finished?", +0x7c "per-frame done?"), and the
++// enumeration flags (conn 0x8c1c9774, specs 0x8c0d541c, mirror 0x8c127b0c) plus
++// r0 (the just-returned method value) so the true gate method can be disassembled.
++static void cartlog_iocheck(u32 pc)
++{
++	u32 ppc = pc & 0x1fffffff;
++	if (ppc != 0x0c04b08a && ppc != 0x0c04b090 && ppc != 0x0c04b1fa && ppc != 0x0c04b200)
++		return;
++	static int n = 0; if (n > 60) return; n++;
++	u32 obj = ReadMem32_nommu(0x8c0c4510);
++	cartlog("IOCHK pc=%08x r0=%08x obj=%08x m10=%08x m7c=%08x conn=%08x specs=%08x mir=%08x\n",
++			ppc, Sh4cntx.r[0], obj,
++			obj ? ReadMem32_nommu(obj + 0x10) : 0, obj ? ReadMem32_nommu(obj + 0x7c) : 0,
++			ReadMem32_nommu(0x8c1c9774), ReadMem32_nommu(0x8c0d541c), ReadMem32_nommu(0x8c127b0c));
++}
++
  u16 Sh4Interpreter::ReadNexOp()
  {
  	u32 addr = ctx->pc;
 +	cartlog_bios_check(addr);
 +	cartlog_hang_check(addr);   // Phase 4 (Task 13): boot-hang spin-PC detector
++	cartlog_iocheck(addr);      // Phase 4 (Task 14c): I/O-board decision probe
  	if (!mmu_enabled() && (addr & 1))
  		// address error
  		throw SH4ThrownException(addr, Sh4Ex_AddressErrorRead);
-@@ -59,6 +126,22 @@ void Sh4Interpreter::Run()
+@@ -59,6 +145,22 @@ void Sh4Interpreter::Run()
  				Do_Exception(ex.epc, ex.expEvn);
  				// an exception requires the instruction pipeline to drain, so approx 5 cycles
  				sh4cycles.addCycles(5 * CPU_RATIO);
