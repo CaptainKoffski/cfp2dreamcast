@@ -20,15 +20,23 @@ typedef unsigned int u32;
 #define SB_MDEN   (*(volatile u32 *)0xa05f6c14)   /* DMA enable */
 #define SB_MDST   (*(volatile u32 *)0xa05f6c18)   /* start / status */
 
-/* Returns the DC button word (ACTIVE-LOW), or 0xffff (= all released) if no
- * controller / failed reply. dc_to_jvs(0xffff) == 0, so "no pad" reads as idle. */
-unsigned short maple_getcond(void) {
+/* Returns the DC button word (ACTIVE-LOW) for the given DC Maple port (A=0,
+ * B=1), or 0xffff (= all released) if no controller / failed reply on that port.
+ * dc_to_jvs(0xffff) == 0, so "no pad" reads as idle -- P2 idle when only 1 pad.
+ * Port addressing (KOS maple_utils.c:47-52 maple_addr, maple_queue.c:49/55-56):
+ * word0 dst_port field = port<<16 -- THIS selects the physical bus/port that
+ * Flycast routes to (maple_if.cpp:198 bus=(header_1>>16)&3). word2 dst =
+ * maple_addr(port,main)=(port<<6)|0x20 (A=0x20, B=0x60); Flycast getPort()
+ * (maple_if.cpp:131-137) resolves either to unit 5 = main controller. src port
+ * field = (port<<6)<<16. */
+unsigned short maple_getcond(unsigned int port) {
     volatile u32 *tx = P2(MAPLE_TX);
     volatile u32 *rx = P2(MAPLE_RX);
+    unsigned int dst = (port << 6) | 0x20u;                /* maple_addr(port, main): A=0x20 B=0x60 */
     rx[0] = 0;                                              /* clear old reply header */
-    tx[0] = 0x80000000u | (0u << 16) | 1u;                 /* last | port A | 1 param word */
+    tx[0] = 0x80000000u | (port << 16) | 1u;               /* last | dst port | 1 param word */
     tx[1] = MAPLE_RX & 0x1fffffff;                         /* recv addr (phys) */
-    tx[2] = (1u << 24) | (0u << 16) | (0x20u << 8) | 9u;   /* len | src portA | dst A-main | GETCOND */
+    tx[2] = (1u << 24) | ((port << 6) << 16) | (dst << 8) | 9u; /* len | src port | dst main | GETCOND */
     tx[3] = 0x01000000u;                                   /* FUNC_CONTROLLER */
     SB_MDTSEL = 0;
     SB_MDSTAR = MAPLE_TX & 0x1fffffff;

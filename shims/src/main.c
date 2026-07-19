@@ -5,7 +5,7 @@ void shim_die(u32, u32, u32);
 void *xmemcpy(void *, const void *, u32);
 /* shim_cart_service lives in src/cart.c (Task 10) */
 
-unsigned short maple_getcond(void);
+unsigned short maple_getcond(unsigned int port);   /* DC Maple GetCondition: port A=0, B=1 */
 unsigned short dc_to_jvs(unsigned short);
 unsigned char  jvs_checksum(const unsigned char *);
 extern const unsigned char jvs_hasdata[];               /* src/jvs.c */
@@ -60,21 +60,27 @@ static u8 wr_left   = 32;                     /* remaining sub-0x0b (EEPROM writ
  * flooding the ~60Hz poll. raw=0000ffff idle = controller all-released or no pad;
  * a Start press flips raw (bit3 low) and yields jvs=00008000. */
 static void jvs_digital(u32 sub, void *rx) {
-    unsigned short raw = maple_getcond();
-    unsigned short j   = dc_to_jvs(raw);
-    unsigned int   key = ((unsigned int)raw << 16) | j;
+    unsigned short raw  = maple_getcond(0);              /* port A -> P1 */
+    unsigned short j    = dc_to_jvs(raw);
+    unsigned short raw2 = maple_getcond(1);             /* port B -> P2 (0xffff=no pad -> idle) */
+    unsigned short j2   = dc_to_jvs(raw2);
+    unsigned int   key  = ((unsigned int)raw << 16) | raw2;   /* log on either pad's change */
     if (key != in_last || (++in_hb & 0xffu) == 0u) {
         in_last = key;
-        scif_puts("IN raw="); scif_puthex(raw);
-        scif_puts(" jvs=");   scif_puthex(j);
-        scif_puts(" sub=");   scif_puthex(sub);
+        scif_puts("IN raw=");   scif_puthex(raw);
+        scif_puts(" jvs=");     scif_puthex(j);
+        scif_puts(" p2raw=");   scif_puthex(raw2);
+        scif_puts(" p2jvs=");   scif_puthex(j2);
+        scif_puts(" sub=");     scif_puthex(sub);
         scif_puts("\n");
     }
     u8 f[64];
     xmemcpy(f, jvs_hasdata, 64);
     f[0x20] = (u8)(j >> 8);                 /* BTN_OFF: P1 word big-endian (hi) */
     f[0x21] = (u8)(j & 0xff);              /*          (lo; this game: 0)      */
-    f[0x3a] = jvs_checksum(f);              /* recompute JVS checksum @0x3a      */
+    f[0x22] = (u8)(j2 >> 8);               /* P2 word big-endian (hi) -- emitter maple_jvs.cpp:2237/2241 */
+    f[0x23] = (u8)(j2 & 0xff);            /*          (lo)                    */
+    f[0x3a] = jvs_checksum(f);              /* recompute JVS checksum @0x3a (now covers P2 bytes) */
     xmemcpy(rx, f, 64);
 }
 

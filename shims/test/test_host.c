@@ -51,6 +51,21 @@ int main(void) {
     assert(jvs_hasdata[0x04] == 0x16 && jvs_hasdata[0x1a] == 0xe0);  /* subresp / JVS E0 sync */
     assert(jvs_checksum(jvs_hasdata) == 0x22 && jvs_hasdata[0x3a] == 0x22);
 
-    printf("PASS test_host cart_split + dc_to_jvs + jvs_checksum\n");
+    /* Task 17 (2P): P2 word lands big-endian at 0x22/0x23 and the checksum loop
+       (0x1b..0x39) covers those bytes. Golden template has P2 idle; a P2 Start
+       (dc_to_jvs -> 0x8000) sets [0x22]=0x80 and bumps the sum by 0x80. */
+    assert(jvs_hasdata[0x22] == 0x00 && jvs_hasdata[0x23] == 0x00);   /* P2 idle in template */
+    {
+        unsigned char f2[64];
+        unsigned short j2 = dc_to_jvs((unsigned short)~(1u << 3));    /* P2 Start */
+        int i;
+        for (i = 0; i < 64; i++) f2[i] = jvs_hasdata[i];
+        f2[0x22] = (unsigned char)(j2 >> 8);
+        f2[0x23] = (unsigned char)(j2 & 0xff);
+        assert(f2[0x22] == 0x80 && f2[0x23] == 0x00);                 /* Start -> 0x8000 big-endian */
+        assert(jvs_checksum(f2) == (unsigned char)(0x22 + 0x80));     /* checksum picks up P2 byte */
+    }
+
+    printf("PASS test_host cart_split + dc_to_jvs + jvs_checksum + p2\n");
     return 0;
 }
