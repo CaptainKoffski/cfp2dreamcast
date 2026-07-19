@@ -816,6 +816,60 @@ xxd build/mie_sub15.bin ; xxd build/mie_sub33.bin ; xxd build/mie_sub03.bin
 grep '^MIERESP sub=33' capture-attract.log | sed 's/.*data=//' | sort | uniq -c
 ```
 
+### input-ABI addendum (Task 14b) — two MIE transports + the real M3 blocker
+
+Task 14b set out to intercept the "config-time raw-maple JVS enumeration"
+(`FUN_8c04ae50 → FUN_8c080d18 → FUN_8c0809b2`). Disassembling that chain
+**refuted the premise** and located the real DC blocker. Full evidence:
+`.superpowers/sdd/task-14b-report.md`. Summary of the corrections:
+
+1. **The config-time raw-maple path is a Z80 MIE-firmware UPLOAD, not JVS
+   enumeration.** `FUN_8c080d18` (probe cmd 0x01) → `FUN_8c0809b2` uploads the
+   MIE bridge firmware in ≤0x1ff0-byte / 0x18-byte chunks via **maple cmd 0x80/0x81**
+   (`MDC_JVSUploadFirmware`), each chunk checksum-validated (`recv[1]&0xff ==
+   Σ chunk bytes`; game loop `0x8c080ae4-b2e`). The command template at
+   `0x8c0d5ee8` decodes as Z80 code (`f3`=DI, `d3 30`=OUT …). Frame header pool
+   `0x8c080d02=0x2086` (cmd 0x86), `0x8c080b34/bd4=0x2080` (cmd 0x80),
+   `0x8c080bd6=0x2001` (cmd 0x01). **Real `SB_MDST` self-clears on DC, so the
+   spins never hang** — the path runs to completion, the upload fails fast on the
+   garbage checksum, and its result is **dead**: `FUN_8c080d18`'s return is
+   discarded by `FUN_8c04ae50` (`0x8c04ae62 jsr; 0x8c04ae66 next jsr`, r0 unused)
+   and its result vars `0x8c1ca1b0`/`0x8c1ca1b8` are **write-only**
+   (`FindRefsTo`). ⇒ **The config-time path does NOT gate M3.**
+
+2. **The real DC M3 blocker is the runtime ASYNC maple engine.** The steady JVS
+   builder `FUN_8c03c2c6` is reached via **two** fn-pointers from dispatcher
+   `FUN_8c02ec08`: `pool[0x8c02ed6c]` (Mode A, `jsr @0x8c02ed1c`) **and
+   `pool[0x8c02ee88]` (Mode B, `jsr @0x8c02ed88`)** — both hold `0x8c03c2c6`.
+   Task 14 swapped only the first. In DC mode the game takes **Mode B** → the
+   real `FUN_8c03c2c6` → **real cmd-0x86 maple DMAs to MIE@0x20 returning
+   `fd0023`** (`MDRE_UnknownCmd`; DC has a controller, not an MIE, at 0x20),
+   looping the I/O-board poll. Evidence: `capture-dc-mie.log` — 16k `MDODMA
+   pc=8c03c3d6` (inside `FUN_8c03c2c6`) cmd=86 sub=31 all `data=fd0023…`.
+   `FUN_8c03c2c6`'s DMA is **async**: it runs the callback pump `FUN_8c03c1c2`
+   (a 24-slot event dispatcher that drives the boot state machine), queues the
+   maple frame (`[desc+0x18]=1` pending), and returns; a VBLANK/IRQ maple engine
+   completes it and clears `[desc+0x18]`.
+
+3. **Replacing the builder is the WRONG layer.** Swapping `pool[0x8c02ee88] →
+   shim_maple_entry` removes the cmd-86 garbage (0 real MIE DMAs, verified) but
+   **regresses boot to 0 cart reads** (was 147): `shim_maple_entry` replaces the
+   whole builder and **skips the pump `FUN_8c03c1c2`**, stalling the boot state
+   machine before cart streaming. So `shim_maple_boot`/`shim_maple_entry` are
+   valid only for a phase where skipping the pump is harmless (they were never
+   actually reached in DC mode — Mode B was taken).
+
+4. **Correct fix design (next iteration).** Intercept the async maple engine, not
+   the builder: mirror the maple register base `0xa05f6c00` that `FUN_8c030fc4`
+   (`@0x8c030fec`) stores into the engine's descriptor struct (the runtime path
+   accesses maple regs as `base+off`, computed — invisible to `ListPoolWords`),
+   and service the engine's completion (write the reply via `maple_reply` keyed
+   on the frame's real sub, clear `[desc+0x18]`), leaving `FUN_8c03c2c6` + its
+   pump to run. Pin the completion mechanism first (VBLANK-auto-DMA + maple-end
+   IRQ vs cross-frame poll of `[desc+0x18]`) — that determines whether a register
+   mirror alone suffices or an IRQ/engine hook is required. `maple_reply` +
+   `mie_jvs*`/`mie_sub*` blobs are reusable unchanged; only the transport is new.
+
 ---
 
 ## V5 — battery-SRAM reference scan (spec §3 out-of-scope check)
