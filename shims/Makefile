@@ -3,9 +3,13 @@ NM = /opt/toolchains/dc/sh-elf/bin/sh-elf-nm
 OBJCOPY = /opt/toolchains/dc/sh-elf/bin/sh-elf-objcopy
 CFLAGS = -ml -m4-single-only -ffreestanding -nostdlib -Os -Wall -Wextra -fno-tree-loop-distribute-patterns -Iinclude
 B = build
-# Embedded data: free-play EEPROM + verbatim MIE ACK templates (gitignored blobs)
+# Embedded data: free-play EEPROM + verbatim MIE ACK templates + JVS I/O-board
+# enumeration replies (mie_jvsXX, harvested by scripts/extract_jvs_replies.py).
+# All gitignored (ROM-derived blobs).
 DATA_SRCS = $(B)/eeprom_img.c $(B)/mie_sub01.c $(B)/mie_sub13.c $(B)/mie_sub17.c \
-            $(B)/mie_sub27.c $(B)/mie_sub31.c $(B)/mie_subff.c
+            $(B)/mie_sub27.c $(B)/mie_sub31.c $(B)/mie_subff.c \
+            $(B)/mie_jvsf1.c $(B)/mie_jvs10.c $(B)/mie_jvs11.c \
+            $(B)/mie_jvs12.c $(B)/mie_jvs13.c $(B)/mie_jvs14.c
 SRCS = src/main.c src/scif.c src/util.c src/gd.c src/cart.c src/maple.c src/jvs.c $(DATA_SRCS)
 
 .PHONY: all test clean

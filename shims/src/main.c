@@ -20,9 +20,36 @@ extern const unsigned char mie_sub27[]; extern const u32 mie_sub27_len;
 extern const unsigned char mie_sub31[]; extern const u32 mie_sub31_len;
 extern const unsigned char mie_subff[]; extern const u32 mie_subff_len;
 
+/* JVS I/O-board enumeration replies (scripts/extract_jvs_replies.py). Keyed on
+ * the JVS command the game transmits; the matching one is replayed on the
+ * following receive so the board passes enumeration (M3). */
+extern const unsigned char mie_jvsf1[]; extern const u32 mie_jvsf1_len;  /* F1 set-addr */
+extern const unsigned char mie_jvs10[]; extern const u32 mie_jvs10_len;  /* 10 board ID */
+extern const unsigned char mie_jvs11[]; extern const u32 mie_jvs11_len;  /* 11 cmd rev  */
+extern const unsigned char mie_jvs12[]; extern const u32 mie_jvs12_len;  /* 12 JVS rev  */
+extern const unsigned char mie_jvs13[]; extern const u32 mie_jvs13_len;  /* 13 comm rev */
+extern const unsigned char mie_jvs14[]; extern const u32 mie_jvs14_len;  /* 14 features */
+
+/* Last JVS command transmitted (sub 0x17/0x19/0x21) -> selects the enumeration
+ * reply the next receive (sub 0x15) returns. 0xff = "not an enumeration command"
+ * (digital read). Initialised non-zero so it lands in .data (the loader copies
+ * .data but does NOT zero .bss). */
+static u8 pending_jvs = 0xff;
+
 #define SB_MDST (*(volatile u32 *)0xa05f6c18)
 #define GW(a)   (*(volatile u32 *)((a) | 0x80000000u))  /* cached word: game control state */
 #define GB(a)   (*(volatile u8  *)((a) | 0x80000000u))  /* cached byte */
+
+/* Live DC GetCondition -> JVS digital-read has-data frame at recvaddr. */
+static void jvs_digital(void *rx) {
+    unsigned short j = dc_to_jvs(maple_getcond());
+    u8 f[64];
+    xmemcpy(f, jvs_hasdata, 64);
+    f[0x20] = (u8)(j >> 8);                 /* BTN_OFF: P1 word big-endian (hi) */
+    f[0x21] = (u8)(j & 0xff);              /*          (lo; this game: 0)      */
+    f[0x3a] = jvs_checksum(f);              /* recompute JVS checksum @0x3a      */
+    xmemcpy(rx, f, 64);
+}
 
 /* Shared reply synthesizer for both MIE sites. recvaddr is a game main-RAM phys
  * address; the reply is written UNCACHED (P2) because it stands in for a Maple
@@ -31,16 +58,20 @@ extern const unsigned char mie_subff[]; extern const u32 mie_subff_len;
 static void maple_reply(u32 sub, u32 recvaddr) {
     void *rx = (void *)P2ADDR(recvaddr);
     switch (sub) {
-    case 0x15: case 0x33: {                 /* receive latest JVS digital input */
-        unsigned short j = dc_to_jvs(maple_getcond());
-        u8 f[64];
-        xmemcpy(f, jvs_hasdata, 64);
-        f[0x20] = (u8)(j >> 8);             /* BTN_OFF: P1 word big-endian (hi) */
-        f[0x21] = (u8)(j & 0xff);           /*          (lo; this game: 0)      */
-        f[0x3a] = jvs_checksum(f);          /* recompute JVS checksum @0x3a      */
-        xmemcpy(rx, f, 64);
+    case 0x33:                              /* steady per-frame poll: always live */
+        jvs_digital(rx);
         break;
-    }
+    case 0x15:                              /* boot receive: enumeration reply or live */
+        switch (pending_jvs) {              /* keyed on the last transmitted JVS cmd */
+        case 0xf1: xmemcpy(rx, mie_jvsf1, mie_jvsf1_len); break;
+        case 0x10: xmemcpy(rx, mie_jvs10, mie_jvs10_len); break;
+        case 0x11: xmemcpy(rx, mie_jvs11, mie_jvs11_len); break;
+        case 0x12: xmemcpy(rx, mie_jvs12, mie_jvs12_len); break;
+        case 0x13: xmemcpy(rx, mie_jvs13, mie_jvs13_len); break;
+        case 0x14: xmemcpy(rx, mie_jvs14, mie_jvs14_len); break;
+        default:   jvs_digital(rx);         break;  /* digital read (0x20/0x21/0x22/none) */
+        }
+        break;
     case 0x03: {                            /* EEPROM read: 1-word hdr + 128 B @ EE_OFF=4 */
         u8 hdr[4] = { 0x87, 0x00, 0x20, 0x20 };   /* 0x20 words */
         xmemcpy(rx, hdr, 4);
@@ -68,11 +99,23 @@ static void maple_reply(u32 sub, u32 recvaddr) {
 /* Boot MIE builder (0x8c0315ce, reached via fn-ptr pool[0x8c027618]). Sub +
  * recvaddr are read from the command block *0x8c0e6400 (word3 low byte = sub,
  * word1 = recvaddr). Completion: leave the Maple DMA observably done, i.e.
- * SB_MDST reads 0. [KB §input-ABI site A -- boot completion is M4-gated.] */
-void shim_maple_boot(void) {
+ * SB_MDST reads 0. [KB §input-ABI site A -- boot completion is M4-gated.]
+ *
+ * arg0 = r4 = the transmit payload block the dispatcher passes to the builder
+ * (FUN_8c027584 @0x8c0275ee, jsr @r3 with r4 = pool 0x8c0e62c8 / 0x8c0a27f4).
+ * On a transmit (sub 0x17/0x19/0x21) the JVS command byte lives at arg0+4
+ * (descriptor word5 byte0 -> maple frame byte 12 -> Flycast dma_buffer_in[8],
+ * maple_jvs.cpp:1780); we latch it so the following receive (sub 0x15) returns
+ * the matching enumeration reply. sub 0x27 (transmit-with-repeat) is only ever
+ * the digital-read setup -> latch "not enumeration". */
+void shim_maple_boot(u32 arg0) {
     u32 cmdblk = GW(0x8c0e6400);
     u32 sub    = GB(cmdblk + 0x0c);
     u32 recv   = GW(cmdblk + 0x04);
+    switch (sub) {
+    case 0x17: case 0x19: case 0x21: pending_jvs = GB(arg0 + 4); break;
+    case 0x27:                       pending_jvs = 0xff;         break;
+    }
     maple_reply(sub, recv);
     SB_MDST = 0;
 }
