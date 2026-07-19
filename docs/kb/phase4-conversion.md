@@ -7,6 +7,166 @@ literal, to the 32-bit pool word that holds it. Pool words were read directly
 from `tools/boot.bin` (file offset = addr − `0x8c020000`, little-endian) and,
 where a pool word is itself an in-image pointer, dereferenced one level.
 
+**This document has two parts.** The **Shipped architecture** and **Running on
+real hardware** sections immediately below are the final, deliverable-facing
+summary of what actually shipped. Everything after them (V1…, cart-patch-sites,
+input-ABI, M2/M3, Task 14–18, V5, V-EEPROM…) is the chronological
+analysis/evidence trail that produced it, kept verbatim for its citations — the
+implementation diverged massively from the original plan, and those sections
+record how each real finding was pinned.
+
+---
+
+## Shipped architecture (final)
+
+Status: **Phase 4 DONE (2026-07-20)** — boots, runs attract, playable 1P+2P with
+free-play, all **Flycast-confirmed**; real hardware is Phase 5 (untested). Branch
+`phase4-conversion`, **28 patches** (`scripts/build_patch_table.py`,
+ROM-old-byte-verified: 2 hook + 16 pool + 9 ptr + 1 insn16). The deliverable is
+four pieces.
+
+**A. Loader — KOS `1ST_READ.BIN`** (`loader/main.c`, `loader/handoff.S`). Reads
+the 1 MB game image from the GDI at `CART_FAD 47198` (`shim_iface.h:40`) into
+staging `0x8cd00000`; applies the 28 patches (each old-byte-verified, aborts on
+mismatch — `apply_patches`, `main.c:24`); copies `shim.bin` to
+`SHIM_BASE 0x8cfc0000` and zeros its `.bss` (`main.c:62,68`); places the two
+Naomi BIOS-data slices (`0x60000` +0x7000 lib at `SHIM_BASE+0xb000`, `0x1ffd00`
++0x70 auth at `SHIM_BASE+0x12000`; `main.c:73`); zeros the G1 + async-Maple
+register mirrors (`main.c:81,88`); `dcache_purge_range` over every
+cached-written region (`main.c:97-102`); `irq_disable`; then the PIC handoff stub
+copies staging→`0x8c020000` via P2 uncached, invalidates I+D cache
+(CCR `0x0000090d`), and jumps `GAME_ENTRY 0x8c04ae2c` (`handoff.S`;
+handoff-cache correctness verified `task-19-branch-review.md` "Confirmed
+NON-issues").
+
+**B. Cart-read shim — register-mirror + GD-ROM PIO** (`shims/src/cart.c`,
+`gd.c`; patches #1–#13 + hook on `FUN_8c03bc12`). The descriptor-base pool word
+`0x8c02da74` (`0xa05f7000`) and 12 config-time G1 literals are repointed to a
+shim-owned mirror `G1_MIRROR` (P2 `0xacfc8800`), so no game cart/G1 access hits
+the DC's real GD-ROM ATA registers at the colliding addresses
+(§cart-patch-sites; §V3 proved the completion-wait is a base-relative poll, so
+repointing the base carries the whole streaming path). The completion-wait
+`FUN_8c03bc12` is entry-hooked → `shim_cart_service`, which issues a GD-ROM PIO
+read via BIOS syscall (§V1, GD vector `0x8c0000bc`) and writes the destination
+via **P2 uncached** — cache-coherent for real hardware (the C1 fix, Task 20).
+
+**C. Async-Maple MIE service — input / EEPROM / enum** (`shims/src/main.c`,
+`maple.c`, `jvs.c`; patch #16 + 2 steady fn-ptr slots + Task-15c 7 slots +
+Task-16 hook). The runtime maple-base pool word `0x8c030fec` (`0xa05f6c00`) is
+mirrored to `MAPLE_MIRROR` (P2 `0xacfd3000`), so the steady MIE engine
+`FUN_8c03c2c6` drives shim RAM, not real controller DMA. Both fn-ptr slots that
+dispatch it — `0x8c02ed6c` (Mode A) and `0x8c02ee88` (Mode B, DC takes this) →
+`shim_maple_steady`, which calls the **real** engine (its per-frame pump
+`FUN_8c03c1c2` must run — §Task 14b/14f), walks the descriptor the engine just
+programmed into the mirror, and synthesizes each MIE reply into its live recv
+address:
+- **input** (sub 0x15/0x33) via real DC `GetCondition` (port A + port B) →
+  `dc_to_jvs` → a JVS has-data frame with recomputed checksum (§input-ABI:
+  BTN_OFF 0x20/0x21 = P1 big-endian, 0x22/0x23 = P2, checksum at 0x3a);
+- **EEPROM** (sub 0x03) → the baked free-play `eeprom.bin` (§V-EEPROM);
+- **JVS enum** (F1/10–14) → captured Naomi blobs (`mie_jvs*`); DIP/ACK verbatim.
+
+The **config-time** JVS enumeration is serviced separately (`shim_cfg_tx` /
+`shim_cfg_rx`, 7 fn-ptr repoints of `FUN_8c081562`/`FUN_8c081626`, §Task 15c) so
+the board reports **node-count ≥ 1** — required before the game emits the
+per-frame input poll. A **sync EEPROM-read hook** (`shim_ee_read` on
+`FUN_8c080f50`, §Task 16) fills the settings validator's buffers directly so it
+accepts free-play.
+
+**D. Forcing patches** (`scripts/build_patch_table.py`). Forced I/O-spec check
+`insn16 0x8c07a266` (`tst r1,r1` → `sett`, §M3 I/O-check force / Task 14c);
+free-play pinned per-frame at settings-struct `+0xc = 0x8c1c9790 = 1`
+(`shim_maple_steady`, Task 18 — this flag drives BOTH the CREDIT/FREE-PLAY
+display and the credit-decrement gate `FUN_8c081efc`, superseding Task 16's
+ineffective coin-byte pin); two Naomi BIOS-ROM data-pointer redirects
+`0x8c0804d4` (`0xa0060000` → `SHIM_BASE+0xb000` P2) and `0x8c0814d0`
+(`0xa01ffd00` → `SHIM_BASE+0x12000` P2) to the loader's RAM copies (§M2, patches
+#14/#15). 2-player input reuses the same MIE service (port B → JVS P2 slots,
+Task 17) with no extra game patch.
+
+## Running on real hardware
+
+**Status: HW-untested.** Everything in this KB is confirmed in Flycast only; the
+user runs the real-hardware test (Phase 5). The build target is a **GDEMU-class
+SD-card ODE** (`00-status.md` Decisions; `CLAUDE.md`).
+
+### Deploy to GDEMU
+
+`scripts/make_gdi.py` produces `build/cleo.gdi` plus its three track files
+`build/track01.bin`, `build/track02.raw`, `build/track03.bin` (track 3 =
+IP.BIN + `1ST_READ.BIN` ISO region, then the cart image at LBA 47048 / FAD
+47198). To run on a GDEMU-class ODE: copy the `.gdi` **and all three track
+files together** into a numbered folder on the GDEMU SD card (one game per
+`01/`, `02/`, … folder, per the GDEMU menu convention) and select it from the
+GDEMU boot menu. (GDEMU loads GDI/CDI images from FAT32 SD folders — general
+usage per the GDEMU manual / community setup guides, not a per-title claim.)
+Burning `cleo.gdi` to CD-R is a possible alternative, but GDEMU is the stated
+target and avoids media/laser variance.
+
+### One-command reproducible build (from the `.dat`)
+
+```sh
+source tools/kos/environ.sh \
+  && make -C shims \
+  && python3 scripts/build_patch_table.py \
+  && make -C loader \
+  && python3 scripts/make_gdi.py
+# -> build/cleo.gdi (+ track01.bin / track02.raw / track03.bin); 28 patches
+```
+
+Verified from clean (`make -C shims clean && make -C loader clean` first) on
+2026-07-20: `OK patch_table.h: 28 patches`, `OK cleo.gdi cart at LBA 47048
+(FAD 47198)`.
+
+**Gitignored inputs required** (never committed — ROM-derived or user-supplied):
+
+| Input | What / how to (re)generate |
+|---|---|
+| `Cleopatra Fortune Plus.dat` | the decrypted Naomi cart ROM (repo root; user-supplied) |
+| `bios/naomi/epr-21576h.ic27` | Naomi BIOS ROM (from `bios/naomi.zip`); `loader/Makefile` `dd`s the two BIOS slices → `build/bios_data.bin` automatically |
+| `tools/boot.bin` | first 1 MB of the `.dat` (`dd if="Cleopatra Fortune Plus.dat" of=tools/boot.bin bs=1M count=1`); `build_patch_table.py` reads it for old-byte verification |
+| `shims/data/eeprom.bin` | baked free-play 93C46 image; regenerate from `build/mie_sub03.bin` with the snippet in §V-EEPROM "Reproduction" |
+| `build/mie_sub*.bin` | MIE ACK / EEPROM templates; `python3 scripts/parse_cart_log.py capture-attract.log --dump-mie build/` (needs a Naomi-mode capture) |
+| `build/mie_jvs*.bin` | JVS I/O-board enumeration replies; `python3 scripts/extract_jvs_replies.py capture-attract.log` |
+
+Tests (all pass, run 2026-07-20): `make -C shims test`,
+`python3 scripts/test_parse_cart_log.py`, `python3 scripts/test_v1_ranges.py`,
+`python3 scripts/check_triples.py`.
+
+### Real-hardware watch-items (`.superpowers/sdd/task-19-branch-review.md`)
+
+Test order on HW: **(1) graphics → (2) streaming hitches → (3) controller
+input.**
+
+- **C1 — cache coherency (FIXED, Task 20).** `cart_read` now writes the streamed
+  destination via the **P2 uncached** alias (`shims/src/cart.c:46`,
+  `dest_phys | 0xa0000000`). The original Naomi cart-DMA delivered assets to
+  physical RAM and the game consumes them uncached / via hardware DMA
+  (PVR/TA/AICA); the old P1-cached write left fresh bytes in the D-cache with RAM
+  stale → garbage/black graphics on real hardware. Flycast has no real cache, so
+  this was catchable only by reasoning, never by the emulator. **If graphics are
+  wrong on HW, look here first** (confirm which alias the game reads the buffer
+  through).
+- **I1 — GD-ROM PIO latency.** The cart hook does a synchronous busy-polled
+  **PIO** read inside the frame-critical DMA-wait (`gd.c:33-45`,
+  `cart.c:70-91`). Flycast's virtual drive returns instantly; a real GD-ROM is
+  far slower and PIO adds per-word CPU cost, so heavy streaming (stage loads) may
+  hitch or underrun audio. Not a crash. **Mitigation: the Phase-5 GD-DMA
+  upgrade** (noted in `gd.c`). Test the heaviest streaming transitions first.
+- **I2 — real-Maple input setup.** The shim drives the real Maple registers for
+  `GetCondition` (`maple.c:32-48`); this works only because KOS (the loader is a
+  KOS program) programmed `SB_MDAPRO`/`SB_MDTSEL`/`SB_MDSPEED` + bus-enable at
+  boot and the game never touches the real regs afterward (all mirrored). KOS's
+  `maple_dma_mem_protection()` covers `0x0c000000..0x0cffffff` incl. the shim RX
+  buffer, so it should hold — but Flycast ignores `SB_MDAPRO`, so **if controller
+  input is dead on HW, this is the first suspect.**
+
+Other review items (`task-19-branch-review.md`, all low-risk / non-blocking): an
+unhandled MIE subcommand hard-hangs via `shim_die` (the handled set covers
+attract/1P/2P/free-play, but an untested condition could brick — a benign
+fallback ACK would be forward-safe); and the empty-port-B poll costs one extra
+maple timeout/frame (well within the 16.6 ms budget).
+
 ---
 
 ## V1 — init RAM-write range (BIOS-GD-syscalls vs raw-ATA gate)

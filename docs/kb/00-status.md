@@ -1,6 +1,6 @@
 # Project status
 
-**Updated:** 2026-07-18 (Phase 3 complete)
+**Updated:** 2026-07-20 (Phase 4 complete)
 
 ## What this is
 
@@ -25,8 +25,13 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
 1. **Foundation — DONE 2026-07-18** (repo, knowledge base, tooling, boot verification)
 2. **Instrumented analysis — DONE 2026-07-18** (cart-streaming map, RAM/serial measurements, input map via instrumented Flycast)
 3. **Reverse engineering — DONE 2026-07-18** (Ghidra headless + interpreter-mode dynamic analysis; entry chain, SP verdict, cart-read fn, input fn, EEPROM fn, BIOS verdict — see `docs/kb/boot-binary.md`)
-4. **Conversion — NEXT** (loader + shims + patches → bootable GDI)
-5. Fit & polish (RAM/asset cuts if measurements demand, hardware testing)
+4. **Conversion — DONE 2026-07-20** (loader + freestanding shim + 28-patch
+   table → bootable GDI; boots, runs attract, playable 1P+2P with free-play —
+   all Flycast-confirmed; see `phase4-conversion.md`)
+5. **Real-hardware testing & fit — NEXT** (run `build/cleo.gdi` on a real
+   Dreamcast via a GDEMU-class ODE; watch items: GD-ROM PIO→DMA latency,
+   VRAM ~9.2 MB > DC 8 MB texture fit, sound-RAM fit, cart-stream cache
+   coherency on real cache)
 
 ## Phase 1 checklist
 
@@ -40,23 +45,19 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
 
 ## Next step
 
-Brainstorm and spec Phase 4 (conversion): design the loader + shims + patches
-that produce a bootable Dreamcast GDI from the Naomi binary. Phase 3 produced
-the concrete patch targets:
+Phase 5 — real-hardware testing. The port is functionally complete and
+Flycast-confirmed (M1–M4, free-play, 2P). The user runs `build/cleo.gdi` on a
+real Dreamcast via a GDEMU-class SD-card ODE (build + run guide:
+`phase4-conversion.md` §"Running on real hardware"). Test order on HW:
 
-- **Cart DMA intercept:** patch `FUN_8c03bd08` (`0x8c03bd08`–`0x8c03bd4d`),
-  specifically the SB_GDST store at `0x8c03bd26` — redirect to GD-ROM reads.
-- **Input shim:** patch BOTH Maple sites — `FUN_8c03c2c6` (steady-state
-  per-frame poll, **sub 0x33**, 34,991×/23,762× in the Phase 4/Phase 3
-  captures) and the store routine at `0x8c0315ce` (boot phase, subs
-  0x15/0x27 + EEPROM) — translate to DC `GetCondition`. (Phase 3's
-  "primary 369×/secondary 7×" counted sub-0x15 only; see `boot-binary.md`
-  §5 addendum + `phase4-conversion.md` §V4.)
-- **EEPROM shim:** intercept sub `0x01`/`0x03` at the same Maple sites;
-  return forced free-play defaults.
-- **No SP relocation** — stack lives at `0x8c00e–fxxx`; main RAM safe.
-- **No BIOS shim** — BIOSREF=0, BIOSEXEC=0; the two BIOS-ROM data-pointer pool
-  words (`0xa0060000`, `0xa01ffd00`) are a low-risk watch item only.
+1. **Graphics** — cart-streamed assets render (the C1 cache-coherency fix,
+   Task 20, must hold on real cache; Flycast has none, so it cannot confirm).
+2. **Streaming** — frame hitches / audio underruns on stage loads (I1: GD-ROM
+   PIO latency; the Phase-5 GD-DMA upgrade is the mitigation).
+3. **Controller input** — real Maple `GetCondition` (I2: relies on KOS's
+   one-time Maple HW setup persisting through handoff).
+
+Then fit: VRAM ~9.2 MB > DC 8 MB (likely texture cuts), sound-RAM fit.
 
 ## Key facts so far
 
@@ -66,6 +67,33 @@ the concrete patch targets:
   entrypoint 0x8c04ae2c (header load table).
 - The rest of the cart is read at runtime via the ROM-board interface —
   on DC this must become GD-ROM streaming / RAM preload.
+
+### Phase 4 findings (see `phase4-conversion.md`)
+
+Shipped deliverable = **KOS loader (`1ST_READ.BIN`) + freestanding SH-4 shim
+(`0x8cfc0000`) + 28-patch table + GDI**. All milestones **Flycast-confirmed**
+(real hardware untested — Phase 5):
+
+- **M1 boot, M2 stream, M3 attract, M4 input, free-play, 2P** — all reached in
+  Flycast (attract runs, playable 1P+2P, FREE PLAY on-screen).
+- **Loader:** reads the 1 MB game image from the GDI (`CART_FAD 47198`), applies
+  the 28 old-byte-verified patches, places the shim + two Naomi BIOS-data
+  slices, zeros the register mirrors + shim `.bss`, `dcache_purge` + handoff to
+  `0x8c04ae2c`.
+- **28 patches** (`scripts/build_patch_table.py`): cart/G1 register-mirror (13),
+  Naomi BIOS-data pointer redirects (2), async-Maple MIE service (maple-base
+  mirror + 2 fn-ptr slots), config-time JVS-enum service (7), forced I/O-spec
+  check (1 `insn16`), sync EEPROM-read hook (1), cart-wait hook (1).
+- **Divergence from the Phase 3 plan** (documented as the real findings): the
+  plan assumed the input fn-ptr path was the whole story. Reality — the game
+  reads input/EEPROM/enum through an **async-Maple MIE engine** (config-time +
+  per-frame transports); it **needs the Naomi BIOS code/data supplied** in RAM
+  (the "no BIOS shim" verdict was wrong); and the **I/O-board enumeration must
+  report node-count ≥ 1** before the game emits its per-frame input poll. The
+  shim services all three.
+- **Real-HW correctness:** the C1 cache-coherency bug (cart-stream dest left in
+  D-cache) is **fixed** (Task 20 — P2-uncached dest); invisible in Flycast (no
+  real cache), would corrupt graphics on hardware.
 
 ### Phase 3 findings (see `boot-binary.md`)
 

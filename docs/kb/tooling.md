@@ -152,6 +152,12 @@ file. No behaviour change unless enabled.
   8-bit RGB PNG, correctly oriented (inherits `GetLastFrame`'s orientation).
 - **Read it:** copy the file first (it's overwritten continuously) then open —
   a torn read is rare (the write is one `fwrite`) but a copy avoids it.
+- **Which trigger:** the every-N-frames dump (`FLYCAST_SHOT_EVERY`) is **flaky**
+  for capturing a *specific* screen — it usually samples a load/transition frame
+  → a black PNG (see the black-PNG note below). The **`SIGUSR1` single-shot is
+  reliable**: bring the on-screen state you want up, then `kill -USR1 <pid>` once
+  and read that grab. Used this way for the free-play "FREE PLAY" confirmation
+  (Task 18) and the attract renders (Tasks 14/20).
 - **Usage (headless, same launch gotchas as capture.sh — abs GDI path +
   `ApplePersistenceIgnoreState` + `rend.vsync=no`):**
   ```sh
@@ -190,9 +196,18 @@ file. No behaviour change unless enabled.
   scripts/ghidra/run.sh import              # import tools/boot.bin, full auto-analysis (once)
   scripts/ghidra/run.sh script NAME.java    # run scripts/ghidra/NAME.java (-noanalysis)
   ```
-  Project dir: `tools/ghidra-proj/` (gitignored). Scripts: `FindMmioXrefs.java`,
-  `ScanBiosTargets.java`, `DumpEntryChain.java`, `WhichFunc.java`.
-  `tools/boot.bin` = first 1 MB of `Cleopatra Fortune Plus.dat` (gitignored).
+  Project dir: `tools/ghidra-proj/` (gitignored). Scripts (`scripts/ghidra/`):
+  - Phase 3: `FindMmioXrefs.java`, `ScanBiosTargets.java`, `DumpEntryChain.java`,
+    `WhichFunc.java`.
+  - Phase 4 (added): `DisasmRange.java` (list/disassemble an arbitrary address
+    range on the auto-analysed program — the workhorse for V1/V3/cart-patch-sites
+    /input-ABI/M2/M3), `ListPoolWords.java` (raw-scan every 4-aligned 32-bit pool
+    word whose 29-bit-masked value lands in a target MMIO range, with its
+    referencing instructions — used to enumerate the cart/G1 mirror repoints),
+    `FindRefsTo.java` (`getReferencesTo` for a word/function — used to prove pool
+    words are single-referenced before repointing them).
+  `tools/boot.bin` = first 1 MB of `Cleopatra Fortune Plus.dat` (gitignored;
+  regenerate: `dd if="Cleopatra Fortune Plus.dat" of=tools/boot.bin bs=1M count=1`).
 
 ### KallistiOS (KOS) + sh-elf toolchain
 
