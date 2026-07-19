@@ -1010,6 +1010,59 @@ press reaches the emulated port-A controller.
 
 ---
 
+## Task 16 — free-play (M5): SUPERSEDES the Task-15 H1/H2 free-play hypotheses
+
+Full analysis + evidence: `.superpowers/sdd/task-16-freeplay-report.md`.
+
+**Both Task-15 hypotheses were wrong, and the re-init writes are NOT the
+free-play blocker.** Decoding the 16 sub-0x0b payloads (extended shim logging:
+`EE WR a=<off> n=<size> d=<bytes>`; MIE write layout `dma_buffer_in=frame+4` →
+`frame+0x0d`=addr, `+0x0e`=size, `+0x10..`=data, Flycast `maple_jvs.cpp:1888`)
+showed the game rewrites the **full 128-byte EEPROM** whose **only** delta from
+our delivered image is the coin byte: game writes `0x00` (coin mode), we deliver
+`0x1a` (FREE PLAY). Our free-play system section is **CRC-valid**
+(`crc(free-play data)=0x50cb` = our stored value; `crc(coin data)=0x6afa` = the
+game's written value → the game's CRC algo **is** `naomi/eeprom.py`). So the
+re-init is **not** a CRC failure of our EEPROM. It is **content-independent**
+(a 0xFF-blank eeprom.py-`validate()`-True game section re-inited identically) and
+the ROM-header per-region defaults (`0x1e0`) are **not** consulted (patching them
+to coin_setting=27 did not change the written coin).
+
+**Root cause #1 — async config EEPROM read (fixed).** The settings validator
+`FUN_8c080094` (called from `FUN_8c081aee`) reads the 93C46 via `FUN_8c080f50`,
+which issues the read through the **shared async maple engine** (`FUN_8c03000c`
+queue / `FUN_8c02f158` result / `FUN_8c0342c0` flush — the same struct
+`*0x8c0e8410` as the runtime engine). Its reply lands a-frame-later via
+`shim_maple_steady`, **after** the validator CRC's its buffers → both copies
+"fail" → re-init. This is the **same synchronous-vs-async config-read gap as Task
+15c** (which only hooked the JVS-enum wrappers `FUN_8c081562/1626`, not this raw
+read). CRC routine = shared `FUN_8c07fa10` (`0xDEBDEB00`/`0x10210000`).
+**Fix:** hook `FUN_8c080f50` → `shim_ee_read`, which fills the validator's three
+output buffers (`0x8c1c954c` full 128B, `0x8c1c9528` copy1, `0x8c1c953a` copy2)
+directly from the baked free-play image. Verified: `EE VAL r=0` — validator now
+**accepts** free-play, no validator re-init.
+
+**Root cause #2 — DC config-time coin reset (the real "9 CREDITS" cause).** Even
+with the validator accepting free-play, `FUN_8c081aee` parses the coin into the
+runtime settings struct field `0x8c1c9794` (=EEPROM byte 9; parser `FUN_8c0811f2`,
+reverse-parser `FUN_8c0811a4`), then a **runtime vtable method** (`*(0x8c0804d0)`
+dispatched by `FUN_8c080418/426/446/456`) **resets it to the coin-mode default
+`0x00`** and the settings-commit `FUN_8c080124` writes it (the 16 writes). The
+vtable is runtime-populated → not statically patchable. The per-frame credit
+handler `FUN_8c07a22a → FUN_8c081eec` reads this struct, so the display follows
+`0x8c1c9794`. **Fix:** `shim_maple_steady` re-stamps `*(u32*)0x8c1c9794 = 0x1a`
+every frame (it already runs per-frame in the same scene loop). Verified held at
+`0x1a` at steady state.
+
+**Writes did NOT drop** (still 16×): they are the config commit, **cosmetic** (DC
+has no EEPROM persistence; the shim re-serves the baked free-play image each boot;
+the display coin is pinned independently). NOP-ing the commit is unsafe (tail-call
+return propagates to the boot scene loop `FUN_8c04ae50`). Patch count 27→28
+(1 new hook). M2/M3/M4 intact (boot reaches `IN raw`, cart streams, CFG enum ×6,
+no SHIMERR). **FREE PLAY on-screen needs USER visual confirmation.**
+
+---
+
 ## V5 — battery-SRAM reference scan (spec §3 out-of-scope check)
 
 **Question (task brief / spec §3):** the game uses Naomi battery SRAM

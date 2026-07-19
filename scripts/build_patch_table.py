@@ -206,6 +206,27 @@ for _w in (0x8C082BB0, 0x8C082C8C, 0x8C082D10, 0x8C082E4C):
 for _w in (0x8C082BB8, 0x8C082C94, 0x8C082D18):
     ptr(_w, 0x8C081626, sym("shim_cfg_rx"), "Task15c: config JVS RX -> shim_cfg_rx")
 
+# §Task 16 (M5): free-play sticks. The settings validator FUN_8c080094 reads the
+# 93C46 via FUN_8c080f50, which issues the read through the shared async engine
+# (FUN_8c03000c/FUN_8c02f158); on DC that reply lands a frame late -- AFTER the
+# validator reads its buffers -> both system CRC copies mismatch garbage -> the
+# game re-inits the system section to coin-mode defaults (observed EE WR x16,
+# coin=0x00) and discards our free-play. Same synchronous-config-read gap as Task
+# 15c (which only covered the JVS-enum wrappers FUN_8c081562/1626, not this raw
+# read). FIX: hook FUN_8c080f50 -> shim_ee_read, which fills the validator's three
+# output buffers DIRECTLY from the baked free-play image, so it sees valid free-
+# play (both CRC = 0x50cb) -> result 0, no re-init. See main.c shim_ee_read +
+# .superpowers/sdd/task-16-freeplay-report.md. Guard the buffer addresses the shim
+# hardcodes: assert FUN_8c080f50's copy-dest + validator pool words are unmoved.
+for _pw, _exp in ((0x8C08107C, 0x8C1C954C), (0x8C081080, 0x8C1C9528),
+                  (0x8C081084, 0x8C1C953A), (0x8C080184, 0x8C1C9528),
+                  (0x8C080188, 0x8C1C953A),
+                  # runtime settings struct base (main.c pins coin @base+0x10=0x8c1c9794):
+                  (0x8C081D14, 0x8C1C9784)):
+    _got = struct.unpack("<I", rd(_pw, 4))[0]
+    assert _got == _exp, f"Task16 EEPROM buffer pool @{_pw:#x}: {_got:#x} != {_exp:#x}"
+hook(0x8C080F50, sym("shim_ee_read"), "Task16: EEPROM read -> shim_ee_read (sync free-play)")
+
 # NOTE (Task 14b history, RESOLVED by Task 14f above): FUN_8c03c2c6 is reached via
 # BOTH pool[0x8c02ed6c] (Mode A) and pool[0x8c02ee88] (Mode B, DC takes this); Task
 # 14 swapped only the first, and swapping the second to shim_maple_entry regressed
@@ -232,6 +253,6 @@ out.append(f"enum {{ CLEO_NPATCHES = {len(patches)} }};")
 (ROOT / "build").mkdir(exist_ok=True)
 (ROOT / "build/patch_table.h").write_text("\n".join(out) + "\n")
 print(f"OK patch_table.h: {len(patches)} patches "
-      f"(1 hook, 16 pool, 9 ptr, 1 insn16; Task 14f async-MIE + Task 15c config-JVS-enum service); "
+      f"(2 hook, 16 pool, 9 ptr, 1 insn16; Task 14f async-MIE + 15c config-JVS-enum + 16 free-play EEPROM); "
       f"MIRROR_P2={MIRROR_P2:#010x} MAPLE_MIRROR_P2={MAPLE_MIRROR_P2:#010x} "
       f"BIOS_60000_P2={BIOS_60000_P2:#010x} BIOS_1FFD00_P2={BIOS_1FFD00_P2:#010x}")

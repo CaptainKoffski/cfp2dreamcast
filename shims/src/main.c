@@ -9,7 +9,7 @@ unsigned short maple_getcond(void);
 unsigned short dc_to_jvs(unsigned short);
 unsigned char  jvs_checksum(const unsigned char *);
 extern const unsigned char jvs_hasdata[];               /* src/jvs.c */
-void scif_puts(const char *); void scif_puthex(unsigned int);   /* src/scif.c */
+void scif_puts(const char *); void scif_puthex(unsigned int); void scif_putc(char);  /* src/scif.c */
 
 /* MIE reply templates + free-play EEPROM, embedded at build (Makefile xxd rules;
  * gitignored source blobs). Verbatim ACKs replayed as captured (§input-ABI 4a). */
@@ -82,7 +82,7 @@ static void jvs_digital(u32 sub, void *rx) {
  * address; the reply is written UNCACHED (P2) because it stands in for a Maple
  * DMA-to-RAM write -- the game's reply reader treats recvaddr as a DMA buffer
  * (reads it uncached / post-invalidate), so an uncached store is what it sees. */
-static void maple_reply(u32 sub, u32 recvaddr) {
+static void maple_reply(u32 sub, u32 recvaddr, u32 frame) {
     void *rx = (void *)P2ADDR(recvaddr);
     switch (sub) {
     case 0x33:                              /* steady per-frame poll: always live */
@@ -119,14 +119,24 @@ static void maple_reply(u32 sub, u32 recvaddr) {
     case 0x27: xmemcpy(rx, mie_sub27, mie_sub27_len); break;   /* kick-scan ACK */
     case 0x31: xmemcpy(rx, mie_sub31, mie_sub31_len); break;   /* DIP switches */
     case 0xff: xmemcpy(rx, mie_subff, mie_subff_len); break;   /* broadcast/reset ACK */
-    case 0x0b: {                            /* EEPROM write: ack + drop (EEPROM is baked
-                                               read-only). Never observed (§V-EEPROM 0x0b:
-                                               0x); defensive so a stray write can't hang. */
+    case 0x0b: {                            /* EEPROM write: MIE sub-0x0b. Payload (Flycast
+                                               maple_jvs.cpp:1888-1896, dma_buffer_in=frame+0xc):
+                                               [+0x0d]=byte addr, [+0x0e]=size, [+0x10..]=data. */
+        u32 ee_addr = GB(frame + 0x0d);
+        u32 ee_size = GB(frame + 0x0e);
         u8 ack[8] = { 0x87, 0x00, 0x20, 0x01, 0x0c, 0x00, 0x8e, 0x00 };
         xmemcpy(rx, ack, 8);
-        if (wr_left) {                      /* Task 15: EEPROM write == game re-init (free-play smoking gun) */
+        if (wr_left) {                      /* Task 16: decode the re-init payload (addr/size/data) */
             wr_left--;
-            scif_puts("EE WRITE(reinit?) rcv="); scif_puthex(recvaddr); scif_puts("\n");
+            scif_puts("EE WR a="); scif_puthex(ee_addr);
+            scif_puts(" n=");     scif_puthex(ee_size);
+            scif_puts(" d=");
+            for (u32 k = 0; k < ee_size && k < 32u; k++) {
+                u8 b = GB(frame + 0x10 + k);
+                scif_putc("0123456789abcdef"[b >> 4]);
+                scif_putc("0123456789abcdef"[b & 15]);
+            }
+            scif_puts("\n");
         }
         break;
     }
@@ -160,7 +170,7 @@ void shim_maple_boot(u32 arg0) {
     case 0x17: case 0x19: case 0x21: pending_jvs = GB(arg0 + 4); break;
     case 0x27:                       pending_jvs = 0xff;         break;
     }
-    maple_reply(sub, recv);
+    maple_reply(sub, recv, cmdblk);
     SB_MDST = 0;
 }
 
@@ -177,7 +187,7 @@ int shim_maple_entry(void) {
     u32 desc = GW(base + 0x10f4);
     GW(desc + 0x04) = recv;                        /* descriptor word1 = recvaddr */
     GW(base + 0x10b8) = raw ^ 1u;                  /* toggle index (as the game does) */
-    maple_reply(0x33, recv);
+    maple_reply(0x33, recv, 0);                     /* 0x33 only: no EEPROM write payload */
     GW(desc + 0x18) &= ~1u;                        /* clear pending bit0 = completion */
     return 0;
 }
@@ -216,6 +226,17 @@ extern int shim_maple_steady(void);   /* both fn-ptr slots point here (ptr patch
 #define MMIR(off) (*(volatile u32 *)P2ADDR(MAPLE_MIRROR + (off)))   /* mirror reg (uncached, game view) */
 
 int shim_maple_steady(void) {
+    /* Task16 (M5): pin the runtime coin setting to FREE PLAY every frame. The
+     * per-frame credit/I-O handler FUN_8c07a22a -> FUN_8c081eec reads the coin
+     * from the settings struct field 0x8c1c9794 (= system EEPROM byte 9, parsed by
+     * FUN_8c0811f2, round-tripped by the reverse-parser FUN_8c0811a4). The DC
+     * config-time settings-init (FUN_8c081aee, driven by the forced boot loop)
+     * resets that field to the coin-mode default (0x00) AFTER our free-play EEPROM
+     * is validated OK -- a runtime vtable method [*0x8c0804d0] we can't statically
+     * patch. shim_maple_steady already runs once per frame in the same scene loop,
+     * so re-stamping 0x1a here holds the credit display at FREE PLAY. 0x1a =
+     * coin-assignment #27 (coin_setting-1), naomi.md:180 / eeprom.py default(). */
+    *(volatile u32 *)0x8c1c9794 = 0x1a;
     int rc = ((int (*)(void))0x8c03c2c6)();        /* real engine: pump + build + trigger into mirror */
     if (MMIR(0x18) & 1u) {                          /* mirror_SB_MDST bit0 = a DMA was triggered this frame */
         u32 addr = MMIR(0x04) & 0x1fffffe0u;        /* mirror_SB_MDSTAR = phys(descriptor list) */
@@ -232,7 +253,7 @@ int shim_maple_steady(void) {
                     case 0x17: case 0x19: case 0x21: pending_jvs = GB(addr + 0x14); break;
                     case 0x27:                       pending_jvs = 0xff;            break;
                     }
-                    maple_reply(sub, rcv);          /* synthesize reply into the transaction's recv buffer */
+                    maple_reply(sub, rcv, addr);    /* synthesize reply; addr=frame base (EEPROM write payload) */
                 }
             }
             if (h1 >> 31) break;                    /* last-transfer bit -> end of list */
@@ -306,4 +327,44 @@ const unsigned char *shim_cfg_rx(void) {
         scif_puts("CFG enum cmd="); scif_puthex(pending_cfg); scif_puts("\n");
     }
     return b + 0x15;                     /* reply base: game reads reply[k]=frame[0x15+k] */
+}
+
+/* Task 16 (M5): config-time EEPROM read for the settings validator FUN_8c080094.
+ *
+ * ROOT CAUSE of "9 CREDITS" (instrumented DC boot + Ghidra RE). The validator
+ * FUN_8c080094 reads the 93C46 via FUN_8c080f50 (hooked here), recomputes both
+ * system-section CRC copies, and on a double mismatch re-inits the system section
+ * to ROM coin-mode defaults (coin byte 0x00) via FUN_8c07ffee -> writes it back
+ * (the observed EE WR x16, coin=0x00), discarding our delivered free-play (0x1a).
+ * FUN_8c080f50 issues the read through the SHARED async engine (FUN_8c03000c queue
+ * / FUN_8c02f158 result / FUN_8c0342c0 flush) whose reply is delivered a-frame-
+ * later by shim_maple_steady -- AFTER the validator has already read its buffers.
+ * So on DC the validator always sees garbage -> both CRCs fail -> re-init. This is
+ * the SAME synchronous-vs-async config-read gap Task 15c fixed for JVS enum; the
+ * EEPROM read hits it too because it uses the raw engine funcs, not the FUN_8c081562
+ * /FUN_8c081626 wrappers 15c hooked. Naomi never showed this (0x 0x0b): real MIE
+ * delivers synchronously (KB §V-EEPROM).
+ *
+ * FIX (parallels 15c -- hook the config transport, synthesize the reply
+ * synchronously): replace FUN_8c080f50 with a direct fill of its three output
+ * buffers from the baked free-play image, so the validator sees valid free-play
+ * (both copies' CRC = 0x50cb) -> returns 0 (both valid), no re-init, no write.
+ * Buffer layout is from the FUN_8c080f50 disasm (pool words 0x8c08107c/1080/1084;
+ * validator pool 0x8c080184/0188): full 128 B at 0x8c1c954c, system copy1 (bytes
+ * 0..17) at 0x8c1c9528, system copy2 (bytes 18..35) at 0x8c1c953a. These are
+ * ordinary game-RAM work buffers read cached, so cached writes are coherent. The
+ * async transport is intentionally skipped (its late reply was the bug); the game
+ * section (bytes 36..127) is copied through verbatim, matching Naomi. build_patch_
+ * table asserts these buffer pool words so a ROM shift fails the build. */
+void shim_ee_read(void);
+static u8 eeread_logged = 1;
+void shim_ee_read(void) {
+    xmemcpy((void *)0x8c1c954c, eeprom_img, 128);      /* full 128-B image */
+    xmemcpy((void *)0x8c1c9528, eeprom_img, 18);       /* system copy1 (CRC+data) */
+    xmemcpy((void *)0x8c1c953a, eeprom_img + 18, 18);  /* system copy2 (CRC+data) */
+    if (eeread_logged) {                                /* one-shot proof the sync read ran */
+        eeread_logged = 0;
+        scif_puts("EE READ sync: coin09="); scif_puthex(*(volatile u8 *)(0x8c1c9528 + 9));
+        scif_puts("\n");
+    }
 }
