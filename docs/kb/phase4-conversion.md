@@ -1671,3 +1671,114 @@ re-hook target. Reproduce: `scripts/../ (build)` then
 `FLYCAST_CARTLOG=cap.log <instrumented Flycast> -config config:Dynarec.Enabled=no
 -config config:Debug.SerialConsoleEnabled=yes build/cleo.gdi`;
 `grep -c '^CART ' <serial>` = 180, `grep 'EXC epc' cap.log` = the crash.
+
+## Task 14e — async-Maple completion mechanism PINNED (A) + fix spec
+
+**Verdict: HYPOTHESIS (A), decisively, with runtime evidence.** The runtime
+input/EEPROM engine detects maple completion by **cross-frame polling of the
+hardware `SB_MDST` busy bit**, which the maple DMA engine self-clears **regardless
+of whether an MIE device answers**. On DC the transaction completes every frame
+(with garbage `fd0023`); the game does NOT hang waiting for a real reply. ⇒ the
+fix is the SIMPLE class — supply valid data in the recv buffer, no
+poll-satisfying transport needed. Nuance vs. the (A) framing: completion is
+**not** VBLANK-auto-DMA and **not** the maple-end IRQ — it is the game's own
+`SB_MDST=1` manual trigger + the hardware `SB_MDST` self-clear, polled next frame.
+Full evidence: `.superpowers/sdd/task-14e-completion-mechanism.md`.
+
+### Key reinterpretation (corrects the "[desc+0x18]" framing of 14/14b/14d)
+
+The steady engine's "descriptor" is the **maple register block itself**:
+`FUN_8c030fc4` (`0x8c030fc4`) stores `*(struct+0x10f4) = 0xa05f6c00` (pool
+`0x8c030fec = a05f6c00`, the **only** runtime-referenced maple-base literal;
+`ListPoolWords 0x5f6c00 0x5f6c20`). In `FUN_8c03c2c6`, `desc = *(struct+0x10f4) =
+0xa05f6c00`, so **`[desc+0x18]` = `SB_MDST`** and **`[desc+0x04]` = `SB_MDSTAR`**.
+The "pending flag `[desc+0x18]` bit0" is literally the hardware `SB_MDST` bit 0;
+"queue the frame / set pending" is the game **triggering the DMA** (`SB_MDST=1`).
+
+### SB_MDTSEL + trigger (static)
+
+`SB_MDTSEL` (`0xa05f6c10`) is written once, in the config-time Z80-upload driver
+`FUN_8c080d18`: `0x8c080d26 mov #0x0,r7` … `0x8c080d96 mov.l 0x8c080e88,r1`
+(`r1=a05f6c10`), `0x8c080d98 mov.l r7,@r1` → **`SB_MDTSEL=0` (manual trigger)**.
+Never set to 1 anywhere → **no VBLANK-auto** (Flycast `maple_if.cpp:54` takes the
+vblank branch only when `SB_MDTSEL==1`). The runtime engine triggers its own DMA.
+
+### Completion path (disasm, `FUN_8c03c2c6`)
+
+```
+8c03c308  mov.l @(r0,r2),r3      ; r0=0x10f4 -> r3 = [struct+0x10f4] = 0xa05f6c00
+8c03c30a  mov.l @(0x18,r3),r1    ; r1 = *(0xa05f6c18) = SB_MDST          <- READ SB_MDST
+8c03c30c  tst r12,r1 (r12=1)     ; test SB_MDST bit0 (DMA busy)
+8c03c30e  bt 0x8c03c314          ; CLEAR (done) -> build+trigger ; SET -> return -1
+8c03c3d6  mov.l r0,@r8 (r8=0xa05f6c04)  ; SB_MDSTAR := phys(descriptor)  <- program DMA
+8c03c3e2  mov.l r12,@(0x18,r2)   ; *(0xa05f6c18)=1 = SB_MDST := 1        <- TRIGGER DMA
+```
+
+Completion = polling `SB_MDST` bit0 at the *start* of the next frame's call. No
+IRQ dependency; the pump `FUN_8c03c1c2` only assembles frames (no maple MMIO).
+Reached ~1×/frame via **both** fn-ptr slots `pool[0x8c02ed6c]` and
+`pool[0x8c02ee88]` (both `=0x8c03c2c6`); DC takes Mode B (mode-select `0x8c02ec90`
+tests `SB_ISTERR & 0x0f00` = maple-error bits, all clear on DC).
+
+### Runtime confirmation (`capture-dc-mie.log`, this 18-patch build)
+
+`16,283 MDODMA enter … pc=8c03c3d6` = 16k maple DMAs triggered from inside
+`FUN_8c03c2c6` (`maple_DoDma` fires only on a guest `SB_MDST=1`). If completion
+were (B) poll-until-real-reply, there would be exactly ONE DMA then an infinite
+`-1` spin. The **16,283 re-triggers prove `SB_MDST` self-cleared every frame** →
+(A). Replies alternate `0c0fd8e0`/`0c1038e0` (8143/8140 = double buffer). EEPROM
+(01/03), DIP (31), JVS (15/17) all land in these runtime buffers → **all route
+through `FUN_8c03c2c6` on DC** (not the fn-ptr boot builder, not the config path).
+
+### Result buffer + crash dependency
+
+- **Result buffer** = maple frame recv addr = double-buffer `0x0c0fd8e0` /
+  `0x0c1038e0`; **BTN_OFF `+0x20`** (P1 word big-endian; checksum `+0x3a`).
+  `SB_MDSTAR` holds the *descriptor* buffer phys (log `mdstar=0c109900`), whose
+  word-1 = the recv addr.
+- **Crash needs BOTH input AND EEPROM (and DIP)** — all garbage `fd0023` on DC,
+  all through the same engine; the null scene object `*0x8c0c4510` → wild jump
+  `0x0c10004c` is the game advancing toward attract with garbage settings+input.
+- **EEPROM MUST route through this path** — the fn-ptr EEPROM handler never fires
+  on DC; sub 01/03 are serviced by `FUN_8c03c2c6` (log), so the async-engine fix
+  is the only delivery route for the baked free-play `eeprom.bin`.
+
+### Fix spec — approach A (data, not transport). Complexity: MEDIUM.
+
+1. **Maple-base mirror (1 pool repoint):** `0x8c030fec: a05f6c00 →
+   MIRROR_MAPLE_P2+0x000` (shim-home block, P2-uncached). Redirects the runtime
+   engine's `SB_MDST`/`SB_MDSTAR` (computed `base+off`) into a shim mirror → the
+   game triggers no real maple DMA. Shim's own `maple.c` (real regs) untouched;
+   config Z80 path (own literals `0x8c080e74/88/8c/90`) left as-is (self-completing
+   red herring).
+2. **Steady-engine service (wrapper hook, 2 ptr patches):** `pool[0x8c02ed6c]` and
+   `pool[0x8c02ee88]` → `shim_maple_steady`, which (a) **calls the real
+   `FUN_8c03c2c6`** first (MUST — 14b proved replacing it skips the pump → 0 cart
+   reads), (b) walks the descriptor at `mirror_SB_MDSTAR` (model on
+   `maple_DoDma`), synthesizes each cmd-0x86/reci-0x20 reply into its recv addr via
+   the existing `maple_reply` + `mie_sub*`/`mie_jvs*` blobs (0x33/0x15 → real DC
+   GetCondition→JVS; **0x03 → baked free-play `eeprom.bin`**; others verbatim), and
+   (c) clears `mirror_SB_MDST=0`. Synchronous, reply ready same frame.
+
+Reuses all reply data unchanged; only the descriptor walk (~50–80 lines) is new.
+Verify (impl task): (1) no game code *blocks on* the real maple-end IRQ (the
+poll-based `FUN_8c03c2c6` is IRQ-independent; ISTNRM/ISTERR refs are the general
+Holly dispatcher) — if any does, fallback = let the real DMA run + overwrite the
+recv buffer next frame; (2) re-test whether the forced I/O-check patch #19 is
+still needed once valid enumeration is returned.
+
+### Reproduction
+
+```sh
+scripts/ghidra/run.sh script DisasmRange.java 0x8c03c2c6 0x8c03c4a2 2>&1 | grep -E 'java> 8c03c3(08|0a|0e|d6|e2)'
+scripts/ghidra/run.sh script ListPoolWords.java 0x005f6c00 0x005f6c20 2>&1 | grep POOLWORD   # only live base = 8c030fec
+grep -oE 'MDODMA enter[^ ]* pc=[0-9a-f]+' capture-dc-mie.log | sort | uniq -c | sort -rn | head -3   # 16283 pc=8c03c3d6
+python3 - <<'PY'
+b=open('tools/boot.bin','rb').read(); base=0x8c020000
+w32=lambda va:int.from_bytes(b[va-base:va-base+4],'little'); w16=lambda va:int.from_bytes(b[va-base:va-base+2],'little')
+assert w32(0x8c030fec)==0xa05f6c00 and w16(0x8c03c42a)==0x10f4 and w32(0x8c080e88)==0xa05f6c10
+assert 0xa05f6c00+0x18==0xa05f6c18 and 0xa05f6c00+0x04==0xa05f6c04
+assert w32(0x8c02ed6c)==0x8c03c2c6 and w32(0x8c02ee88)==0x8c03c2c6
+print("OK: desc+0x18=SB_MDST, desc+0x04=SB_MDSTAR, SB_MDTSEL=0, both slots->FUN_8c03c2c6")
+PY
+```
