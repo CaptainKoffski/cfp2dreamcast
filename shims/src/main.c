@@ -232,17 +232,19 @@ extern int shim_maple_steady(void);   /* both fn-ptr slots point here (ptr patch
 #define MMIR(off) (*(volatile u32 *)P2ADDR(MAPLE_MIRROR + (off)))   /* mirror reg (uncached, game view) */
 
 int shim_maple_steady(void) {
-    /* Task16 (M5): pin the runtime coin setting to FREE PLAY every frame. The
-     * per-frame credit/I-O handler FUN_8c07a22a -> FUN_8c081eec reads the coin
-     * from the settings struct field 0x8c1c9794 (= system EEPROM byte 9, parsed by
-     * FUN_8c0811f2, round-tripped by the reverse-parser FUN_8c0811a4). The DC
-     * config-time settings-init (FUN_8c081aee, driven by the forced boot loop)
-     * resets that field to the coin-mode default (0x00) AFTER our free-play EEPROM
-     * is validated OK -- a runtime vtable method [*0x8c0804d0] we can't statically
-     * patch. shim_maple_steady already runs once per frame in the same scene loop,
-     * so re-stamping 0x1a here holds the credit display at FREE PLAY. 0x1a =
-     * coin-assignment #27 (coin_setting-1), naomi.md:180 / eeprom.py default(). */
-    *(volatile u32 *)0x8c1c9794 = 0x1a;
+    /* Task18 (M5, SUPERSEDES Task16's coin-byte pin): force FREE PLAY every frame.
+     * PROVEN by screenshot (task-18-report): the free-play flag the credit display
+     * AND the credit-decrement read is the settings-struct field at +0xc =
+     * 0x8c1c9790 (base 0x8c1c9784 + 0xc), NOT the coin byte at +0x10 (0x8c1c9794)
+     * Task16 pinned. The decrement gate FUN_8c081efc @0x8c081f48-52 skips the
+     * `sub` (credit -= cost) when *(+0xc)==1; the attract/title credit display
+     * shows "FREE PLAY" instead of "CREDIT(S) N" on the same flag. On DC the game
+     * re-derives coin-mode at settings-init so +0xc lands 0 (coin mode); the coin
+     * byte +0x10=0x1a alone does NOT flip it (the free-play decision is cached at
+     * init, not re-read from the coin byte). shim_maple_steady runs once per frame
+     * in the scene loop, so re-stamping +0xc=1 holds free-play. build_patch_table
+     * asserts pool 0x8c081d14==0x8c1c9784 so a ROM shift fails the build. */
+    *(volatile u32 *)0x8c1c9790 = 1;               /* settings+0xc = FREE PLAY */
     int rc = ((int (*)(void))0x8c03c2c6)();        /* real engine: pump + build + trigger into mirror */
     if (MMIR(0x18) & 1u) {                          /* mirror_SB_MDST bit0 = a DMA was triggered this frame */
         u32 addr = MMIR(0x04) & 0x1fffffe0u;        /* mirror_SB_MDSTAR = phys(descriptor list) */

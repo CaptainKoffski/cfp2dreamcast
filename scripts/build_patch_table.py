@@ -221,7 +221,10 @@ for _w in (0x8C082BB8, 0x8C082C94, 0x8C082D18):
 for _pw, _exp in ((0x8C08107C, 0x8C1C954C), (0x8C081080, 0x8C1C9528),
                   (0x8C081084, 0x8C1C953A), (0x8C080184, 0x8C1C9528),
                   (0x8C080188, 0x8C1C953A),
-                  # runtime settings struct base (main.c pins coin @base+0x10=0x8c1c9794):
+                  # runtime settings struct base. Task18 (M5 fix): main.c pins the
+                  # REAL free-play flag @base+0xc=0x8c1c9790 (drives the credit
+                  # display + decrement gate FUN_8c081efc@0x8c081f48), superseding
+                  # Task16's ineffective coin-byte pin @base+0x10=0x8c1c9794:
                   (0x8C081D14, 0x8C1C9784)):
     _got = struct.unpack("<I", rd(_pw, 4))[0]
     assert _got == _exp, f"Task16 EEPROM buffer pool @{_pw:#x}: {_got:#x} != {_exp:#x}"

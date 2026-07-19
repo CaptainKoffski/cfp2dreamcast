@@ -1063,6 +1063,77 @@ no SHIMERR). **FREE PLAY on-screen needs USER visual confirmation.**
 
 ---
 
+## Task 18 — free-play re-diagnosis + FIX (M5, SUPERSEDES Task 16) + screenshot tool
+
+Full report: `.superpowers/sdd/task-18-report.md`. **Task 16 pinned the WRONG
+variable.** User confirmed the Task-16 (commit 70919dd) build still showed
+"CREDIT(S) 9" and Start decremented → genuine coin mode. This task **proved**
+(via a new headless screenshot tool + a shim memory dump + Ghidra) the real
+free-play flag and **shipped a screenshot-confirmed fix**.
+
+### Job 1 — headless framebuffer → PNG screenshot tool (self-verify the display)
+
+macOS TCC blocks OS screen capture, so Task 16 could not confirm the pixels.
+Added `gui_dumpFramebuffer()` in Flycast `core/ui/gui.cpp` (called from
+`core/ui/mainui.cpp:mainui_rend_frame()` on the render thread after
+`emu.render()`), which **reuses the emulator's own screenshot readback**
+`getScreenshot()` → `OpenGLRenderer::GetLastFrame()`
+(`core/rend/gles/gldraw.cpp:814`) then `stbi_write_png`. Enable with env
+`FLYCAST_SHOT=/abs/shot.png`; dumps every `FLYCAST_SHOT_EVERY` frames (default
+60) **and** on `SIGUSR1`. No OS permission needed. Full usage: `docs/kb/tooling.md`
+§"Headless framebuffer → PNG screenshot". In `patches/flycast-instrument.diff`.
+
+### Job 2 — the REAL free-play flag: settings-struct `+0xc` = `0x8c1c9790`
+
+**Proof (dynamic, not inferred).** A one-shot shim dump of the settings struct
+`0x8c1c9784` at steady attract, cross-checked with a screenshot of the same boot:
+
+| field | addr | value (coin mode) | meaning |
+|---|---|---|---|
+| `+0x00` | `0x8c1c9784` | `9` | (credit-count mirror) |
+| **`+0x0c`** | **`0x8c1c9790`** | **`0`** | **free-play flag (0=coin, 1=free)** |
+| `+0x10` | `0x8c1c9794` | `0x1a` | coin byte — Task16's pin, **confirmed working but IRRELEVANT** |
+
+Credit counter = `9` at `structA 0x8c1c97c8 +0x10..+0x1c` (4 copies) and global
+`0x8c1c976c`. Task 16's coin pin **was working** (`+0x10`=0x1a in the dump) yet
+the game stayed in coin mode → the free-play decision does **not** re-read the
+coin byte; it is **cached at settings-init into `+0xc`**, which resolves to `0`
+(coin mode) on DC.
+
+**`+0xc` drives BOTH the display and the decrement (proven):**
+- Decrement gate: `FUN_8c081efc` @ `0x8c081f48-52` — `mov.l @(0xc,r4),r0;
+  cmp/eq #0x1,r0; bt/s 0x8c081f86` skips the credit `sub` (`0x8c081f82`) when
+  `*(+0xc)==1`. (r4 = `0x8c1c9784` from pool `0x8c081fe4`.)
+- Display: pinning `*(u32*)0x8c1c9790 = 1` flipped the on-screen corner from
+  "CREDIT(S) 9" to **"FREE PLAY"** (screenshot-confirmed, both the title and the
+  how-to-play attract screens).
+- The three `cmp/eq #0x1a,r0` sites in the ROM (`0x8c04ebea`, `0x8c066e94`,
+  `0x8c067246`) are all **test-menu coin-assignment dispatchers** (0x1a is one
+  selectable option of 0x07..0x28), NOT the runtime free-play check. `+0x10` has
+  **zero pool refs** — only read as `base+0x10` inside the `0x8c081xxx` credit
+  library. So no EEPROM value or coin-byte code patch (the naomi.md canonical
+  free-play patch) can fix this game's display — it caches `+0xc`, not `+0x10`.
+  This is why **Option A (correct EEPROM) and the DragonMinded coin-load patch
+  are both dead ends here.**
+
+### Fix (Option B — force the correct runtime flag): SHIPPED
+
+`shim_maple_steady` (per-frame, same scene loop as before) now re-stamps
+`*(u32*)0x8c1c9790 = 1` and the **coin-byte pin was removed** (confirmed dead:
+free-play persists without it). `shim_ee_read` (Task 16) is **kept** (it makes
+the validator accept the EEPROM — orthogonal, low-risk to leave). Patch count
+unchanged at **28** (the fix is shim-internal; no new patch-table entry).
+`build_patch_table.py` still asserts pool `0x8c081d14 == 0x8c1c9784` (guards the
+`+0xc` pin's base against a ROM shift).
+
+**Verified (final build, DC boot, screenshot):** title + attract show
+**"FREE PLAY"** (was "CREDIT(S) 9"); `0 SHIMERR`, 231 cart DMAs, `CFG enum ×6`,
+`IN raw` reached, `EE READ sync coin09=0x1a` → **M2/M3/M4 intact, M5 FIXED**.
+(Decrement-stop not separately tested headless — no Start injection — but it is
+the *same* `+0xc==1` gate as the display, proven above.)
+
+---
+
 ## V5 — battery-SRAM reference scan (spec §3 out-of-scope check)
 
 **Question (task brief / spec §3):** the game uses Naomi battery SRAM

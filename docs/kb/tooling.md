@@ -134,6 +134,40 @@ input, and serial pokes. Distinct from the release Flycast above.
   zeroed before the call so the fixed 64-byte dump never exposes uninitialized
   stack bytes past the actual reply length.
 
+#### Headless framebuffer → PNG screenshot (Task 18)
+
+Self-verify the on-screen display without a macOS screen-capture (TCC)
+permission — the emulator reads its **own** GL framebuffer, no OS screenshot API.
+Added in `core/ui/gui.cpp` `gui_dumpFramebuffer()` (called from
+`core/ui/mainui.cpp` `mainui_rend_frame()`, render thread, after `emu.render()`),
+which **reuses the built-in screenshot readback** `getScreenshot()` →
+`OpenGLRenderer::GetLastFrame()` (`core/rend/gles/gldraw.cpp:814`, the same path
+Flycast's own screenshot/savestate thumbnail uses) then `stbi_write_png` to a
+file. No behaviour change unless enabled.
+
+- **Enable + trigger:** set env `FLYCAST_SHOT=/abs/path/shot.png` before
+  launch. The current frame is written to that path **every N frames**
+  (`FLYCAST_SHOT_EVERY`, default 60 ≈ once/sec, overwriting) **and** on
+  **`SIGUSR1`** (`kill -USR1 <pid>` for an on-demand grab). Output is 640×480
+  8-bit RGB PNG, correctly oriented (inherits `GetLastFrame`'s orientation).
+- **Read it:** copy the file first (it's overwritten continuously) then open —
+  a torn read is rare (the write is one `fwrite`) but a copy avoids it.
+- **Usage (headless, same launch gotchas as capture.sh — abs GDI path +
+  `ApplePersistenceIgnoreState` + `rend.vsync=no`):**
+  ```sh
+  defaults write com.flyinghead.Flycast ApplePersistenceIgnoreState -bool YES
+  FLYCAST_SHOT=/tmp/shot.png FLYCAST_SHOT_EVERY=30 \
+    tools/flycast-src/build/Flycast.app/Contents/MacOS/Flycast \
+    -config config:rend.vsync=no "$(pwd)/build/cleo.gdi" &
+  # wait ~40s for HLE boot to reach attract, then:
+  cp /tmp/shot.png /tmp/snap.png   # read /tmp/snap.png
+  ```
+  A black PNG just means the frame sampled was a load/transition — grab a few
+  frames across a few seconds to catch the title/attract (title shows the
+  credit/FREE-PLAY corner). Kill leftover Flycast instances before relaunching
+  (`pkill -9 -f "flycast-src.*Flycast"`): a stale instance makes the new one
+  fail the SH4 vmem `Verify Failed` (driver.cpp:349) and never boot.
+
 ### Ghidra — 12.1.2 (20260605)
 
 - Install: `brew install --cask ghidra` unavailable in Homebrew; direct download used:
