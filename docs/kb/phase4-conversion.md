@@ -1920,3 +1920,104 @@ assert w32(0x8c02ed6c)==0x8c03c2c6 and w32(0x8c02ee88)==0x8c03c2c6
 print("OK: desc+0x18=SB_MDST, desc+0x04=SB_MDSTAR, SB_MDTSEL=0, both slots->FUN_8c03c2c6")
 PY
 ```
+
+## Task 15b — the sub-0x33 input-poll gate PINNED + M4 fix spec (DIAGNOSIS)
+
+**The Start button does nothing because the game never issues the per-frame JVS
+digital-input poll (MIE sub-0x33). Gate = the config-time JVS enumeration
+(gate 1), not the EEPROM (gate 2).** Root flag: JVS-node-count
+`[0x8c1ca474] = 0` on DC. Full report + reproduction:
+`.superpowers/sdd/task-15b-report.md`.
+
+### The refined smoking gun: sub-0x31 vs sub-0x33 (not "stalled")
+
+The steady per-frame poll IS running on DC — it just polls the wrong device
+class. MIE-sub distribution:
+
+| sub | Naomi `capture-attract.log` | DC `capture-dc-mie.log` | meaning |
+|---|---|---|---|
+| **0x33** | **69,982** | **0** | digital inputs from an enumerated JVS board |
+| **0x31** | 6 | **16,283** | MIE on-board / direct read (no JVS board) |
+
+Start = JVS **digital word** bit `0x8000` at `BTN_OFF=0x20`, carried only by a
+sub-0x33/0x15 reply. sub-0x31 (direct/DIP class) never carries it. (Task-15's
+trace logs only subs 0x33/0x15/0x03/0x0b, so the sub-0x31 steady poll is real but
+invisible to it — why the user "sees no input sub.")
+
+### The gate flag + branch (static, boot.bin)
+
+Node-count `[0x8c1ca474]` is written in **one** function, `FUN_8c082fd8` (the
+config-time JVS-scan commit; `FindRefsTo` = 1 writer):
+
+```
+8c083112  bsr 0x8c082bc4       ; FUN_8c082bc4 = JVS bus probe -> node count (x3 tries)
+8c083124  cmp/ge r10(=1),r13   ; found >=1 node?
+8c083126  bt/s 0x8c08312e      ;  yes -> node-count := r13     (Naomi)
+8c08312c  _mov.l r14,@r4       ;  no  -> node-count := r14 = 0  (DC)  <-- GATE
+   ; r4 = 0x8c1ca474
+```
+
+`FUN_8c082bc4` (probe) and `FUN_8c082aa4` (per-node builder) are called only from
+`FUN_8c082fd8`; `FUN_8c082fd8` + config maple/MIE init `FUN_8c080d18` are called
+from boot init `FUN_8c04ae50` (`0x8c04af76` / `0x8c04ae62`). All config-time.
+
+### Why the probe reads garbage: the config maple path is still UNSERVED on DC
+
+The scan drives raw maple by **absolute** literal (Task 14f mirrored only the
+*runtime* base pool `0x8c030fec`, not these):
+
+| literal | value | reg |
+|---|---|---|
+| `0x8c080e8c` | `0xa05f6c04` | SB_MDSTAR |
+| `0x8c080e88` | `0xa05f6c10` | SB_MDTSEL |
+| `0x8c080e74` | `0xa05f6c14` | SB_MDEN |
+| `0x8c080e90` | `0xa05f6c18` | SB_MDST (spin @`0x8c080da4`/`e14`) |
+| `0x8c080a00` | `0xa05f6c14` | SB_MDEN (FUN_8c0809b2; descriptors RAM `0x8c1ca1a0`; spin @`0x8c080a1c`) |
+
+→ config DMA hits real DC maple → no MIE responder → probe 0 → node-count 0.
+
+### specs `[0x8c0d541c]=1` corroborates but does NOT gate input
+
+Spec-compute (`FUN_8c04ae50` `0x8c04b01c` `tst r11,r11`, r11=node-count) sets
+specs=1 exactly when node-count==0 — so `IOCHK specs=1` confirms node-count=0.
+But `FindRefsTo 0x8c0d541c` → **sole reader** `FUN_8c07a22a` @`0x8c07a264` = the
+error-**screen** gate Task 14c forced (`sett` @`0x8c07a266`). 14c hid the screen;
+node-count=0 still disabled sub-0x33. The runtime engine (`0x8c030xxx`) reads
+node-count *indirectly* (input-init registers a JVS-board slot in the engine's
+24-slot table only when nodes>0); 0 nodes → no JVS-board slot → sub-0x31 only.
+
+### (1) vs (2): it is (1)
+
+EEPROM free-play is already delivered on DC (`EE deliver coin09=0x1a`) and the
+16× sub-0x0b re-init writes are ACKed — yet sub-0x33 stays 0. If EEPROM (2) gated
+input, correct EEPROM would have re-enabled it. node-count (JVS scan, config
+maple — the one thing still unserved) is the gate. The EEPROM re-init is a
+separate cosmetic "9 credits" issue.
+
+### M4 fix — make the config enum succeed. Complexity: MEDIUM (parallels 14f)
+
+1. **Mirror the 5 config maple literals** above → `MAPLE_MIRROR` (reuse 14f's
+   `0xacfd3000`, offset-preserving: MDSTAR→+0x04, MDTSEL→+0x10, MDEN→+0x14,
+   MDST→+0x18). Stops the config DMA hitting real DC maple. (RAM-descriptor
+   literals `0x8c080a04/08/fc`, `0x8c0809ec/f0` left alone.)
+2. **Wrapper-hook `FUN_8c0809b2`** (raw JVS scan; trigger + spin @`0x8c080a1c`) —
+   like `shim_maple_steady`: after the real fn triggers into the mirror, write a
+   **valid JVS enumeration response** into the config recv buffer(s)
+   (`0x8c1ca1a0/a8/ac`, `0x8c0d5ee8`, `0x8c0d7ed8`): 1 board, ≥2 players, ≥8
+   switches, so `FUN_8c082bc4` counts ≥1 and the board struct `[0x8c1ca47c]`
+   passes spec-compute (`byte0≥2, byte1≥8, byte0x97≥2, byte0x98≥0`). Hook site:
+   repoint `FUN_8c080d18`'s `bsr FUN_8c0809b2` @`0x8c080e9e` through the wrapper.
+3. **Result:** node-count≥1 → specs=0 → JVS-board slot registered → engine emits
+   **sub-0x33** → the existing 14f `shim_maple_steady` case 0x33 →`jvs_digital`→
+   `maple.c` GetCondition delivers live input. 14c specs-force becomes redundant
+   (keep as belt). Extra effort vs 14f: 5 absolute repoints + synthesizing the
+   correct JVS feature-response bytes (capture a working-Naomi config-enum reply,
+   or RE `FUN_8c082bc4`/`FUN_8c082aa4`).
+   **Fallback (riskier, rejected as primary):** force node-count nonzero + fake
+   board struct — a fake board with no responder can hang the runtime JVS
+   handshake the engine then runs against it.
+
+**Runtime delivery once enabled — confirmed OK:** `shim_maple_steady` sub-0x33 →
+`jvs_digital` → GetCondition (port A, real regs) → `dc_to_jvs` bit3→Start
+`0x8000` → `BTN_OFF=0x20` is correct by construction (Task 15 §1); only the poll
+being emitted is missing.
