@@ -1347,3 +1347,103 @@ print("OK: extent 0x7000 + 0x70; verify passes; string matches (0 mismatches)")
 PY
 ```
 
+---
+
+## M3 attract-mode boot — result (Task 14): BLOCKED on JVS boot handshake
+
+**Verdict: M3 NOT achieved. Game boots, streams all assets, and RENDERS, but
+halts on the game's own I/O-board detection error instead of entering attract.**
+This is real progress past M2 (render path proven end-to-end), with the blocker
+localized to the input shim's boot handshake. Full report:
+`.superpowers/sdd/task-14-report.md`.
+
+### Regression oracle — `scripts/check_triples.py`
+
+New this task. Reads `docs/kb/cart-streaming-map.csv`; for every `mode==DMA`
+triple asserts `cart_offset + length <= CART_SIZE` (`CART_SIZE = 0x6800000` =
+the real ROM size, `Cleopatra Fortune Plus.dat` = 109,051,904 B = `0x6800000`)
+and `0x0c000000 <= dest && dest+length <= 0x0d000000` (main RAM). Result:
+**`CHECK triples_servable: PASS`** — 388 DMA triples, max cart end `0x609c000`
+(< `0x6800000`), all dests in `[0x0c0e6a00, 0x0cb378e0)`. (The brief's step-1
+sketch used `CART_SIZE = 0x6D00000`; the real ROM is `0x6800000`, so the oracle
+uses the stricter true size. The one PIO row is skipped.) `--selftest` proves
+the assertion can fail (feeds an out-of-ROM read + a non-RAM dest → 2 flagged).
+
+### Boot is clean through M2 (serial)
+
+Full clean rebuild (`shims` → `build_patch_table.py` → `loader` →
+`make_gdi.py`) → 18 patches (1 V3 hook, 15 pool, 2 BIOS ptr). Release Flycast
+on `build/cleo.gdi` (DC profile, reios HLE BIOS — no DC BIOS file, falls back to
+reios; the Naomi BIOS-data slices are supplied by patches #14/#15). Serial:
+loader places shim + BIOS data, applies all 18 patches, `jumping to 8c04ae2c`,
+then **147 CART reads** (cart `0x800000`→`0x58b4800`, dest `0x0c21c3c0`,
+identical to M2), then quiescent. **No SHIMERR** — every MIE subcommand the game
+issued got a structurally-valid reply (nothing reached `main.c`'s
+`default: shim_die(3,…)`).
+
+### The screenshot settles it — render works, but it's an error screen
+
+Screenshot method: macOS `screencapture` is TCC-blocked for the `claude` parent
+process ("could not create image from display"; `TCC.db` read also denied), so
+the framebuffer was captured **in-process** via Flycast's savestate-embedded PNG
+(`renderer->GetLastFrame` → `dc_savestate`, `nullDC.cpp:403`): launch with
+`-config config:Dreamcast.AutoSaveState=yes -config config:Dreamcast.SavestatePath=<dir>`,
+let it render, `kill -TERM` (SDL2 default posts `SDL_QUIT` → clean
+`emu_flycast_term` → `unloadGame` autosave), then carve the 640×479 PNG from the
+`.state` header (`magic[8]"FLYSAVE1" + u64 date + u32 version + u32 pngSize`,
+then PNG bytes).
+
+**On screen: black background, centred white text
+`I/O BD IS NOT CONNECTED TO NAOMI BD.`** — the game's own error string (in
+`tools/boot.bin` @ file offset `657126`; "I/O BD" @ `657116`/`657156`; the
+expected board-ID `SEGA ENTERPRISES,LTD.;I/O BD JVS;…` @ `679724`). The game
+renders it via PVR/TA, so **the DC render pipeline works end-to-end** (not a
+black stall). The game reached its **JVS I/O-board detection and failed it.**
+
+### Root cause — boot JVS handshake is a single-frame stub
+
+`shims/src/main.c` `shim_maple_boot` dispatches every boot-phase MIE sub through
+`maple_reply`, which returns the **digital-read `jvs_hasdata` frame for every
+sub-0x15 receive** (`main.c:34`, `src/jvs.c` `jvs_hasdata`) and captured verbatim
+ACK templates for the transmit subs (0x27/0x17). It never returns the
+**context-specific** JVS boot responses the multi-step handshake requires: the
+board-ID string (JVS read-ID cmd `0x10` → the game compares it against its
+expected `SEGA ENTERPRISES,LTD.;I/O BD JVS;…` @ `0x679724`), and the
+cmd/JVS/comm-version + feature-list replies (JVS `0x11`–`0x14`). The game
+transmits those JVS commands (sub 0x27/0x17), receives with sub 0x15, gets a
+digital-read frame instead of the identity/feature reply, and concludes no board
+is connected. This is exactly the **"boot completion is M4-gated"** deferral the
+`shim_maple_boot`/`shim_maple_entry` comments (`main.c:71,84`) already flag: the
+input shim's boot handshake was never completed. `maple_getcond` (DC-side
+`GetCondition`) and the steady-state `shim_maple_entry` are fine; the gap is
+strictly the boot-phase receive dispatch.
+
+### Next step (Phase 4 M4 / input shim)
+
+Make `shim_maple_boot` track which JVS command was last transmitted (the game's
+transmit subs carry the JVS command bytes in descriptor payload words 4-7,
+`§input-ABI` site A) and return the matching board response for the following
+sub-0x15 receive: JVS reset ack (`0xF0`), set-address ack (`0xF1`), board-ID
+string (`0x10`), cmd/JVS/comm version (`0x11`/`0x12`/`0x13`), feature list
+(`0x14`), before falling through to the digital-read frame for steady polling.
+The Flycast MIE emitter `tools/flycast-src/core/hw/maple/maple_jvs.cpp`
+(`get_id()` @ `:394`, cmd handlers) is the authoritative byte source. Everything
+downstream (cart streaming, render, EEPROM free-play, BIOS data) is confirmed
+working, so completing the boot handshake is the single remaining gate to M3.
+
+### Reproduction
+
+```sh
+python3 scripts/check_triples.py                 # -> CHECK triples_servable: PASS
+# clean build
+source tools/kos/environ.sh && make -C shims clean && make -C loader clean
+make -C shims && python3 scripts/build_patch_table.py && make -C loader && python3 scripts/make_gdi.py
+# boot + in-process framebuffer capture (screencapture is TCC-blocked here)
+defaults write com.flyinghead.Flycast ApplePersistenceIgnoreState -bool YES
+/Applications/Flycast.app/Contents/MacOS/Flycast -config config:rend.vsync=no \
+  -config config:Dreamcast.AutoSaveState=yes -config config:Dreamcast.SavestatePath=/tmp \
+  "$PWD/build/cleo.gdi" &                          # wait ~40s for the 147-read stream
+kill -TERM %1                                      # clean quit -> autosave with embedded PNG
+# carve PNG: skip 24-byte FLYSAVE1 header, take next u32 pngSize bytes -> shows the error screen
+```
+
