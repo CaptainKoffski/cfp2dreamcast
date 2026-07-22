@@ -298,6 +298,28 @@ environment every Phase 4 build task sources.
   extent LBAs to match track 3's disc position. The warning
   `-C specified without -M: old session data will not be merged.` is expected
   and harmless — we want exactly that (no merge, just the LBA offset).
+- mkisofs emits **2048-byte cooked** sectors, which is what the GDI uses
+  (`4 2048 track0N.bin`) — real GD-ROM boot does NOT require 2352 raw sectors
+  (the Atomiswave reference ports use 2048; see below). What it DOES require is a
+  populated IP.BIN track-TOC, which `make_gdi.py` `patch_toc()` writes after
+  `makeip` — see `phase4-conversion.md` B1.
+
+### Reference self-boot GDIs (gitignored — never commit)
+
+Oracles for the real-HW boot format — and `[GDI] Dolphin Blue.7z` is now a
+**build input**: `make_gdi.py` extracts its IP.BIN (donor, B3) + low-density
+tracks at build time (cached in `build/donor/`). Not committed (ROM/commercial
+data); keep the archives in the repo root and extract with
+`/opt/homebrew/bin/7zz` (brew `sevenzip`).
+
+- `[GDI] Dolphin Blue.7z`, `[GDI] Sushi Bar.7z` — **Atomiswave→DC fan ports**, the
+  same porting technique as this project. The closest analog: 2048-byte data
+  tracks, 4-track geometry (track3 @45000, track4 @450000), lead-out FAD 550068,
+  fully-populated `TOC1`, and `GD-ROM1/1` device info. Both share one IP.BIN
+  (byte-identical outside title fields) — `make_gdi.py` uses Dolphin Blue's as
+  the donor and `patch_toc()` reproduces its TOC.
+- `ChuChu Rocket! ...zip` — a commercial GD-ROM dump; cross-checked the TOC entry
+  format (`[FAD LE][0x41 data / 0x01 audio]`) and `GD-ROM1/1` device info.
 
 ### Flycast serial console (M1 boot-test output)
 

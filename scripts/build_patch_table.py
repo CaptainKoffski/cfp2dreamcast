@@ -230,6 +230,37 @@ for _pw, _exp in ((0x8C08107C, 0x8C1C954C), (0x8C081080, 0x8C1C9528),
     assert _got == _exp, f"Task16 EEPROM buffer pool @{_pw:#x}: {_got:#x} != {_exp:#x}"
 hook(0x8C080F50, sym("shim_ee_read"), "Task16: EEPROM read -> shim_ee_read (sync free-play)")
 
+# Real-HW hang fix (2026-07-21, round 2 -- SPC forensics): the settings flow in
+# FUN_8c081aee reaches FIVE thunks into the Naomi BIOS 0x60000 library fn-table
+# [0x8c0804d0] (bit-bangs the cart-board EEPROM via unpatched 0x5f7xxx literals;
+# spins forever on a real DC's G1). Round 1 repointed only the kicker's pool word
+# (0x8c081d20) -- HW stall unchanged, slot-11 never painted: the on-screen SPC
+# sampler pinned the main thread at 0x8c081224 inside decode helper FUN_8c0811f2,
+# whose tail `bsr 0x8c0803f8` (table slot +0x10) is reached FIRST; three more
+# thunks (0x8c080418/426/456) run unconditionally after the kicker site. Callers
+# of all five are settings/credit EEPROM flows only (FindRefsTo: FUN_8c081aee,
+# FUN_8c081c76, FUN_8c081efc/eec) -- neutralized in this port (baked free-play
+# image + per-frame stamp). Hook the THUNK BODIES (covers bsr AND every pool
+# word): return 0 = native nothing-changed path (slot 0x10 feeds a changed-count
+# accumulator @0x8c081b7e; the trio's returns are ignored at the call sites).
+# Round-12 bisect verdict (screenshot-verified): the five thunk-body stubs are
+# attract-safe in Flycast (v3_hooks_noprobes.png = full attract + FREE PLAY);
+# the black-screen regression was the shim's per-tick probe block (now compiled
+# out, SHIM_PROBES=0). All five stay: they are the real-HW armor against the
+# Naomi BIOS EEPROM library's P0/G1 accesses (settings + credit paths).
+hook(0x8C0803F8, sym("shim_ee_lib_decode"),
+     "EE-lib slot 0x10 decode-commit -> return-0 stub (HW stall #2, SPC 8c081224)")
+hook(0x8C080446, sym("shim_ee_write_skip"),
+     "EEPROM write kicker -> return-0 stub (body hook, was ptr @0x8c081d20)")
+hook(0x8C080418, sym("shim_ee_lib_post"), "EE-lib post-kicker thunk A -> return-0 stub")
+hook(0x8C080426, sym("shim_ee_lib_post"), "EE-lib post-kicker thunk B -> return-0 stub")
+hook(0x8C080456, sym("shim_ee_lib_post"), "EE-lib post-kicker thunk C -> return-0 stub")
+# Round 7 (2026-07-21): tried hook(0x8C081AEE) = skip the whole orchestrator.
+# REVERTED -- it breaks Flycast too (14 cart reads, no input polls): the game
+# later waits on state the orchestrator's completion writes provide. The pin is
+# a fault-restart loop on an INTACT insn at 0x8c081224 (SPC/SGR/frame proofs);
+# EXPEVT/TEA on-screen probes identify the fault class + address first.
+
 # NOTE (Task 14b history, RESOLVED by Task 14f above): FUN_8c03c2c6 is reached via
 # BOTH pool[0x8c02ed6c] (Mode A) and pool[0x8c02ee88] (Mode B, DC takes this); Task
 # 14 swapped only the first, and swapping the second to shim_maple_entry regressed

@@ -1,6 +1,8 @@
 # Project status
 
-**Updated:** 2026-07-20 (Phase 4 complete)
+**Updated:** 2026-07-22 (Phase 5: GAME FULLY PLAYABLE ON REAL HARDWARE —
+1P and 2P at full speed, both pads responsive; 2P-slowdown case closed in
+round 18. Remaining: fit/integrity spot-checks, then release packaging.)
 
 ## What this is
 
@@ -28,10 +30,218 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
 4. **Conversion — DONE 2026-07-20** (loader + freestanding shim + 28-patch
    table → bootable GDI; boots, runs attract, playable 1P+2P with free-play —
    all Flycast-confirmed; see `phase4-conversion.md`)
-5. **Real-hardware testing & fit — NEXT** (run `build/cleo.gdi` on a real
-   Dreamcast via a GDEMU-class ODE; watch items: GD-ROM PIO→DMA latency,
-   VRAM ~9.2 MB > DC 8 MB texture fit, sound-RAM fit, cart-stream cache
-   coherency on real cache)
+5. **Real-hardware testing & fit — IN PROGRESS** (run `build/disc.gdi` on a
+   real Dreamcast via a GDEMU-class ODE). Five HW boots (2026-07-20) failed
+   identically (static swirl → menu, no SEGA license), while **Dolphin Blue
+   boots on the user's ODE** (decisive control test). Real defects found and
+   fixed each round — **B1** empty IP.BIN track-TOC at 0x100; **B3** makeip's
+   hardcoded `CD-ROM1/1` device-info + CD-R bootstrap → donor IP.BIN; **B4**
+   boot binary must be in the last data track (both AW ports put 1ST_READ.BIN
+   at exactly LBA 450000) — yet the disc still failed, so **B5 max-clone**:
+   tracks 1–3 + .gdi are the Dolphin Blue donor's bytes **verbatim**, and the
+   whole game (loader + cart at `CART_FAD` 451878) lives in track 4, the only
+   remaining delta vs a proven-bootable disc. Along the way: sector size 2048
+   confirmed fine (2352 was a wrong guess). **BOOT BLOCKER SOLVED (2026-07-20):
+   macOS `._disc.gdi` AppleDouble sidecars poisoned every folder we ever wrote
+   (GDEMU picked the junk `.gdi`); after `dot_clean`, the B5 disc boots on real
+   HW — swirl, SEGA license, bootstrap → our loader, all loader stages pass
+   on-screen (incl. BIOS-syscall GD read).** Next wall: **post-license black
+   screen**, dissected 2026-07-21 via an on-screen shim HUD (breadcrumb blocks,
+   heartbeats, hex dump of live maple descriptor lists read off the TV by the
+   user). Chain of findings: game blanks video during init (hangs look black);
+   engine alive from ISR context polling ports B/C (GetCondition) while the
+   main thread stalls after the EEPROM-read hook; descriptor walk fixed to
+   uncached reads (correct but not the bug); the game runs the full MIE init
+   ladder on real HW (reset/devreq/GetId/Z80-firmware upload — now serviced
+   byte-exact per Naomi-mode capture; Flycast's HLE boot never enters it); and
+   the ACTUAL stall: the settings write-back thunks into the **Naomi BIOS
+   0x60000 library which bit-bangs the cart-board EEPROM via 19 unpatched
+   0x5f7xxx literals** — spins forever on G1 drive status on a real DC (benign
+   reads in Flycast masked it). Fix: patch #29 repoints the single-referenced
+   kicker pool word 0x8c081d20 → `shim_ee_write_skip` (return 0 = the game's
+   own native "nothing to write" path). **HW re-test: stall UNCHANGED** —
+   so the shim grew an on-screen **SPC sampler** (`shim_maple_steady` keeps
+   running through the stall, so it paints the interrupted main-thread PC as
+   hex row y=68; healthy Flycast signature 0x8c0239xx–0x8c023bxx). The user
+   read **SPC=0x8c081224, stable, slot-11 never painted**: the main thread
+   pins inside settings-decode helper FUN_8c0811f2 — whose tail
+   `bsr 0x8c0803f8` is ANOTHER thunk into the same BIOS library (fn-table
+   [0x8c0804d0] slot +0x10), reached BEFORE the patched kicker; three more
+   table thunks (0x8c080418/426/456) run unconditionally after it. Round-2
+   fix (**33 patches**): hook all five THUNK BODIES → return-0 shim stubs
+   (covers bsr + every pool word; 0 = native nothing-changed path — slot
+   0x10's return feeds the changed-count accumulator @0x8c081b7e, the trio's
+   returns are ignored; callers are settings/credit flows only, neutralized
+   by the baked free-play image + per-frame stamp). Flycast-green: 290 cart
+   streams, CFG enum, attract, input polls; the EE WR ×16 vanish — they were
+   issued from inside the stubbed lib calls, provably not needed. HUD: slot
+   11 white = kicker, 12 green = slot-0x10 stub, 13 yellow = post-kicker
+   trio; hex rows recolored cyan. **HW round 3: STILL no change — and that
+   disproves the whole main-thread-stall model.** The decode helper provably
+   cannot spin (its one call is a jump-table memcpy, FUN_8c0947bc; its loops
+   are bounded) and unpainted slot 12 proves the thread never passed through
+   even once — so SPC=0x8c081224 is the PARKED main thread's resume PC: the
+   frame handler that preempted it NEVER RETURNS, spinning in a wait loop
+   that keeps pumping the engine (which is exactly why the shim HUD stays
+   alive). New instrument (deployed, Flycast-green): row y=82 paints
+   `__builtin_return_address(0)` of `shim_maple_steady` = the pump's call
+   site inside the spinning loop. Healthy Flycast baseline: ra=0x8c02ed8c
+   (scene-loop pump site). **HW round 4: ra=0x8c02ed8c — SAME as healthy.**
+   Call-graph dissection (Ghidra): the pump site lives in service
+   FUN_8c02ec08 → sole caller = per-frame callback FUN_8c02e7d8
+   (vblank-registered via FUN_8c02ea14; also called by engine-RESET routine
+   FUN_8c02f082, which masks IRQs, busy-waits a delay, reinits). The
+   callback carries a WATCHDOG: consecutive-fail counter 0x8c0e6134 (pump
+   rc<0 increments, success zeroes) > 60 → engine reset + reset-count
+   0x8c0e6138++. Round-5 probes (deployed, Flycast-green): y68-right = the
+   callback's caller via saved-PR stack scan (baseline 0x8c02abd8 = vblank
+   dispatcher; 0x8c02f0f4 would mean reset-loop), y82 = fail counter |
+   reset count (baseline 0|0; a climbing reset count = watchdog doom-cycle
+   confirmed → then identify WHICH transaction keeps failing).
+   **HW rounds 5–6: engine EXONERATED** (disc=0x8c02abd8 normal dispatcher,
+   fail counter ~0, resets 0) — and the pin is hardware-true: code word at
+   0x8c081224 INTACT (0x6162), SGR frozen 0x8c00ef84 (main stack),
+   [SGR+0x40]=0x8c081b7c (the predicted orchestrator return). Every vblank
+   catches the same context on the same intact instruction ⇒ **eternal
+   fault-restart loop** (only interruptible mechanism left). Round 7: tried
+   skipping the whole orchestrator (hook @0x8c081aee) — **breaks Flycast
+   too** (14 cart reads, no input; the game waits on its completion writes)
+   → reverted; blunt skips are off the table. Deployed probe (Flycast-green,
+   33 patches): y68 = SPC | **EXPEVT** (0xff000024, fault class; Flycast
+   baseline 0x020 stale reset = no exceptions), y82 = **TEA** (0xff00000c,
+   faulting address) | SGR. **HW round 8 delivered the confession:
+   EXPEVT=0x040 = TLB MISS (read), TEA=0x58c1fc94.** A TLB miss is
+   architecturally impossible with MMUCR.AT=0 — and a Naomi game assumes
+   AT=0 forever (no TLB handlers installed; VBR=0x8c00f400 with an
+   unpopulated +0x400 miss vector = eternal fault-restart, exactly the
+   observed pin) and freely uses P0-mirror pointers (0x0c01f100/30 in the
+   settings pool). Diagnosis: **KOS leaves the MMU configured; the game's
+   first P0 access faults forever on real HW; Flycast doesn't emulate this
+   (MMUCR=0 there) — the fourth real-HW-only divergence class of the port
+   (D-cache, G1 regs, BIOS-GD state, now MMU)**. Fix (deployed,
+   Flycast-green): loader writes MMUCR=0 immediately before handoff +
+   shim_maple_steady force-clears MMUCR every tick (self-healing: the pinned
+   load's retry succeeds the moment translation is off). Probe rows now
+   y68 = SPC | MMUCR-before-clear, y82 = TEA | VBR. **HW round 9: THE MMU
+   WAS THE DISEASE — thread walked free** (HUD marched: settings phase +
+   enum completed like in the emulator) — then died SOLID RED = shim_die(4)
+   = GD read error on the first in-game cart stream. Hardening (deployed,
+   Flycast-green): gd_read_sectors now tolerates NOT_FOUND during a 1M-pump
+   pickup window (game-context BIOS command queue may briefly report
+   not-found before the server picks up; KOS's driver retries, we insta-
+   died) + retries each read 3× before failing; shim_die now paints
+   code/a/b as cyan hex on the fill (a = cart-relative FAD, b = -1 send
+   fail / -2 status fail). **HW round 10: still red — 4 | 0x1000 | -2**: the
+   FIRST in-game stream (cart byte 0x800000, a sector the loader-context
+   rehearsal read fine) gets its command ACCEPTED but completed-with-error,
+   through all retries. Working theory: the boot path (running deeper than
+   ever post-MMU-fix) pokes an unmirrored 0x5f7xxx literal = the REAL GD
+   drive on a DC (the day-one documented hazard) → drive state wrecked
+   before the first stream. Deployed (Flycast-green): KOS-style recovery —
+   CMD_INIT(24) drive re-init between read attempts (4 tries; one-time
+   stray poke ⇒ one reinit heals the session) + gd_last_err (raw CHECK
+   status word) painted as `b` on the death screen instead of -2. If red
+   persists, `b` now shows the BIOS's actual error verdict and the next
+   move is the FindMmioXrefs sweep for unmirrored literals on the
+   handoff→first-stream path. **HW round 11: b=0xcafe0000 — the sentinel
+   untouched = every attempt died at SEND (req≤0): the BIOS refuses to even
+   ENQUEUE commands.** Diagnosis sharpened: not a wrecked drive — a wrecked
+   BIOS. The DC BIOS keeps its GD-syscall state in low work RAM
+   (0x8c000xxx); a Naomi game rightfully claims that RAM (VBR=0x8c00f400,
+   stack 0x8c00exxx are already inside it) and tramples the state block →
+   the queue plays dead. Deployed (Flycast-green): on send-refusal the shim
+   calls **gdGdcInitSystem (vector 0x8c0000bc, r7=3, KOS FUNC_GDROM_INIT)**
+   — a direct entry that rebuilds the BIOS GD state from scratch even with
+   the queue wedged — then CMD_INIT, then retries (marker 0xcafe0002 on the
+   death screen if even that fails). Known risk: InitSystem writes low RAM
+   back — a reverse collision with live game data is possible; the next
+   boot arbitrates. Fallback if it loops: a raw ATA/SPI packet driver in
+   the shim (no BIOS dependency at all). **HW round 12: gdGdcInitSystem
+   WORKED** — on real HW the game now runs its full steady-state loop
+   (MIE frames flowing incl. sub-0x33 input polls, cart streaming with
+   activity blinker, SPC varying through the main loop) — but black screen,
+   no frame presented. USER spotted the same in Flycast (my trials had
+   degraded to counter-checking without screenshots — testing gap).
+   **Screenshot bisect (local): the shim's per-tick probe block was the
+   presentation killer** — even a bare per-tick MMUCR READ from the engine
+   tick blacks Flycast's video present (v4_final black vs v5_noguard
+   attract; Flycast quirk, mechanism not chased). The five thunk stubs are
+   attract-safe (v3 screenshot). **Final config (deployed, screenshot-
+   verified attract + PRESS START + FREE PLAY): 33 patches, SHIM_PROBES=0
+   (probe block retired, compiled out; flip to 1 only for a new HW stall
+   hunt), MMU protection = loader handoff MMUCR=0 only, GD hardening kept
+   (retries/CMD_INIT/gdGdcInitSystem — all inert when healthy). **HW round
+   13: ATTRACT MODE ON REAL HARDWARE** — the port runs on a real Dreamcast
+   (HUD overlay still on, to be flag-gated). Open: Start button dead on HW
+   (works in Flycast) — Phase-5 item I2 (real Maple). MDAPRO exonerated
+   (KOS window 0x6155404f covers all 16 MB incl. shim buffers). Deployed
+   (attract-verified): one-time Maple bus re-assert (KOS values: DMA_PROT
+   0x6155404f, SPEED 0xC3500000, TSEL=0, MDEN=1), one retry per failed
+   GetCondition, and CHANGE-driven input diagnostics at y96 —
+   [P1raw|P2raw] | [port-A reply header] (idle FFFFFFFF; a Start press
+   must flip a bit on the left; hdr low byte 8 = DATATRF healthy, 0 = DMA
+   never wrote the buffer). Change-driven paints are video-safe (fly26
+   precedent); only per-tick register probing kills Flycast present.**
+   **HW round 14: port-A GetCondition reply = FFFFFFFF (the Maple
+   no-response marker) consistently** — the DMA demonstrably processes our
+   descriptor (it fetched the recv address from it), the frame is
+   byte-identical to KOS's and the game's own (01406009 for port B), yet
+   nothing answers; the same pad navigates openMenu. Deployed
+   (attract-verified): SH4 write-buffer read-back barrier before the DMA
+   trigger (correct idiom, though a pure race wouldn't be 100%-consistent)
+   + **DEVICE REQUEST (cmd 1) wake probe per port at bus init** — every
+   normal flow (BIOS/KOS/menu) DEVINFOs before polling and some pads stay
+   silent until probed; reply headers painted at y110 (A | B, healthy low
+   byte 5). Input diagnostics y96 now repaint per poll (change-gated
+   paints were unreadable — the game overdraws every frame).
+   **HW round 15: INPUT WORKS — the DEVINFO wake probe was the fix; BOTH
+   pads work, game PLAYABLE on real hardware.** New issue: 2P mode "very
+   slow" (HW only; 1P normal). Mechanism: the game requests input per
+   player → jvs_digital did 2 live Maple transactions per request = 4+ bus
+   busy-waits/frame in 2P (instant in Flycast, ~0.5–1 ms each on the wire,
+   plus retry+timeout when a pad is re-polled back-to-back). Fix
+   (deployed, attract-verified): per-frame pad cache — both ports sampled
+   once per engine tick (stamped by steady_beat), all same-frame requests
+   served from cache. **HW round 16 verdicts (rate meters read off the
+   TV): DISC INNOCENT (cart reads = 0 during gameplay in both modes —
+   everything preloads at boundaries); the pad cache was refreshing ~7/s
+   not ~60/s (round-16 hardcoded TCNT0=12.5 MHz without reading the
+   prescaler → the "clunky controls"); and with bus+disc idle, the
+   remaining 2P drag points at the HUD itself — thousands of uncached VRAM
+   writes per frame, free in Flycast, milliseconds on real HW.** Round 17
+   (deployed, attract-verified): **clean-screen build** — SHIM_HUD=0
+   compiles out all marks/hex (shim_die fatal paints stay unconditional;
+   flip SHIM_HUD=1 in util.c for future stall hunts), pad-cache window now
+   computed from TCR0.TPSC at runtime. **HW round 17: controls fixed
+   (prescaler), 1P good (rare hiccups), 2P much better but still not
+   smooth.** Round 18 found the last invisible spender: **per-frame SCIF
+   serial** — LISTDIAG's "one-shot" gate (wr_left==32) fires every trigger
+   forever now that the EEPROM lib is stubbed; a ~75-char line overflows
+   the 16-byte FIFO and spin-waits ~5 ms at 115200 baud EVERY frame (free
+   in Flycast, instant drain), doubled in 2P; IN-raw printed a line per
+   button press (= the rare 1P hiccups). Deployed (attract-verified):
+   SHIM_TRACE=0 silences LISTDIAG / IN-raw / CART-off traces (boot-time
+   prints kept; flip SHIM_TRACE=1 to restore). **HW round 18 VERDICT
+   (2026-07-22): 2P runs at 1P speed, controls responsive — slowdown case
+   CLOSED.** Full attribution chain: maple bus transactions (partial) →
+   HUD uncached VRAM writes (major, round 17) → per-frame SCIF FIFO spin
+   (final, round 18). Residual: brief dips only DURING heavy clear/combo
+   animations, load-shaped. Assessed authentic: Naomi and DC share the
+   same 200 MHz SH4 + CLX2 GPU, cart reads measured 0 during gameplay
+   (round 16), and with HUD+serial compiled out the shim's steady cost is
+   ~2 maple transactions per 8 ms pad-cache window — nothing left that
+   scales with animation load. Cross-check if ever desired: arcade
+   footage of the same multi-row combos. VRAM overfit (9.2 MB > 8 MB)
+   demoted from slowdown suspect to graphics-integrity watch item — it
+   would show as wrong/missing textures, none reported. Build-order
+   foot-gun fixed in loader/Makefile: patch_table.h now regenerates from
+   shim.map (a shim rebuild moves symbols; generating the table first shipped
+   pointers into moved functions — deterministic self-inflicted wedge, cost
+   half a day). Watch item: thunk 0x8c0803a4 (same table, via trampoline
+   0x8c081ae8) is NOT on the boot path and left unpatched — the SPC row will
+   name it if it ever bites. Remaining
+   watch items: GD-ROM PIO→DMA latency, VRAM ~9.2 MB > DC 8 MB texture fit,
+   sound-RAM fit.
 
 ## Phase 1 checklist
 
