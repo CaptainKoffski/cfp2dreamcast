@@ -3,7 +3,29 @@ typedef unsigned int u32;
 typedef unsigned char u8;
 void shim_die(u32, u32, u32);
 void *xmemcpy(void *, const void *, u32);
+void shim_mark(u32 slot, unsigned short color);   /* util.c: real-HW breadcrumb HUD */
+void shim_hex(u32 x, u32 y, u32 val);             /* util.c: on-screen hex printer */
+static void mie_probe_reply(u32 cmd, u32 fh, u32 rcv, u32 frame);  /* MIE init ladder */
 /* shim_cart_service lives in src/cart.c (Task 10) */
+
+/* Per-frame/per-event serial trace (LISTDIAG, IN-raw, CART-off). Default OFF:
+ * real-HW SCIF spin cost (see round-18 note at the LISTDIAG site). */
+#ifndef SHIM_TRACE
+#define SHIM_TRACE 0
+#endif
+
+/* HUD paint-once bitmask. .data (bit7 sentinel non-zero) per house style. */
+static u8 hud_marks = 0x80;
+#define HUD_ONCE(bit, slot, color) \
+    do { if (!(hud_marks & (bit))) { hud_marks |= (bit); shim_mark(slot, color); } } while (0)
+
+/* Fine-grained forensics for the real-HW hang window (EEPROM write-back ->
+ * JVS enum). .data non-zero inits per house style; low 16 bits = counters. */
+static u32 ee_wr_count = 0x10000;    /* sub-0x0b service count */
+static u32 steady_beat = 0x10000;    /* shim_maple_steady call count (heartbeat) */
+static u32 trig_seen   = 0x10000;    /* mirror-DMA triggers in current beat window */
+static u32 rc_ok_seen  = 0x10000;    /* engine rc==0 (not busy) in current window */
+static u32 reply_ticks = 0x10000;    /* total maple_reply invocations */
 
 unsigned short maple_getcond(unsigned int port);   /* DC Maple GetCondition: port A=0, B=1 */
 unsigned short dc_to_jvs(unsigned short);
@@ -53,19 +75,67 @@ static u8 wr_left   = 32;                     /* remaining sub-0x0b (EEPROM writ
 #define SB_MDST (*(volatile u32 *)0xa05f6c18)
 #define GW(a)   (*(volatile u32 *)((a) | 0x80000000u))  /* cached word: game control state */
 #define GB(a)   (*(volatile u8  *)((a) | 0x80000000u))  /* cached byte */
+#define UW(a)   (*(volatile u32 *)((a) | 0xa0000000u))  /* uncached word: DMA descriptor view */
+#define UB(a)   (*(volatile u8  *)((a) | 0xa0000000u))  /* uncached byte */
 
 /* Live DC GetCondition -> JVS digital-read has-data frame at recvaddr.
  * Task 15: rate-limited SCIF trace ("IN raw=<getcond> jvs=<jvsword> sub=<sub>")
  * on CHANGE or every 256th poll, so a user press is visible on serial without
  * flooding the ~60Hz poll. raw=0000ffff idle = controller all-released or no pad;
  * a Start press flips raw (bit3 low) and yields jvs=00008000. */
+/* Pad cache (HW rounds 15-16: 2P mode "very slow" on real HW only). The game
+ * requests input PER PLAYER; each live request = a real Maple bus busy-wait
+ * (instant in Flycast, ~0.5-1 ms on the wire; a pad re-polled back-to-back
+ * often misses its reply, adding retry+timeout). Round-15 keyed the cache on
+ * steady_beat -- insufficient (2P ticks the engine per player, invalidating
+ * the cache mid-frame). Round-16: key on TCNT0 (BIOS-left-running, ~12.5 MHz
+ * down-counter, the same timer the game uses) with an ~8 ms window -- immune
+ * to how often the engine ticks. .data nonzero inits. */
+#define TCNT0 (*(volatile u32 *)0xffd8000c)
+#define TCR0  (*(volatile unsigned short *)0xffd80010)
+static u32 in_tcnt = 1;
+static u32 raw_cache_a = 0xffff, raw_cache_b = 0xffff;
+u32 getcond_total = 1;                       /* rate probe, ++ in cache refresh */
+static u32 gc_rate = 1, cc_rate = 1;         /* last 1s-window rates (heartbeat-updated) */
+/* Round-17 fix: round-16 hardcoded "TCNT0 = 12.5 MHz" -- wrong if the BIOS
+ * left a bigger prescaler (rate meter showed refreshes ~7/s instead of ~60/s
+ * = the "clunky controls"). Compute the ~8 ms window from TCR0.TPSC. */
+static u32 pad_thresh = 1;                   /* 1 = not yet computed (.data) */
+
 static void jvs_digital(u32 sub, void *rx) {
-    unsigned short raw  = maple_getcond(0);              /* port A -> P1 */
+    HUD_ONCE(0x08, 3, 0xffe0);                           /* slot3 yellow: input poll live */
+    if (pad_thresh == 1) {
+        static const u32 shifts[8] = {2, 4, 6, 8, 10, 10, 10, 10}; /* TPSC: /4 /16 /64 /256 /1024 */
+        pad_thresh = (50000000u >> shifts[TCR0 & 7u]) / 125u;      /* Pck 50 MHz; ticks per 8 ms */
+    }
+    u32 now = TCNT0;
+    if (in_tcnt - now > pad_thresh) {        /* down-counter: elapsed = last - now */
+        in_tcnt = now;
+        getcond_total += 2;
+        raw_cache_a = maple_getcond(0);                  /* port A -> P1 */
+        raw_cache_b = maple_getcond(1);                  /* port B -> P2 (0xffff=no pad -> idle) */
+    }
+    unsigned short raw  = (unsigned short)raw_cache_a;
     unsigned short j    = dc_to_jvs(raw);
-    unsigned short raw2 = maple_getcond(1);             /* port B -> P2 (0xffff=no pad -> idle) */
+    unsigned short raw2 = (unsigned short)raw_cache_b;
     unsigned short j2   = dc_to_jvs(raw2);
     unsigned int   key  = ((unsigned int)raw << 16) | raw2;   /* log on either pad's change */
-    if (key != in_last || (++in_hb & 0xffu) == 0u) {
+    /* HW input diagnostics, repainted EVERY poll (the game overdraws each
+     * frame, so change-gated paints flashed unreadably; per-poll shim_hex is
+     * video-safe -- the y26-54 rows already do it in attract-green builds).
+     * y96: [P1raw|P2raw] | [port-A reply header]. Idle FFFFFFFF; a Start
+     * press must flip a bit on the left; hdr low byte 8 = healthy DATATRF,
+     * 0 = the DMA never wrote the buffer (bus/transaction dead). */
+    {
+        extern u32 maple_hdr[2];
+        shim_hex(20, 96, key);
+        shim_hex(120, 96, maple_hdr[0]);
+        /* y110 rate meters: values refresh 1/s (heartbeat), painted per poll
+         * so they stay readable over the game's per-frame redraw. */
+        shim_hex(20, 110, gc_rate);
+        shim_hex(120, 110, cc_rate);
+    }
+    if (SHIM_TRACE && (key != in_last || (++in_hb & 0xffu) == 0u)) {
         in_last = key;
         scif_puts("IN raw=");   scif_puthex(raw);
         scif_puts(" jvs=");     scif_puthex(j);
@@ -89,6 +159,9 @@ static void jvs_digital(u32 sub, void *rx) {
  * DMA-to-RAM write -- the game's reply reader treats recvaddr as a DMA buffer
  * (reads it uncached / post-invalidate), so an uncached store is what it sees. */
 static void maple_reply(u32 sub, u32 recvaddr, u32 frame) {
+    HUD_ONCE(0x02, 1, 0x07e0);                           /* slot1 green: first MIE service */
+    if (((++reply_ticks) & 15u) == 0)                    /* slot9: replies still flowing? */
+        shim_mark(9, (reply_ticks & 16u) ? 0xffff : 0x39e7);
     void *rx = (void *)P2ADDR(recvaddr);
     switch (sub) {
     case 0x33:                              /* steady per-frame poll: always live */
@@ -128,8 +201,13 @@ static void maple_reply(u32 sub, u32 recvaddr, u32 frame) {
     case 0x0b: {                            /* EEPROM write: MIE sub-0x0b. Payload (Flycast
                                                maple_jvs.cpp:1888-1896, dma_buffer_in=frame+0xc):
                                                [+0x0d]=byte addr, [+0x0e]=size, [+0x10..]=data. */
-        u32 ee_addr = GB(frame + 0x0d);
-        u32 ee_size = GB(frame + 0x0e);
+        u32 n = (++ee_wr_count) & 0xffffu;  /* slot6: EE-write progress 1=blue 8=yellow 16=white */
+        if (n == 1)       shim_mark(6, 0x001f);
+        else if (n == 8)  shim_mark(6, 0xffe0);
+        else if (n == 16) shim_mark(6, 0xffff);
+        u32 ee_addr = UB(frame + 0x0d);      /* frame = descriptor block: DMA-source memory,
+                                                uncached view (see the walk below) */
+        u32 ee_size = UB(frame + 0x0e);
         u8 ack[8] = { 0x87, 0x00, 0x20, 0x01, 0x0c, 0x00, 0x8e, 0x00 };
         xmemcpy(rx, ack, 8);
         if (wr_left) {                      /* Task 16: decode the re-init payload (addr/size/data) */
@@ -138,7 +216,7 @@ static void maple_reply(u32 sub, u32 recvaddr, u32 frame) {
             scif_puts(" n=");     scif_puthex(ee_size);
             scif_puts(" d=");
             for (u32 k = 0; k < ee_size && k < 32u; k++) {
-                u8 b = GB(frame + 0x10 + k);
+                u8 b = UB(frame + 0x10 + k);
                 scif_putc("0123456789abcdef"[b >> 4]);
                 scif_putc("0123456789abcdef"[b & 15]);
             }
@@ -246,30 +324,224 @@ int shim_maple_steady(void) {
      * asserts pool 0x8c081d14==0x8c1c9784 so a ROM shift fails the build. */
     *(volatile u32 *)0x8c1c9790 = 1;               /* settings+0xc = FREE PLAY */
     int rc = ((int (*)(void))0x8c03c2c6)();        /* real engine: pump + build + trigger into mirror */
+    if (rc == 0) rc_ok_seen++;
+    /* Row y68: interrupted-context PC. The heartbeat blinks through the stall,
+     * so this runs from ISR context -- SPC = the PC of the spinning main
+     * thread, readable off the TV. Names the hang loop without guessing.
+     * Left: live per-tick sample. Right: 1 Hz latch (coherent single read). */
+    /* MMU protection (the round-8/9 root cause: KOS hands off with the MMU
+     * configured; a Naomi game assumes AT=0 forever) lives in the LOADER's
+     * handoff (MMUCR=0 just before the jump). No per-tick guard here: the
+     * round-12 screenshot bisect showed even a bare per-tick MMUCR READ from
+     * this path kills Flycast's video present (v4_final black vs v5 attract);
+     * nothing re-enables the MMU post-handoff, the loader clear suffices. */
+#ifndef SHIM_PROBES
+#define SHIM_PROBES 0   /* round-12 verdict: per-tick probes kill Flycast's video
+                         * present. Retired -- the mystery they were built for is
+                         * solved (MMU). Flip to 1 only for a new HW stall hunt. */
+#endif
+#if SHIM_PROBES
+    u32 spc; __asm__ volatile ("stc spc,%0" : "=r"(spc));
+    shim_hex(20, 68, spc);
+    /* HW round 4 (ra came back 8c02ed8c = the NORMAL service call site, both
+     * worlds). Call graph (Ghidra): pump site lives in service FUN_8c02ec08,
+     * whose ONLY caller is per-frame callback FUN_8c02e7d8 (vblank-registered
+     * via FUN_8c02ea14; also called by engine-RESET routine FUN_8c02f082).
+     * FUN_8c02e7d8 has a WATCHDOG: consecutive-fail counter [0x8c0e6134]
+     * (incremented in the service when the pump returns rc<0, zeroed on
+     * success) > 60 -> reset + [0x8c0e6138]++ (total reset count). Doom-loop
+     * hypothesis: a transaction never completes on HW -> endless 60-frame
+     * reset cycles while the parked main thread waits. Probes:
+     *   y68 right: WHO invoked FUN_8c02e7d8 -- its saved PR, found by scanning
+     *     the stack for the service's known return address 0x8c02e7e8; the
+     *     word +0x1c above is the callback's saved PR (frame layouts fixed:
+     *     service pushes r14,r13,r12,r11,r10,r9,PR; callback pushes r14,PR).
+     *     Vblank-dispatcher address = normal; 0x8c02f0f4 = reset-loop.
+     *   y82: [0x8c0e6134] fail counter | [0x8c0e6138] reset count (climbing
+     *     reset count = watchdog cycling confirmed). */
+    /* HW round 5 exonerated the engine (disc=8c02abd8 normal dispatcher, fail
+     * counter ~0, reset count 0 forever). Only two mechanisms can pin a
+     * context at one PC while interrupts run normally:
+     *   (a) the CODE at 8c081224 was overwritten with a self-branch -- prime
+     *       suspect: our own MIE-ladder reply writes to descriptor-provided
+     *       rcv pointers (the ladder only runs on real HW; a bogus pointer
+     *       sprays a reply over game code, invisible in Flycast);
+     *   (b) the insn genuinely never retires (fault-restart loop).
+     * Probes: y68-right = LIVE code word at 0x8c081224 (healthy 0x6162 =
+     * mov.l @r6,r1); y82 = SGR (interrupted context's r15) | the parked
+     * frame's saved PR at [SGR+0x40] (must read 0x8c081b7c if genuinely
+     * parked mid-FUN_8c0811f2: push r14+PR then add #-0x40 puts PR there). */
+    /* HW round 6 pinned it hard: code word INTACT (6162), SGR frozen at
+     * 0x8c00ef84 (main stack), [SGR+0x40]=0x8c081b7c -- every vblank catches
+     * the SAME context on the SAME intact instruction. An intact insn that
+     * never retires while interrupts flow = eternal fault-restart. The SH4
+     * logs the confession: EXPEVT (0xff000024) = last exception cause,
+     * TEA (0xff00000c) = last faulting data address.
+     *   y68: SPC | EXPEVT     y82: TEA | SGR  */
+    /* HW round 8: EXPEVT=0x040 (TLB MISS read), TEA=0x58c1fc94. A TLB miss is
+     * impossible with MMUCR.AT=0 -- and a Naomi game assumes AT=0 forever (it
+     * has no TLB handlers; the settings code freely uses P0-mirror pointers
+     * 0x0c01f100/30). Something on the real DC has the MMU ENABLED. Probe:
+     * paint MMUCR before treatment. Medicine: force MMUCR=0 every tick -- if
+     * AT was the disease, the pinned load's eternal retry SUCCEEDS the moment
+     * translation is off and the thread walks free. Also paint VBR (whose
+     * exception table is live).   y68: SPC | MMUCR    y82: TEA | VBR  */
+    u32 mmucr = *(volatile u32 *)0xff000010;
+    shim_hex(120, 68, mmucr);
+    *(volatile u32 *)0xff000010 = 0;               /* MMU off. TLB flushed (TI=0 fine). */
+    u32 vbr; __asm__ volatile ("stc vbr,%0" : "=r"(vbr));
+    u32 sgr; __asm__ volatile ("stc sgr,%0" : "=r"(sgr));
+    shim_hex(20, 82, *(volatile u32 *)0xff00000c);
+    shim_hex(120, 82, vbr);
+#endif /* SHIM_PROBES */
+    if ((++steady_beat & 63u) == 0) {              /* forensic heartbeats, ~1 Hz at 60 fps */
+        u32 ph = steady_beat & 64u;
+        /* Round-16 rate windows: values update 1/s here; PAINTED every poll
+         * in jvs_digital (a 1/s paint is overdrawn by the game for 59 of 60
+         * frames -- unreadable, round-13 lesson relearned). */
+        {
+            extern u32 cart_count, getcond_total;
+            static u32 last_gc = 1, last_cc = 1;
+            gc_rate = getcond_total - last_gc;
+            cc_rate = cart_count - last_cc;
+            last_gc = getcond_total; last_cc = cart_count;
+        }
+#if SHIM_PROBES
+        scif_puts("SPC=");    scif_puthex(spc);           /* stall-PC in Flycast log */
+        scif_puts(" expevt=");scif_puthex(*(volatile u32 *)0xff000024);
+        scif_puts(" tea=");   scif_puthex(*(volatile u32 *)0xff00000c);
+        scif_puts(" mmucr="); scif_puthex(mmucr);
+        scif_puts(" vbr=");   scif_puthex(vbr);
+        scif_puts(" sgr=");   scif_puthex(sgr);
+        scif_puts("\n");
+#endif
+        /* slot8: engine pumped. red/green = alive but NO DMA triggers this
+         * window; blue/yellow = alive AND triggering (frames being issued). */
+        shim_mark(8, (trig_seen & 0xffffu) ? (ph ? 0x001f : 0xffe0)
+                                           : (ph ? 0xf800 : 0x07e0));
+        /* slot10: engine verdict. white/gray toggle = returned OK at least
+         * once this window; solid red = every call came back "busy" (-1). */
+        shim_mark(10, (rc_ok_seen & 0xffffu) ? (ph ? 0xffff : 0x8410) : 0xf800);
+        trig_seen = 0x10000; rc_ok_seen = 0x10000;
+    }
     if (MMIR(0x18) & 1u) {                          /* mirror_SB_MDST bit0 = a DMA was triggered this frame */
+        trig_seen++;
         u32 addr = MMIR(0x04) & 0x1fffffe0u;        /* mirror_SB_MDSTAR = phys(descriptor list) */
         u32 i;
+        /* Row-2 forensic indicators: classify the triggered list AS SEEN on
+         * this hardware (the walk found no MIE frames on real DC via cached
+         * AND uncached reads -- so report what IS there). Repainted per
+         * trigger; red=bad green=good yellow=odd. */
+        u32 dg_frames = 0, dg_mpstart = 0, dg_cmd86 = 0, dg_h1first = 0;
+        u32 dg_fh1 = 0, dg_rcv1 = 0, dg_pay1 = 0, dg_fh2 = 0;
+        shim_mark(16, addr == 0 ? 0xf800 :
+                      (addr >= 0x0c000000u && addr < 0x0d000000u) ? 0x07e0 : 0xffe0);
         for (i = 0; i < 32u; i++) {                 /* walk cmd list (<=24 slots); cap guards a runaway list */
-            u32 h1   = GW(addr + 0x00);             /* transfer control (cached: pump wrote it cached, same core) */
-            u32 rcv  = GW(addr + 0x04) & 0x1fffffe0u;   /* recv addr (phys) */
+            /* UNCACHED walk. The pump writes this list as DMA-SOURCE memory
+             * (real maple hardware reads it from RAM, so the game keeps it out
+             * of / flushed past the D-cache); a cached read hit stale lines on
+             * real DC -- engine triggering every frame yet the walk finding no
+             * MIE frames (HUD forensics 2026-07-21). Flycast has no cache, so
+             * cached reads worked there and masked this, same class as the
+             * Task 20 cart-dest bug. */
+            u32 h1   = UW(addr + 0x00);             /* transfer control */
+            u32 rcv  = UW(addr + 0x04) & 0x1fffffe0u;   /* recv addr (phys) */
             u32 plen = (h1 & 0xffu) + 1u;
+            if (i == 0) dg_h1first = h1;
+            dg_frames++;
             if (((h1 >> 8) & 7u) == 0u) {           /* MP_Start command frame */
-                u32 fh = GW(addr + 0x08);           /* frame header */
+                dg_mpstart++;
+                u32 fh = UW(addr + 0x08);           /* frame header */
+                if (dg_mpstart == 1) { dg_fh1 = fh; dg_rcv1 = rcv; dg_pay1 = UW(addr + 0x0c); }
+                else if (dg_mpstart == 2) dg_fh2 = fh;
+                if ((fh & 0xffu) == 0x86u) dg_cmd86++;
                 if ((fh & 0xffu) == 0x86u && ((fh >> 8) & 0xffu) == 0x20u) {  /* MIE: cmd 0x86 / reci 0x20 */
-                    u32 sub = GB(addr + 0x0c);      /* payload[0] low byte = subcommand */
+                    u32 sub = UB(addr + 0x0c);      /* payload[0] low byte = subcommand */
                     switch (sub) {                  /* transmit subs: latch JVS cmd (frame byte 12 = desc+0x14) */
-                    case 0x17: case 0x19: case 0x21: pending_jvs = GB(addr + 0x14); break;
+                    case 0x17: case 0x19: case 0x21: pending_jvs = UB(addr + 0x14); break;
                     case 0x27:                       pending_jvs = 0xff;            break;
                     }
                     maple_reply(sub, rcv, addr);    /* synthesize reply; addr=frame base (EEPROM write payload) */
+                } else {                            /* non-0x86: the MIE init ladder (real HW only) */
+                    mie_probe_reply(fh & 0xffu, fh, rcv, addr);
                 }
             }
             if (h1 >> 31) break;                    /* last-transfer bit -> end of list */
             addr += (2u + plen) * 4u;
         }
+        shim_mark(17, dg_h1first == 0 ? 0xf800 : 0x07e0);            /* first desc word null? */
+        shim_mark(18, dg_mpstart ? 0x07e0 : 0xf800);                 /* any MP_Start frames? */
+        shim_mark(19, dg_cmd86 ? 0x07e0 : 0xf800);                   /* any MIE (0x86) cmds? */
+        shim_mark(20, dg_frames == 0 ? 0xf800 :
+                      dg_frames < 4 ? 0xffe0 : 0x07e0);              /* entries walked: 0/-4/4+ */
+        /* Row 3-5: the stuck transaction in actual hex, repainted per trigger.
+         *   y26: [list ptr]      [first desc word h1]
+         *   y40: [frame header]  [recv addr]
+         *   y54: [payload word0] [2nd frame header]  */
+        shim_hex(20, 26, MMIR(0x04));  shim_hex(120, 26, dg_h1first);
+        shim_hex(20, 40, dg_fh1);      shim_hex(120, 40, dg_rcv1);
+        shim_hex(20, 54, dg_pay1);     shim_hex(120, 54, dg_fh2);
+        /* Round-18: SHIM_TRACE gates all per-frame/per-event serial. On real
+         * HW a ~75-char line overflows the 16-byte SCIF FIFO and spin-waits
+         * ~5 ms at 115200 baud -- EVERY frame (the wr_left==32 "one-shot"
+         * fires forever now that the EEPROM lib is stubbed and wr_left never
+         * decrements). Free in Flycast (instant drain) = the last 2P drag +
+         * the rare 1P hiccups (IN-raw printed per button press). */
+        if (SHIM_TRACE && wr_left == 32) {
+            scif_puts("LISTDIAG star="); scif_puthex(MMIR(0x04));
+            scif_puts(" h1=");     scif_puthex(dg_h1first);
+            scif_puts(" frames="); scif_puthex(dg_frames);
+            scif_puts(" mp=");     scif_puthex(dg_mpstart);
+            scif_puts(" c86=");    scif_puthex(dg_cmd86);
+            scif_puts("\n");
+        }
         MMIR(0x18) = 0;                             /* completion: next frame's poll sees SB_MDST bit0 clear */
     }
     return rc;
+}
+
+/* MIE maple-protocol init ladder (real-HW hang fix, 2026-07-21). On real DC the
+ * engine runs the FULL device bring-up before any 0x86 MIE subcommand:
+ *   DeviceReset(03) -> DeviceRequest(01) -> JVSGetId(82) -> JVSUploadFirmware
+ *   (80, ~600 Z80-firmware chunks each ACKed with a checksum) -> 0x86 traffic.
+ * (Naomi-mode Flycast capture fly23n.log: CLEO-MIE lines; the DC-mode HLE boot
+ * never entered this ladder, so the shim only spoke 0x86 and the engine
+ * re-probed forever -- row-2 HUD: valid lists, zero 0x86 frames.) Replies are
+ * byte-exact to Flycast's BaseMIE (maple_jvs.cpp:1291-1400): reply word0 =
+ * resp | sender_in<<8 | reci_in<<16 | words<<24. The firmware payload itself
+ * is discarded -- there is no Z80; only the additive checksum is echoed. */
+static const char mie_id48[] = "315-6149    COPYRIGHT SEGA ENTERPRISES CO,LTD.  ";  /* 48 used */
+
+static void mie_probe_reply(u32 cmd, u32 fh, u32 rcv, u32 frame) {
+    volatile u32 *rx  = (volatile u32 *)P2ADDR(rcv);
+    volatile u8  *rx8 = (volatile u8  *)P2ADDR(rcv);
+    u32 hdr = ((fh >> 16) & 0xffu) << 8 | ((fh >> 8) & 0xffu) << 16;  /* sender/reci echo */
+    u32 k;
+    switch (cmd) {
+    case 0x01: rx[0] = hdr | 0x05; break;            /* DeviceRequest -> empty DeviceStatus */
+    case 0x02: rx[0] = hdr | 0x06; break;            /* AllStatusReq  -> empty */
+    case 0x03: case 0x04:
+               rx[0] = hdr | 0x07; break;            /* DeviceReset/Kill -> DeviceReply */
+    case 0x82:                                        /* JVSGetId -> dual frame + ID */
+        rx[0] = hdr | 0x83 | (7u << 24);
+        for (k = 0; k < 28; k++) rx8[4 + k] = mie_id48[k];
+        rx[8] = hdr | 0x83 | (5u << 24);
+        for (k = 0; k < 20; k++) rx8[36 + k] = mie_id48[28 + k];
+        break;
+    case 0x80:                                        /* firmware upload chunk / finalize */
+        if (UB(frame + 0x0d) == 0xffu) { rx[0] = hdr | 0x07; break; }
+        {
+            u32 sum = 0;
+            for (k = 0; k < 0x1c; k++) sum += UB(frame + 0x0c + k);
+            rx[0] = hdr | 0x80 | (1u << 24);
+            rx[1] = sum & 0xffu;
+            rx[2] = hdr | 0x07;
+        }
+        break;
+    default:                                          /* unknown probe: benign ACK */
+        rx[0] = hdr | 0x07;
+        break;
+    }
 }
 
 /* Task 15c: service the CONFIG-TIME JVS enumeration so node-count [0x8c1ca474]>=1
@@ -314,6 +586,7 @@ const unsigned char *shim_cfg_rx(void);                      /* FUN_8c081626 rep
 
 int shim_cfg_tx(u32 node, u32 arg1, u32 len, u32 payload) {
     (void)node; (void)arg1; (void)len;
+    HUD_ONCE(0x10, 7, 0xfc00);          /* slot7 orange: config-enum transmit reached */
     pending_cfg = GB(payload);          /* payload[0] = JVS command byte */
     return 0;                            /* callers ignore r0 */
 }
@@ -321,6 +594,7 @@ int shim_cfg_tx(u32 node, u32 arg1, u32 len, u32 payload) {
 const unsigned char *shim_cfg_rx(void) {
     const unsigned char *b;
     u8 bit;
+    HUD_ONCE(0x04, 2, 0x07ff);                           /* slot2 cyan: JVS config enum */
     switch (pending_cfg) {
     case 0x10: b = mie_jvs10; bit = 0x01; break;
     case 0x11: b = mie_jvs11; bit = 0x02; break;
@@ -364,9 +638,60 @@ const unsigned char *shim_cfg_rx(void) {
  * async transport is intentionally skipped (its late reply was the bug); the game
  * section (bytes 36..127) is copied through verbatim, matching Naomi. build_patch_
  * table asserts these buffer pool words so a ROM shift fails the build. */
+/* Settings write-back skip (real-HW hang fix, 2026-07-21). The orchestrator
+ * FUN_8c081aee calls the write kicker via pool 0x8c081d20 (FUN_8c080446 = a
+ * thunk into the Naomi BIOS 0x60000 library, which bit-bangs the cart-board
+ * EEPROM through G1 registers a DC doesn't have -- 19 unpatched 0x5f7xxx
+ * literals in that subtree; on real DC it spins forever on drive status while
+ * the ISR-driven maple engine keeps polling ports B/C, matching the HUD hex
+ * forensics). r0==0 from the kicker makes the game NATIVELY skip the whole
+ * write+wait sequence (0x8c081b8c-8e: tst/bt). Persistence is meaningless on
+ * DC: reads deliver the baked free-play image (shim_ee_read) and free-play is
+ * re-stamped every frame (Task 18), so "nothing to write" is correct. */
+int shim_ee_write_skip(void);
+int shim_ee_write_skip(void) {
+    shim_mark(11, 0xffff);   /* slot11 white = kicker WAS reached (HW forensics) */
+    return 0;
+}
+
+/* HW stall #2 (2026-07-21, SPC row): with #29 in place the HUD was unchanged and
+ * slot 11 never painted -- the main thread pins at SPC=0x8c081224, inside the
+ * settings-decode helper FUN_8c0811f2, which ENDS in `bsr 0x8c0803f8`: another
+ * thunk into the SAME Naomi BIOS 0x60000 library (fn-table [0x8c0804d0] slot
+ * +0x10) that bit-bangs cart-board EEPROM -- the thread dives in ~50 insns after
+ * the pin and never returns. The orchestrator FUN_8c081aee then calls three more
+ * table thunks unconditionally AFTER the kicker (0x8c080418@bac, 0x8c080426@bb4,
+ * 0x8c080456@bc0) -- same library, next landmines. All callers of all five
+ * thunks are settings/credit EEPROM flows (orchestrator, settings-save
+ * FUN_8c081c76, credit gate FUN_8c081efc), fully neutralized in this port
+ * (reads = baked free-play image; free-play re-stamped per frame). Fix: hook
+ * the THUNK BODIES (covers pool + bsr callers alike) with return-0 stubs;
+ * slot 0x10's return feeds a changed-count accumulator, the trio's returns are
+ * ignored, so 0 = the native nothing-changed path everywhere.
+ *   slot12 green  = decode-commit (0x8c0803f8) reached -- the former blocker
+ *   slot13 yellow = any of the post-kicker trio reached */
+int shim_ee_lib_decode(void);
+int shim_ee_lib_decode(void) { shim_mark(12, 0x07e0); return 0; }
+int shim_ee_lib_post(void);
+int shim_ee_lib_post(void)   { shim_mark(13, 0xffe0); return 0; }
+
+/* HW round 7: skip the ENTIRE settings orchestrator FUN_8c081aee (entry hook).
+ * The main thread is proven pinned (fault-restart) on an intact instruction
+ * inside its decode helper -- mechanism still under investigation via
+ * EXPEVT/TEA, but nothing the orchestrator does is needed in this port:
+ * validation is satisfied by shim_ee_read's baked image (Task 16), writes are
+ * stubbed (the five lib thunks), and free-play is re-stamped every frame
+ * (Task 18). Return 0 = the value the orchestrator already returns through
+ * its no-change path in the green Flycast runs. Sole caller: FUN_8c081bf0
+ * tail-jumps here (bra 0x8c081aee @0x8c081c1a); its preamble still runs.
+ * slot14 cyan = skip hook reached. */
+int shim_settings_skip(void);
+int shim_settings_skip(void) { shim_mark(14, 0x07ff); return 0; }
+
 void shim_ee_read(void);
 static u8 eeread_logged = 1;
 void shim_ee_read(void) {
+    HUD_ONCE(0x01, 0, 0xffff);                          /* slot0 white: first config contact */
     xmemcpy((void *)0x8c1c954c, eeprom_img, 128);      /* full 128-B image */
     xmemcpy((void *)0x8c1c9528, eeprom_img, 18);       /* system copy1 (CRC+data) */
     xmemcpy((void *)0x8c1c953a, eeprom_img + 18, 18);  /* system copy2 (CRC+data) */

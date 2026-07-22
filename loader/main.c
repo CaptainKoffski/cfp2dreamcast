@@ -16,9 +16,42 @@ extern uint8 handoff_end[];     /* end-of-stub label in handoff.S (stub is PIC) 
  * so the collision assumption is verified, not assumed. */
 #define HANDOFF_SCRATCH  0x8ce00000u
 
+/* Real-HW visibility: serial is invisible on a TV, so every stage is drawn to
+ * the framebuffer (KOS init already set 640x480). A stuck screen names the
+ * stage that hung; halt() turns the screen red with the reason. */
+static int say_row = 0;
+static void say(const char *s) {
+    dbglog(DBG_INFO, "%s\n", s);
+    bfont_draw_str(vram_s + (40 + say_row * 26) * 640 + 20, 640, 1, s);
+    say_row++;
+}
+
 static void halt(const char *msg) {
     dbglog(DBG_INFO, "%s", msg);
+    for (int i = 0; i < 640 * 480; i++) vram_s[i] = 0xf800;   /* red */
+    bfont_draw_str(vram_s + 100 * 640 + 20, 640, 1, msg);
     for(;;) thd_sleep(1000);
+}
+
+/* Rehearse the shim's exact GD path (BIOS syscall vector 0x8c0000bc, polled
+ * PIO — see shims/src/gd.c) before handing the game to it. Flycast HLEs these
+ * calls statelessly; the real BIOS runs a state machine in low RAM, so this is
+ * the first place a real-HW divergence would show. Bounded poll: a hang here
+ * halts with its own message instead of a silent black screen. */
+typedef int (*gdc_t)(uint32, uint32, uint32, uint32);
+static int sysrd_test(void *dst, uint32 fad, uint32 n) {
+    gdc_t gdc = (gdc_t)(*(volatile uint32 *)0x8c0000bc);
+    uint32 param[4] = { fad, n, (uint32)dst, 0 };
+    uint32 stat[4];
+    int req = gdc(16 /*CMD_PIOREAD*/, (uint32)param, 0, 0 /*SEND*/);
+    if (req <= 0) return -1;
+    for (uint32 guard = 0; guard < 100000000u; guard++) {
+        gdc(0, 0, 0, 2 /*EXEC*/);
+        int s = gdc((uint32)req, (uint32)stat, 0, 1 /*CHECK*/);
+        if (s == 2 /*COMPLETED*/) return 0;
+        if (s == 0 /*NOT_FOUND*/ || s <= -1 /*FAILED*/) return -2;
+    }
+    return -3;   /* poll never completed */
 }
 
 static int apply_patches(uint8 *img) {
@@ -48,15 +81,30 @@ int main(void) {
            (unsigned)SHIM_BASE, (unsigned)(SHIM_BASE + 0xa800),
            (unsigned)HANDOFF_SCRATCH);
 
+    say("CLEO LOADER M2");
     cdrom_reinit();             /* inits the GD subsystem the shim's BIOS syscalls reuse */
+    say("GD init OK");
     uint8 *stage = (uint8 *)STAGING_ADDR;
     if (cdrom_read_sectors(stage, CART_FAD, GAME_SECTORS) != ERR_OK)
-        halt("read fail\n");
-    if (memcmp(stage, "NAOMI", 5))
-        halt("bad image\n");
+        halt("KOS GD READ FAIL");
+    if (memcmp(stage, "NAOMI", 5)) {
+        dbglog(DBG_INFO, "bad image: %02x %02x %02x %02x %02x %02x %02x %02x @FAD %d\n",
+               stage[0], stage[1], stage[2], stage[3],
+               stage[4], stage[5], stage[6], stage[7], CART_FAD);
+        halt("BAD IMAGE (KOS READ)");
+    }
+    say("cart read OK (KOS)");
+
+    static uint8 sysbuf[2048] __attribute__((aligned(32)));
+    int sr = sysrd_test(sysbuf, CART_FAD, 1);
+    if (sr == -3) halt("SYSCALL GD POLL HANG");
+    if (sr != 0)  halt("SYSCALL GD READ FAIL");
+    if (memcmp(sysbuf, "NAOMI", 5)) halt("BAD IMAGE (SYSCALL READ)");
+    say("cart read OK (BIOS syscall)");
 
     if (apply_patches(stage))   /* verify old bytes then patch; abort on mismatch */
-        halt("patch abort\n");
+        halt("PATCH ABORT");
+    say("patches OK");
 
     uint32 shim_len = (uint32)(shim_bin_end - shim_bin);
     memcpy((void *)SHIM_BASE, shim_bin, shim_len);
@@ -101,8 +149,24 @@ int main(void) {
     dcache_purge_range(BIOS_DATA_60000,  BIOS_DATA_60000_LEN);
     dcache_purge_range(BIOS_DATA_1FFD00, BIOS_DATA_1FFD00_LEN);
 
+    say("shim + BIOS data placed");
     dbglog(DBG_INFO, "jumping to %08x\n", GAME_ENTRY);
+    say("HANDOFF -> game");
+    thd_sleep(2000);            /* let the breadcrumbs be read on a real TV */
     irq_disable();
+    /* Deliberately NO TMU stop / ARM reset here: the game reads TCNT0 for its
+     * delay loops relying on the BIOS-left-running timer (12 TCNT0 literals;
+     * a stopped TMU froze init between the EEPROM phase and JVS enum on real
+     * HW), and it holds/reloads/releases the AICA ARM itself as its first
+     * action (Flycast CLEO-ARMRST trace) -- KOS's state matches Naomi's here. */
+
+    /* MMU OFF for the game. KOS runs with the MMU configured; a Naomi game
+     * assumes MMUCR.AT=0 forever -- it has NO TLB handlers and reads settings
+     * via P0-mirror pointers (0x0c01f100/30). On real HW those accesses raised
+     * eternal TLB-miss restarts (EXPEVT=0x040 read off the TV, main thread
+     * pinned at 0x8c081224) while every P1/P2 path kept working -- invisible
+     * in Flycast (no MMU emulation on this path). */
+    *(volatile uint32 *)0xff000010 = 0;            /* MMUCR: AT=0, TLB invalid */
 
     void (*ho)(uint32, uint32, uint32, uint32) =
         (void *)P2ADDR(HANDOFF_SCRATCH);           /* run the stub uncached */

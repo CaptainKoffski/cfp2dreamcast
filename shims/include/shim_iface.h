@@ -37,7 +37,9 @@
 #define GAME_LOAD_ADDR  0x8c020000
 #define GAME_LEN        0x00100000
 #define GAME_ENTRY      0x8c04ae2c
-#define CART_FAD        47198       /* verified at M1 (Task 2). = CART_LBA 47048 + 150 */
+#define CART_FAD        451878      /* = CART_LBA 451728 + 150: cart follows the
+                                     * 1728-sector boot region in track 4 (B5
+                                     * max-clone layout; was 47198 in track 3) */
 #define CART_SIZE       0x06800000  /* 109,051,904 bytes; verified against ROM at Task 2 */
 
 #define P2ADDR(a)       ((a) | 0xa0000000)

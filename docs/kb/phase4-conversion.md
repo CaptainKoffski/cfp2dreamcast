@@ -86,22 +86,180 @@ Task 17) with no extra game patch.
 
 ## Running on real hardware
 
-**Status: HW-untested.** Everything in this KB is confirmed in Flycast only; the
-user runs the real-hardware test (Phase 5). The build target is a **GDEMU-class
-SD-card ODE** (`00-status.md` Decisions; `CLAUDE.md`).
+**Status: five HW boot attempts failed identically (no SEGA license screen),
+while Dolphin Blue boots on the same ODE/card/flow (control test). Real
+defects were found and fixed each round — empty IP.BIN track-TOC (B1),
+makeip's `CD-ROM1/1` device-info + CD-R bootstrap (B3, donor IP.BIN), boot
+binary not in the LAST data track (B4) — yet the disc still failed, so B5
+stops converging and CLONES: tracks 1–3 and the .gdi are now the donor's bytes
+verbatim, and our entire game (loader + cart) lives in track 4, the only
+remaining delta. Re-test pending.** Everything else in this KB is
+Flycast-confirmed. The build target is a **GDEMU-class SD-card ODE**
+(`00-status.md` Decisions; `CLAUDE.md`).
+
+### B1 — empty IP.BIN track-TOC (FIXED 2026-07-20)
+
+**Symptom (real HW, GDEMU):** select the game → static swirl for a couple of
+seconds → drop back to the DC menu (music/VMU screen). **No SEGA license screen**
+= the BIOS never ran IP.BIN, i.e. it rejected the disc *before* the bootstrap.
+
+**Why Flycast hid it:** Flycast HLE-boots via `reios` — it reads `1ST_READ.BIN`
+straight from the ISO by LBA and jumps, skipping IP.BIN entirely
+(`tools/flycast-src/core/reios/reios.cpp:64-115`). So a disc that only
+Flycast-boots proves nothing about real-HW bootability.
+
+**Root cause:** IP.BIN carries a **track TOC at offset 0x100** — the signature
+`"TOC1"`, then one 4-byte entry per high-density track (`[FAD, 3-byte LE][control:
+0x41 data / 0x01 audio]`), a `0xFF`-padded slot table, and a trailer
+(first-track, last-track, lead-out FAD) at 0x288. The BIOS reads this to locate
+the boot data. **`makeip` runs before mastering, so it cannot know the layout and
+leaves 0x100 all zeros** — and the BIOS rejects a disc whose IP.BIN TOC is empty.
+
+Confirmed by comparing our IP.BIN to three real self-boot GD-ROMs: `ChuChu
+Rocket` and the two Atomiswave→DC fan ports (`Dolphin Blue`, `Sushi Bar`, the
+same porting technique as this project) all carry a populated TOC1; ours was
+0/512 non-zero there. The two Atomiswave ports are **byte-identical** in the TOC
+region and use a fixed full-size-GD-ROM geometry (track3 @LBA 45000, dummy
+track4 @LBA 450000, lead-out FAD 550068) — and, decisively, **2048-byte data
+tracks**, which proves the earlier "must be 2352" theory wrong; sector size was
+never the blocker.
+
+**Fix:** `make_gdi.py` `patch_toc()` writes the TOC into `build/IP.BIN` (before
+`mkisofs -G` embeds it). The disc now mirrors the proven Atomiswave layout:
+2048-byte data tracks, 4-track geometry (track3 = ISO + cart, dummy track4
+@450000), TOC entries for both + trailer. The patched TOC region (0x100–0x297)
+comes out **byte-identical to Dolphin Blue's** — a proven-bootable reference —
+verified at build time. **Necessary but not sufficient:** the third HW attempt
+(TOC fixed, still makeip IP) failed identically → B3.
+
+**Zero blast radius on the shim/loader:** the GD-ROM read syscall returns user
+data *by LBA*, and every LBA is unchanged, so `CART_FAD 47198` and all
+shim/loader addresses are untouched. Verified: cart data still byte-identical to
+the ROM at LBA 47048, and Flycast still boots to attract + FREEPLAY.
+
+### B3 — makeip IP.BIN: `CD-ROM1/1` device-info + CD-R bootstrap (FIXED 2026-07-20, donor IP)
+
+After the third identical HW failure, a **full 32KB diff** of our IP.BIN vs
+Dolphin Blue's (not just the TOC region) showed only 10/128 differing 256-byte
+blocks — and one is the device-info field at 0x20: ours read **`CD-ROM1/1`**,
+every real GD dump reads **`GD-ROM1/1`** (Dolphin Blue and Sushi Bar are
+byte-identical here: `F818 GD-ROM1/1`; ChuChu likewise GD-ROM). `makeip` is a
+CD-R homebrew tool and **hardcodes** the field (`tools/makeip/src/field.c:39`,
+`"0000 CD-ROM1/1"`). The boot ROM validates IP.BIN's meta — including media
+type — *before* the license screen, so a GD-served image claiming CD-ROM is
+dropped exactly as observed. The remaining diff blocks (0x3800, 0x5800–0x5cff,
+0x6000–0x61ff) are makeip's CD-R bootstrap code deviating from the real GD
+bootstrap — plausibly also fatal, eliminated by the same fix.
+
+**Fix — donor IP.BIN:** `make_gdi.py` `ensure_ip()` now builds `build/IP.BIN`
+from the **Dolphin Blue donor** (extracted at build time from
+`[GDI] Dolphin Blue.7z` in the repo root, cached under `build/donor/`): the
+donor's full 32KB — proven GD bootstrap, `GD-ROM1/1`, correct TOC — with only
+inert data fields patched: area symbols → `JUE` + the three canonical region
+texts at 0x3700 (region-free, replacing the old B2 makeip route), company, and
+title (`CLEOPATRA FORTUNE PLUS`, shown by GDEMU menus). Reusing a real IP.BIN
+is the Atomiswave-port technique itself — both megavolt85 ports share one donor
+IP. The donor's low-density session (`track01` mini-ISO + `track02` audio) is
+copied in as well. Verified: the built disc differs from the proven Dolphin
+Blue image in **exactly three inert data regions** (0x30 region symbols,
+0x70–0x9f company/title, 0x3720–0x374f region texts) across the whole 32KB.
+
+**Fallback without the donor archive:** makeip from `loader/ip.txt` + a
+`GD-ROM1/1` byte-fix at 0x25 + `patch_toc()`. This leaves makeip's bootstrap
+deltas in place — **unproven on real HW**; keep the donor `.7z` in the repo
+root (gitignored, never committed).
+
+### B4 — boot binary must be in the LAST data track (FIXED 2026-07-20)
+
+The donor-IP build (B1+B3 fixed) **still failed identically on HW** — while
+**Dolphin Blue itself boots on the user's ODE** (control test, same card, same
+GDMENUCardManager flow). That pinned the failure to the few remaining deltas,
+and parsing both AW ports' ISO filesystems exposed the structural one: **both
+place `1ST_READ.BIN` at exactly LBA 450000 — the first sector of track 4, the
+last data track**. Sushi Bar's `track04.iso` *is* its `1ST_READ.BIN`
+byte-for-byte (813,056 B); Dolphin's is the same plus sector padding, and both
+begin with identical SH-4 bytes (megavolt85's shared loader stub). That is
+*why* the AW-port layout has a track 4 at all. Our disc — boot file in track 3,
+all-zero dummy track 4 — matched no reference disc. Empirical claim basis: two
+proven-bootable AW ports + the user's four HW failures; consistent with the
+BIOS locating the boot file in the last data track during its pre-license disc
+check (the license screen never appeared).
+
+Notable non-factors, proven by the same references: PVD volume-size (both
+ports claim a nonsense 300 sectors and boot), and everything B1–B3 already
+ruled out. The three inert IP.BIN data-field edits (region/company/title)
+remain the only never-varied residue — revisit only if B4 also fails.
+
+**Fix:** `make_gdi.py` `relocate_boot()` rewrites the `1ST_READ.BIN;1`
+directory record extent (both-endian) to `TRACK4_LBA` after mkisofs, and
+`track04.bin` is now the loader binary itself, zero-padded to ≥300 sectors.
+mkisofs's copy of the loader inside the track-3 ISO region becomes dead data.
+Cart location (`CART_LBA` 47048 / `CART_FAD` 47198) and all shim/loader
+addresses unchanged. Verified: FS record points at 450000, `track04.bin` ==
+loader + padding, cart byte-identical to ROM, and Flycast boots the relocated
+layout end-to-end (reios follows the same dir record → loads the loader from
+track 4 → attract + FREE PLAY, 231 cart reads). **Fifth HW attempt: still the
+identical failure → B5.**
+
+### B5 — max-clone: donor disc verbatim, our game confined to track 4 (2026-07-20)
+
+After five identical failures against a growing pile of fixed-but-insufficient
+defects, B5 abandons synthesis entirely. `scripts/make_gdi.py` (rewritten; the
+mkisofs/makeip version lives in git history) masters:
+
+- `track01.iso`, `track02.raw`, `track03.iso`, `disc.gdi` — **the donor's
+  files byte-for-byte** (donor IP.BIN incl. its `J`-region + "Dolphin Blue"
+  title, donor filesystem, donor game data, exact sizes; verified by hash).
+- `track04.iso` — `[our loader, zero-padded to the donor's 3,538,944-byte
+  1ST_READ region][our 109 MB cart]`. The donor FS loads 1ST_READ.BIN
+  (3,538,016 B) from LBA 450000: that's our KOS loader + zero padding, which
+  runs identically. The cart follows at **LBA 451728 / `CART_FAD` 451878** —
+  the one code change (`shims/include/shim_iface.h`; loader + shim rebuilt,
+  host self-test updated).
+
+The BIOS/ODE can no longer distinguish this disc from the proven-bootable
+Dolphin Blue by anything except track04's content and file size — pure payload
+territory. If THIS fails, the suspect list is: ODE/manager behavior tied to
+track04 size, or something outside the disc image entirely. Trade-off: menus
+show the entry as "Dolphin Blue" (donor IP title), and the image embeds donor
+data — fine for local bring-up, revisit before any release.
+
+Verified 2026-07-20: tracks 1–3 + gdi hash-identical to donor; track04 =
+loader + pad + ROM byte-exact; `CART_FAD` behavioral check (loader `NAOMI`
+magic passes — it initially didn't because `loader/Makefile` lacked a
+`shim_iface.h` dependency and kept the stale FAD; dep added); Flycast boots
+end-to-end: license path n/a (reios), loader jump, **231 cart reads** (same
+count as every good build), attract + FREE PLAY screenshot.
 
 ### Deploy to GDEMU
 
-`scripts/make_gdi.py` produces `build/cleo.gdi` plus its three track files
-`build/track01.bin`, `build/track02.raw`, `build/track03.bin` (track 3 =
-IP.BIN + `1ST_READ.BIN` ISO region, then the cart image at LBA 47048 / FAD
-47198). To run on a GDEMU-class ODE: copy the `.gdi` **and all three track
-files together** into a numbered folder on the GDEMU SD card (one game per
-`01/`, `02/`, … folder, per the GDEMU menu convention) and select it from the
-GDEMU boot menu. (GDEMU loads GDI/CDI images from FAT32 SD folders — general
-usage per the GDEMU manual / community setup guides, not a per-title claim.)
-Burning `cleo.gdi` to CD-R is a possible alternative, but GDEMU is the stated
-target and avoids media/laser variance.
+**⚠️ macOS AppleDouble sidecars — the likely cause of ALL six HW boot failures
+(found 2026-07-20 by inspecting the SD card; HW confirmation pending).**
+Copying files to the FAT32 card from macOS (Finder, or any tool that carries
+xattrs — macOS stamps `com.apple.provenance` on new files and the FAT driver
+materializes every xattr as a `._<name>` AppleDouble file) leaves a
+**`._disc.gdi`** sidecar next to `disc.gdi`. GDEMU scans each numbered folder
+for a `.gdi` file — 163 bytes of AppleDouble junk that *ends in `.gdi`* can be
+picked up as the disc → unreadable → static swirl → DC menu, identically every
+time. Decisive evidence: the size-test disc (Dolphin Blue verbatim + cart
+appended to track04, folder 10) failed while byte-identical-in-payload folder
+09 booted — the only difference being the `._*` files; folder 10's payload
+hashed identical to the build. **Deploy rule: after ANY copy to the card from
+macOS, run `dot_clean -m /Volumes/GDEMU/<NN>` and verify `ls <NN>/._*` is
+empty** (or import archives via GDMENUCardManager, which writes clean).
+
+`scripts/make_gdi.py` produces `build/disc.gdi` plus its **four** track files
+`build/track01.iso`, `build/track02.raw`, `build/track03.iso`, `build/track04.iso`
+(B5 names — match the donor's .gdi verbatim; earlier `cleo.gdi`/`track0N.bin`
+outputs are auto-deleted). Tracks 1–3 = donor verbatim; track 4 = our loader
+(boot region) + cart at LBA 451728 / FAD 451878. **The menu entry shows as
+"Dolphin Blue"** (donor IP.BIN title). To run on a GDEMU-class ODE: copy the `.gdi`
+**and all four track files together — nothing else** (no `.zip`/`.DS_Store`
+strays) into a numbered folder on the GDEMU SD card (one game per `01/`, `02/`,
+… folder, per the GDEMU menu convention) and select it from the GDEMU boot menu. (GDEMU loads GDI/CDI images
+from FAT32 SD folders — general usage per the GDEMU manual / community setup
+guides, not a per-title claim.) Burning `cleo.gdi` to CD-R is a possible
+alternative, but GDEMU is the stated target and avoids media/laser variance.
 
 ### One-command reproducible build (from the `.dat`)
 
@@ -111,18 +269,21 @@ source tools/kos/environ.sh \
   && python3 scripts/build_patch_table.py \
   && make -C loader \
   && python3 scripts/make_gdi.py
-# -> build/cleo.gdi (+ track01.bin / track02.raw / track03.bin); 28 patches
+# -> build/disc.gdi (+ track01..04 .iso/.raw); 28 patches. make_gdi.py (B5)
+# copies tracks 1-3 + disc.gdi verbatim from "[GDI] Dolphin Blue.7z" (repo
+# root, REQUIRED) and masters track04.iso = loader + cart.
 ```
 
-Verified from clean (`make -C shims clean && make -C loader clean` first) on
-2026-07-20: `OK patch_table.h: 28 patches`, `OK cleo.gdi cart at LBA 47048
-(FAD 47198)`.
+Verified 2026-07-20 (B5): tracks 1–3 + gdi hash-identical to the donor;
+track04 = loader + zero pad + ROM byte-exact; shim host self-test OK
+(`CART_FAD` 451878); Flycast boots to attract + FREEPLAY (231 cart reads).
 
 **Gitignored inputs required** (never committed — ROM-derived or user-supplied):
 
 | Input | What / how to (re)generate |
 |---|---|
 | `Cleopatra Fortune Plus.dat` | the decrypted Naomi cart ROM (repo root; user-supplied) |
+| `[GDI] Dolphin Blue.7z` | donor IP.BIN + low-density tracks (repo root; user-supplied AW-port image — B3). Without it `make_gdi.py` falls back to makeip (unproven on HW) |
 | `bios/naomi/epr-21576h.ic27` | Naomi BIOS ROM (from `bios/naomi.zip`); `loader/Makefile` `dd`s the two BIOS slices → `build/bios_data.bin` automatically |
 | `tools/boot.bin` | first 1 MB of the `.dat` (`dd if="Cleopatra Fortune Plus.dat" of=tools/boot.bin bs=1M count=1`); `build_patch_table.py` reads it for old-byte verification |
 | `shims/data/eeprom.bin` | baked free-play 93C46 image; regenerate from `build/mie_sub03.bin` with the snippet in §V-EEPROM "Reproduction" |

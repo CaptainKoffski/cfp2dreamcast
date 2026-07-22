@@ -12,7 +12,7 @@ int main(void) {
     assert(SHIM_ERR    == 0x8cfc8000u);               /* SHIM_BASE + 0x8000 */
     assert(SHIM_CODE_MAX == 0x8000u);
     assert(CART_SIZE == 0x06800000u);                 /* corrected value, not the brief's 0x06d00000 */
-    assert(CART_FAD  == 47198);                       /* CART_LBA 47048 + 150 */
+    assert(CART_FAD  == 451878);                      /* CART_LBA 451728 + 150 (track 4, B5) */
     printf("shim_iface host self-test: OK\n");
     return 0;
 }

@@ -30,10 +30,17 @@ void shim_die(u32, u32, u32);
 void *xmemcpy(void *, const void *, u32);
 int gd_read_sectors(void *dst, u32 fad, u32 n);
 void scif_puts(const char *); void scif_puthex(u32);
+void shim_mark(u32 slot, unsigned short color);   /* util.c: real-HW breadcrumb HUD */
 
+/* .data (non-zero init, house style): first-read flag + activity blink counter.
+ * cart_count is non-static: main.c paints a reads/sec rate from it (round 16). */
+static u32 cart_first = 1;
+u32 cart_count = 1;
+
+extern u32 gd_last_err;                       /* gd.c: raw CHECK status of last failure */
 static void gd_or_die(void *dst, u32 rel_fad, u32 n) {
     int r = gd_read_sectors(dst, CART_FAD + rel_fad, n);
-    if (r < 0) shim_die(4, rel_fad, (u32)r);
+    if (r < 0) shim_die(4, rel_fad, gd_last_err);
 }
 
 /* dest_phys is a main-RAM phys addr (0x0c......). The game reads streamed cart
@@ -51,6 +58,9 @@ static void gd_or_die(void *dst, u32 rel_fad, u32 n) {
  * they are mutually coherent; only the FINAL dest must be uncached. */
 void cart_read(u32 off, u32 len, u32 dest_phys) {
     split_t s;
+    if (cart_first) { cart_first = 0; shim_mark(4, 0xf81f); }   /* slot4 magenta: first cart read */
+    if ((++cart_count & 31u) == 0)                              /* slot5: activity blinker */
+        shim_mark(5, (cart_count & 32u) ? 0xffe0 : 0x001f);
     unsigned char *dst = (unsigned char *)(dest_phys | 0xa0000000); /* P2 uncached */
     unsigned char *bounce = (unsigned char *)SHIM_BOUNCE;
     cart_split(off, len, &s);
@@ -91,9 +101,14 @@ void shim_cart_service(void) {
     if (!len || len > 0x01000000 || off + len > CART_SIZE ||
         (dest & 0x1f000000) != 0x0c000000 || dest + len > (SHIM_BASE & 0x1fffffff))
         shim_die(2, off, dest);
-    scif_puts("CART off="); scif_puthex(off);
-    scif_puts(" len="); scif_puthex(len);
-    scif_puts(" dst="); scif_puthex(dest); scif_puts("\n");
+#ifndef SHIM_TRACE
+#define SHIM_TRACE 0
+#endif
+    if (SHIM_TRACE) {   /* per-read serial: ~2-3 ms SCIF spin each on real HW */
+        scif_puts("CART off="); scif_puthex(off);
+        scif_puts(" len="); scif_puthex(len);
+        scif_puts(" dst="); scif_puthex(dest); scif_puts("\n");
+    }
     cart_read(off, len, dest);
     m[0x418/4] = 0;                     /* SB_GDST mirror reads "done" */
 }

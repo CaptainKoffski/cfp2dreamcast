@@ -5,11 +5,20 @@ tools/
 bios/
 .venv/
 /capture-*.log
+flycast-*.txt
 __pycache__/
 build/
 shims/data/
 loader/*.o
 loader/*.elf
+
+# ROM/commercial disc data — reference GDIs, dumps, mastered images (never commit)
+*.zip
+*.7z
+*.gdi
+*.cdi
+track*.bin
+track*.raw
 
 # SDD scratch (briefs, reports, review packages, progress ledger)
 .superpowers/
