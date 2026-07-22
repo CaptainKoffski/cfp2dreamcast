@@ -233,7 +233,29 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    scales with animation load. Cross-check if ever desired: arcade
    footage of the same multi-row combos. VRAM overfit (9.2 MB > 8 MB)
    demoted from slowdown suspect to graphics-integrity watch item — it
-   would show as wrong/missing textures, none reported. Build-order
+   would show as wrong/missing textures, none reported. **Disc identity
+   (2026-07-23):** the B5 clone shipped Dolphin Blue's IP.BIN metadata
+   (serial T0006M → GDMENUCardManager auto-assigned the Dolphin Blue
+   cover). `make_gdi.py brand_ip()` now stamps title CLEOPATRA FORTUNE
+   PLUS + serial **T-CFP001M** (unique fake — letters in the digit block
+   collide with no real JP serial and none of megavolt85's sequential
+   T00xxM fan-port series; user chose NOT to reuse the real Altron DC
+   *Cleopatra Fortune* T-16603M to avoid mismatching with the retail
+   game; cover art is assigned manually) + company **SEGA LC-T-99** (the
+   string every megavolt85 AW port carries — read from both donors),
+   with the correct device-info CRC (algorithm validated against ChuChu
+   Rocket's real header; the AW ports carry a stale CRC and boot fine,
+   so the BIOS ignores it). Bootstrap/TOC/FS remain donor-verbatim.
+   In-disc 0GDTEX.PVR is still Dolphin Blue's (donor FS) — optional
+   future task: same-size PVR overwrite in track03. Top-level **Makefile** added: `make` (full
+   disc), `make release` (GDMENUCardManager zip — embeds the ROM, local
+   only), `make deploy` (card copy + dot_clean guard). Flycast
+   screenshot-verified.
+
+   **Phase-5 closing items:** graphics/stage-load/sound spot-checks
+   during normal play; **final code review** (requested by the user
+   2026-07-23 — not yet done; no formal Phase-5 plan doc was ever
+   written, phases 1–4 only). Build-order
    foot-gun fixed in loader/Makefile: patch_table.h now regenerates from
    shim.map (a shim rebuild moves symbols; generating the table first shipped
    pointers into moved functions — deterministic self-inflicted wedge, cost
