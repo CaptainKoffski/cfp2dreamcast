@@ -19,9 +19,17 @@ extern uint8 handoff_end[];     /* end-of-stub label in handoff.S (stub is PIC) 
 /* Real-HW visibility: serial is invisible on a TV, so every stage is drawn to
  * the framebuffer (KOS init already set 640x480). A stuck screen names the
  * stage that hung; halt() turns the screen red with the reason. */
+
+/* Boot-proven since round B5 -> the stage text is now hidden behind the Naomi
+ * BIOS splash (LOADER_QUIET=1). Flip to 0 for the on-TV breadcrumbs if boot
+ * ever regresses; halt() failure screens stay verbose either way. */
+#define LOADER_QUIET 1
+extern uint8 splash_bin[];      /* objcopy-embedded 640x480 RGB565 (Makefile) */
+
 static int say_row = 0;
 static void say(const char *s) {
     dbglog(DBG_INFO, "%s\n", s);
+    if (LOADER_QUIET) return;
     bfont_draw_str(vram_s + (40 + say_row * 26) * 640 + 20, 640, 1, s);
     say_row++;
 }
@@ -80,6 +88,13 @@ int main(void) {
            (unsigned long)&probe, (unsigned long)_arch_mem_top,
            (unsigned)SHIM_BASE, (unsigned)(SHIM_BASE + 0xa800),
            (unsigned)HANDOFF_SCRATCH);
+
+    /* Naomi BIOS splash (arcade boot feel): shown for the whole load. On the
+     * real Naomi the BIOS draws this screen, not the game -- our conversion
+     * bypasses that BIOS, so the loader stands in for it. Single memcpy:
+     * blob is prepared as raw RGB565 in framebuffer layout. */
+    if (LOADER_QUIET)
+        memcpy(vram_s, splash_bin, 640 * 480 * 2);
 
     say("CLEO LOADER M2");
     cdrom_reinit();             /* inits the GD subsystem the shim's BIOS syscalls reuse */
