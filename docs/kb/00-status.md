@@ -252,6 +252,20 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    only), `make deploy` (card copy + dot_clean guard). Flycast
    screenshot-verified.
 
+   **Boot splash (2026-07-23):** the CLEO LOADER stage-text screen is
+   replaced by the real Naomi BIOS logo (arcade-boot feel, like the AW
+   ports' Atomiswave splash — on arcade HW the BIOS draws it, our
+   conversion bypasses that BIOS so the loader stands in). Frame
+   captured from Flycast running the Naomi BIOS
+   (`scripts/capture_naomi_splash.sh` → gitignored `loader/splash.png`,
+   BIOS-derived like the ROM inputs), converted at build time via sips +
+   `scripts/bmp2rgb565.py` (stdlib-only), objcopy-embedded, single
+   memcpy to vram_s. Stage breadcrumbs live behind `LOADER_QUIET` in
+   loader/main.c (flip to 0 if boot ever regresses; halt() red screens
+   stay verbose). Splash bytes round-trip-verified; Flycast
+   attract-verified (the splash itself is a framebuffer write, which
+   Flycast screenshots can't capture — same as the HUD; TV shows it).
+
    **Phase-5 closing items:** graphics/stage-load/sound spot-checks
    during normal play; **final code review** (requested by the user
    2026-07-23 — not yet done; no formal Phase-5 plan doc was ever

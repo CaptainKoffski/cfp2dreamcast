@@ -1,6 +1,6 @@
 # Requires: source tools/kos/environ.sh
 TARGET = loader.elf
-OBJS = main.o handoff.o shim_blob.o bios_data.o
+OBJS = main.o handoff.o shim_blob.o bios_data.o splash_blob.o
 CFLAGS += -I../shims/include -I../build
 BIOS = ../bios/naomi/epr-21576h.ic27   # Flycast default Japan bios0 (gitignored ROM)
 all: ../build/1ST_READ.BIN
@@ -37,6 +37,19 @@ bios_data.o: ../build/bios_data.bin
 	sh-elf-objcopy -I binary -O elf32-shl -B sh4 \
 	  --redefine-sym _binary____build_bios_data_bin_start=_bios_data \
 	  --redefine-sym _binary____build_bios_data_bin_end=_bios_data_end \
+	  $< $@
+# Boot splash: the real Naomi BIOS logo frame, captured from Flycast running
+# the Naomi BIOS (scripts/capture_naomi_splash.sh). splash.png is gitignored
+# (BIOS-rendered output, same category as the BIOS ROM) -- regenerate it with
+# the capture script if missing. sips is stock macOS; converter is stdlib-only.
+../build/splash.bin: splash.png ../scripts/bmp2rgb565.py
+	mkdir -p ../build
+	sips -s format bmp splash.png --out ../build/splash.bmp > /dev/null
+	python3 ../scripts/bmp2rgb565.py ../build/splash.bmp $@
+splash_blob.o: ../build/splash.bin
+	sh-elf-objcopy -I binary -O elf32-shl -B sh4 \
+	  --redefine-sym _binary____build_splash_bin_start=_splash_bin \
+	  --redefine-sym _binary____build_splash_bin_end=_splash_bin_end \
 	  $< $@
 ../build/1ST_READ.BIN: $(TARGET)
 	mkdir -p ../build

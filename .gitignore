@@ -22,3 +22,4 @@ track*.raw
 
 # SDD scratch (briefs, reports, review packages, progress ledger)
 .superpowers/
+loader/splash.png
