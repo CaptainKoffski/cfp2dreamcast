@@ -293,7 +293,13 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    Flycast attract-verified, redeployed to card.
 
    **Phase-5 closing items:** graphics/stage-load/sound spot-checks
-   during normal play (user reports none so far). Build-order
+   during normal play (user reports none so far). **Pre-publication
+   (2026-07-23):** full git-history audit — CLEAN (no ROM/BIOS/donor
+   data ever committed on any branch; disasm excerpts + the §V-EEPROM
+   18-byte decode table judged de minimis and kept by user decision).
+   Top-level README.md written for the public source release (inputs
+   table, fresh-clone build walkthrough incl. the one-time capture
+   harvest, no-redistribution notice, credits). Build-order
    foot-gun fixed in loader/Makefile: patch_table.h now regenerates from
    shim.map (a shim rebuild moves symbols; generating the table first shipped
    pointers into moved functions — deterministic self-inflicted wedge, cost
