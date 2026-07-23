@@ -46,7 +46,10 @@ int main(void) {
     assert(dc_to_jvs((unsigned short)~((1u<<3)|(1u<<4))) == 0xa000); /* Start+Up chord */
 
     /* jvs_checksum on the reconstructed golden idle has-data frame = 0x22.
-       This pins the whole 64-byte template byte-for-byte (§input-ABI). */
+       Pins 5 structural spot bytes + the mod-256 sum over [0x1b..0x39] -- NOT
+       every template byte (a compensating +-k pair inside the summed range, or
+       corruption in the unchecked maple sub-header 0x05..0x19, would still
+       pass; final review). Good enough as a change detector for hand edits. */
     assert(jvs_hasdata[0x00] == 0x87 && jvs_hasdata[0x03] == 0x0f);  /* maple hdr 87 00 20 0f */
     assert(jvs_hasdata[0x04] == 0x16 && jvs_hasdata[0x1a] == 0xe0);  /* subresp / JVS E0 sync */
     assert(jvs_checksum(jvs_hasdata) == 0x22 && jvs_hasdata[0x3a] == 0x22);

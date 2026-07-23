@@ -17,7 +17,12 @@ main.o: ../build/patch_table.h ../shims/include/shim_iface.h
 # every symbol, so the table must regenerate whenever the map changes. Running the
 # generator before `make -C shims` shipped a table pointing into the middle of moved
 # functions (2026-07-21: deterministic mid-print wedge in Flycast, self-inflicted).
-../build/patch_table.h: ../shims/build/shim.map ../scripts/build_patch_table.py
+# Final review: the generator ALSO reads shim_iface.h (mirror offsets) and
+# tools/boot.bin (old-byte verify) -- both must be deps or an offset move in
+# the header regenerates main.o but not the table (loader places blobs at new
+# addresses, patches point at old ones; links and boots wrong, no error).
+../build/patch_table.h: ../shims/build/shim.map ../scripts/build_patch_table.py \
+                        ../shims/include/shim_iface.h ../tools/boot.bin
 	cd .. && python3 scripts/build_patch_table.py
 # shim.bin embedded as _shim_bin / _shim_bin_end (C's leading-underscore prefix;
 # raw objcopy names verified with sh-elf-nm against the ../shims/build/shim.bin path).
@@ -28,10 +33,15 @@ shim_blob.o: ../shims/build/shim.bin
 	  $< $@
 # Naomi BIOS slices concatenated: [0x7000 @0x60000][0x70 @0x1ffd00] (see shim_iface.h).
 # Extracted from the gitignored ROM at build time; build/ is gitignored (no ROM in git).
+# .DELETE_ON_ERROR + size check (final review): dd exits 0 on short/past-EOF
+# reads, so a wrong/truncated BIOS would silently embed a short blob and the
+# loader memcpys fixed lengths past its end. 28784 = 0x7000 + 0x70.
+.DELETE_ON_ERROR:
 ../build/bios_data.bin: $(BIOS)
 	mkdir -p ../build
 	dd if=$(BIOS) bs=1 skip=393216 count=28672 2>/dev/null > $@    # 0x60000 +0x7000
 	dd if=$(BIOS) bs=1 skip=2096384 count=112 2>/dev/null >> $@    # 0x1ffd00 +0x70
+	@test $$(stat -f%z $@) -eq 28784 || { echo "bios_data.bin wrong size (bad BIOS?)"; rm -f $@; exit 1; }
 # Embedded as _bios_data / _bios_data_end (C's leading-underscore prefix).
 bios_data.o: ../build/bios_data.bin
 	sh-elf-objcopy -I binary -O elf32-shl -B sh4 \

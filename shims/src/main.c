@@ -193,8 +193,12 @@ static void maple_reply(u32 sub, u32 recvaddr, u32 frame) {
     }
     case 0x01: xmemcpy(rx, mie_sub01, mie_sub01_len); break;   /* EEPROM ready ACK */
     case 0x13: xmemcpy(rx, mie_sub13, mie_sub13_len); break;   /* store repeat req ACK */
-    case 0x17: case 0x21:
-               xmemcpy(rx, mie_sub17, mie_sub17_len); break;   /* transmit ACK */
+    case 0x17: case 0x19: case 0x21:
+               xmemcpy(rx, mie_sub17, mie_sub17_len); break;   /* transmit ACK
+                          (0x19 = transmit-with-repeat: never seen in captures,
+                          but both latch sites treat 0x17/0x19/0x21 as the
+                          transmit trio and Flycast's reply shape is identical
+                          to 0x21 -- final review: ACK it, don't shim_die) */
     case 0x27: xmemcpy(rx, mie_sub27, mie_sub27_len); break;   /* kick-scan ACK */
     case 0x31: xmemcpy(rx, mie_sub31, mie_sub31_len); break;   /* DIP switches */
     case 0xff: xmemcpy(rx, mie_subff, mie_subff_len); break;   /* broadcast/reset ACK */
@@ -210,7 +214,9 @@ static void maple_reply(u32 sub, u32 recvaddr, u32 frame) {
         u32 ee_size = UB(frame + 0x0e);
         u8 ack[8] = { 0x87, 0x00, 0x20, 0x01, 0x0c, 0x00, 0x8e, 0x00 };
         xmemcpy(rx, ack, 8);
-        if (wr_left) {                      /* Task 16: decode the re-init payload (addr/size/data) */
+        if (SHIM_TRACE && wr_left) {        /* Task 16 decode; SHIM_TRACE-gated per the
+                                               round-18 serial rule (final review: this
+                                               per-event block had escaped the gate) */
             wr_left--;
             scif_puts("EE WR a="); scif_puthex(ee_addr);
             scif_puts(" n=");     scif_puthex(ee_size);
@@ -436,6 +442,16 @@ int shim_maple_steady(void) {
         u32 dg_fh1 = 0, dg_rcv1 = 0, dg_pay1 = 0, dg_fh2 = 0;
         shim_mark(16, addr == 0 ? 0xf800 :
                       (addr >= 0x0c000000u && addr < 0x0d000000u) ? 0x07e0 : 0xffe0);
+        /* Final review: the list base is game-controlled (mirror_SB_MDSTAR).
+         * Only walk it if it points at RAM (32 MB window: covers Naomi-style
+         * 0x0d addresses, which a 16 MB DC mirrors back into RAM; excludes
+         * MMIO/VRAM). A garbage/stale pointer would otherwise feed the walk's
+         * uncached reads side-effectful MMIO (e.g. the GD data FIFO 0x5f7080,
+         * popping an in-flight cart stream) and let the reply writes below
+         * spray registers or live code. Skip the walk but still complete the
+         * transaction: the engine rebuilds its list next frame; a spray never
+         * self-heals. Never fires in normal play (two compares per frame). */
+        if (addr - 0x0c000000u < 0x02000000u)
         for (i = 0; i < 32u; i++) {                 /* walk cmd list (<=24 slots); cap guards a runaway list */
             /* UNCACHED walk. The pump writes this list as DMA-SOURCE memory
              * (real maple hardware reads it from RAM, so the game keeps it out
@@ -461,8 +477,9 @@ int shim_maple_steady(void) {
                     case 0x17: case 0x19: case 0x21: pending_jvs = UB(addr + 0x14); break;
                     case 0x27:                       pending_jvs = 0xff;            break;
                     }
-                    maple_reply(sub, rcv, addr);    /* synthesize reply; addr=frame base (EEPROM write payload) */
-                } else {                            /* non-0x86: the MIE init ladder (real HW only) */
+                    if (rcv - 0x0c000000u < 0x02000000u)  /* recv sane (see list-base guard) */
+                        maple_reply(sub, rcv, addr);/* synthesize reply; addr=frame base (EEPROM write payload) */
+                } else if (rcv - 0x0c000000u < 0x02000000u) {  /* non-0x86: the MIE init ladder (real HW only) */
                     mie_probe_reply(fh & 0xffu, fh, rcv, addr);
                 }
             }

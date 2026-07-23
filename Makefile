@@ -45,4 +45,4 @@ test:
 
 clean:
 	$(MAKE) -C shims clean
-	$(MAKE) -C loader clean
+	. tools/kos/environ.sh && $(MAKE) -C loader clean   # loader/Makefile includes KOS rules even for clean

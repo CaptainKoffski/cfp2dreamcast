@@ -86,10 +86,18 @@ def insn16(addr, expect, value, comment=""):
     assert got == expect, f"insn16 @{addr:#x}: found {got:#06x}, expected {expect:#06x}"
     patches.append((addr, old, struct.pack("<H", value), comment))
 
-def hook(fn, target, comment=""):
+def hook(fn, expect, target, comment=""):
     # SH-4 entry thunk: mov.l @(disp,PC),r0 ; jmp @r0 ; nop ; [nop pad] ; .long target
     #   mov.l @(disp,PC),r0 = 0xD000|disp ; EA = disp*4 + (PC&~3) + 4  (PC=fn)
     #   jmp @r0 = 0x402B ; nop = 0x0009 (also the jmp delay slot)
+    #
+    # `expect` = the first opcode (u16) at fn, like insn16's guard. Final-review
+    # finding: unlike pool/ptr/insn16, hook() used to capture old bytes with NO
+    # expectation, so a mistranscribed address emitted a table that passed both
+    # the build verify AND the loader's boot memcmp (both compare against the
+    # same wrong offset) and crashed at runtime with zero diagnostics.
+    old0 = struct.unpack("<H", rd(fn, 2))[0]
+    assert old0 == expect, f"hook @{fn:#x}: found {old0:#06x}, expected {expect:#06x}"
     slot = (fn + 6 + 3) & ~3            # 4-align the pooled .long
     pad = slot - (fn + 6)
     disp = (slot - ((fn & ~3) + 4)) // 4
@@ -113,7 +121,7 @@ _selftest()
 
 # §V3: cart-DMA completion-wait -- entry hook (reached by `bsr 0x8c03bc12` @0x8c03bd28,
 # no pointer to it, so a thunk on the entry is the correct kind).
-hook(0x8C03BC12, sym("shim_cart_service"), "V3 cart-DMA wait -> shim_cart_service")
+hook(0x8C03BC12, 0x2FE6, sym("shim_cart_service"), "V3 cart-DMA wait -> shim_cart_service")
 
 # §patch-sites #1: descriptor-base source (covers all runtime streaming; base is
 # read as [desc+0x58] then offset, so every base-relative reg access follows).
@@ -228,7 +236,7 @@ for _pw, _exp in ((0x8C08107C, 0x8C1C954C), (0x8C081080, 0x8C1C9528),
                   (0x8C081D14, 0x8C1C9784)):
     _got = struct.unpack("<I", rd(_pw, 4))[0]
     assert _got == _exp, f"Task16 EEPROM buffer pool @{_pw:#x}: {_got:#x} != {_exp:#x}"
-hook(0x8C080F50, sym("shim_ee_read"), "Task16: EEPROM read -> shim_ee_read (sync free-play)")
+hook(0x8C080F50, 0x2FE6, sym("shim_ee_read"), "Task16: EEPROM read -> shim_ee_read (sync free-play)")
 
 # Real-HW hang fix (2026-07-21, round 2 -- SPC forensics): the settings flow in
 # FUN_8c081aee reaches FIVE thunks into the Naomi BIOS 0x60000 library fn-table
@@ -248,13 +256,13 @@ hook(0x8C080F50, sym("shim_ee_read"), "Task16: EEPROM read -> shim_ee_read (sync
 # the black-screen regression was the shim's per-tick probe block (now compiled
 # out, SHIM_PROBES=0). All five stay: they are the real-HW armor against the
 # Naomi BIOS EEPROM library's P0/G1 accesses (settings + credit paths).
-hook(0x8C0803F8, sym("shim_ee_lib_decode"),
+hook(0x8C0803F8, 0x7FFC, sym("shim_ee_lib_decode"),
      "EE-lib slot 0x10 decode-commit -> return-0 stub (HW stall #2, SPC 8c081224)")
-hook(0x8C080446, sym("shim_ee_write_skip"),
+hook(0x8C080446, 0x7FFC, sym("shim_ee_write_skip"),
      "EEPROM write kicker -> return-0 stub (body hook, was ptr @0x8c081d20)")
-hook(0x8C080418, sym("shim_ee_lib_post"), "EE-lib post-kicker thunk A -> return-0 stub")
-hook(0x8C080426, sym("shim_ee_lib_post"), "EE-lib post-kicker thunk B -> return-0 stub")
-hook(0x8C080456, sym("shim_ee_lib_post"), "EE-lib post-kicker thunk C -> return-0 stub")
+hook(0x8C080418, 0x7FFC, sym("shim_ee_lib_post"), "EE-lib post-kicker thunk A -> return-0 stub")
+hook(0x8C080426, 0xD22A, sym("shim_ee_lib_post"), "EE-lib post-kicker thunk B -> return-0 stub")
+hook(0x8C080456, 0x7FFC, sym("shim_ee_lib_post"), "EE-lib post-kicker thunk C -> return-0 stub")
 # Round 7 (2026-07-21): tried hook(0x8C081AEE) = skip the whole orchestrator.
 # REVERTED -- it breaks Flycast too (14 cart reads, no input polls): the game
 # later waits on state the orchestrator's completion writes provide. The pin is
