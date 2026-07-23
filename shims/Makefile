@@ -18,6 +18,7 @@ all: $(B)/shim.bin $(B)/shim.map
 test:
 	mkdir -p $(B)
 	cc -DHOST_TEST -Iinclude -o $(B)/test_host test/test_host.c && $(B)/test_host
+	cc -Iinclude -o $(B)/test_iface test/test_shim_iface.c && $(B)/test_iface
 $(B)/shim.elf: $(SRCS) shim.ld include/shim_iface.h
 	mkdir -p $(B)
 	$(CC) $(CFLAGS) -Wl,-T,shim.ld -Wl,-Map,$(B)/shim.map.tmp -o $@ $(SRCS)

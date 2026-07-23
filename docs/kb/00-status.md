@@ -266,10 +266,34 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    attract-verified (the splash itself is a framebuffer write, which
    Flycast screenshots can't capture — same as the HUD; TV shows it).
 
+   **Final code review — DONE 2026-07-23** (three independent reviewers +
+   verification pass; no formal Phase-5 plan doc ever existed, phases 1–4
+   only). No defects found in the load-bearing paths (GD recovery ladder,
+   handoff copy/cache discipline, linker/loader contract, memory map —
+   all verified against built artifacts). Fixed from findings: (1) MIE
+   sub 0x19 (transmit-with-repeat) was latched as a transmit at both
+   latch sites but shim_die'd in maple_reply — now ACKed like 0x17/0x21;
+   (2) the descriptor-walk list base + per-frame recv addresses
+   (game-controlled) are now range-guarded to the 32 MB RAM window
+   before uncached reads / reply writes (spray armor; inert in normal
+   play); (3) an EEPROM-write trace block escaped the round-18
+   SHIM_TRACE gate; (4) scif_putc TX spin now bounded (protects
+   shim_die's death screen); (5) hook() patches now carry first-opcode
+   expectations like every other patch kind (all 7 verified as
+   prologue/thunk opcodes); (6) patch_table.h Makefile rule gained its
+   two missing deps (shim_iface.h, boot.bin); (7) make_gdi cross-checks
+   CART_FAD/CART_SIZE against shim_iface.h, guards IP field lengths,
+   all-files donor sentinel, assert-strip refusal; (8) bios_data.bin
+   size-checked + .DELETE_ON_ERROR; (9) .gitignore closes *.iso +
+   naomi_boot*.png (donor extraction / BIOS-splash frames were
+   committable); (10) test_shim_iface wired into `make test` + new
+   region-map overlap asserts (the map invariants were previously
+   unchecked anywhere); (11) stale comments corrected (loader SP-probe
+   bounds, test_host checksum claim). Rebuilt, both host tests green,
+   Flycast attract-verified, redeployed to card.
+
    **Phase-5 closing items:** graphics/stage-load/sound spot-checks
-   during normal play; **final code review** (requested by the user
-   2026-07-23 — not yet done; no formal Phase-5 plan doc was ever
-   written, phases 1–4 only). Build-order
+   during normal play (user reports none so far). Build-order
    foot-gun fixed in loader/Makefile: patch_table.h now regenerates from
    shim.map (a shim rebuild moves symbols; generating the table first shipped
    pointers into moved functions — deterministic self-inflicted wedge, cost

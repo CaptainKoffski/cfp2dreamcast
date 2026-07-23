@@ -3,7 +3,13 @@ typedef volatile unsigned short vu16; typedef volatile unsigned char vu8;
 #define SCFSR2  (*(vu16 *)0xffe80010)
 #define SCFTDR2 (*(vu8  *)0xffe8000c)
 void scif_putc(char c) {
-    while (!(SCFSR2 & 0x20)) ;      /* TDFE */
+    /* Bounded TDFE wait (final review): this spin sits upstream of shim_die,
+     * which prints serial BEFORE its VRAM paint -- if the game ever disabled
+     * or misclocked SCIF TX, an unbounded wait here would turn the loud death
+     * screen back into a silent black hang. ~1M spins >> one FIFO drain at
+     * 115200 baud; on timeout the char is dropped (serial is diagnostics). */
+    for (unsigned g = 0; !(SCFSR2 & 0x20); g++)
+        if (g > 1000000u) return;       /* TDFE never came: drop the char */
     SCFTDR2 = (unsigned char)c;
     SCFSR2 &= (unsigned short)~0x60;/* clear TDFE|TEND */
 }

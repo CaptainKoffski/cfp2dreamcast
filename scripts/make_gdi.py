@@ -30,7 +30,15 @@ History (git): the previous version of this script synthesized IP.BIN
 (makeip + TOC patch + GD fix) and its own mkisofs filesystem — kept there,
 not here, until real HW proves which parts the BIOS actually tolerates.
 """
-import argparse, pathlib, shutil, subprocess
+import argparse, pathlib, re, shutil, subprocess, sys
+
+# Final review: bare asserts are this script's only guards -- die loudly if
+# they were stripped (same pattern as build_patch_table.py's selftest).
+try:
+    assert False
+    sys.exit("make_gdi.py: asserts are stripped (PYTHONOPTIMIZE?) -- refusing")
+except AssertionError:
+    pass
 
 SECTOR = 2048
 
@@ -66,6 +74,12 @@ def ip_crc16(data: bytes) -> int:
 
 
 def brand_ip(track03: pathlib.Path):
+    # ljust never truncates and bytearray slice-assign silently GROWS, so an
+    # over-long hand-edited field would shift every later header byte (final
+    # review) -- guard the exact widths.
+    assert len(IP_PRODUCT) <= 10 and len(IP_VERSION) <= 6, "serial/version too long"
+    assert len(IP_DATE) <= 16 and len(IP_COMPANY) <= 16, "date/company too long"
+    assert len(IP_TITLE) <= 128, "title too long"
     with open(track03, "r+b") as f:
         hdr = bytearray(f.read(256))
         hdr[0x40:0x4A] = IP_PRODUCT.ljust(10).encode()
@@ -84,6 +98,17 @@ BOOT_FILE_SIZE = 3538016        # donor FS dir-record size for 1ST_READ.BIN
 CART_LBA = 450000 + BOOT_REGION // SECTOR   # 451728; FAD 451878 = CART_FAD
 CART_SIZE = 0x6800000           # 109,051,904 B; docs/kb/game.md
 
+# Cross-check against the shim's compiled-in constants (final review: this
+# derivation and shim_iface.h's CART_FAD were previously independent -- a donor
+# swap or header edit could master the cart at one FAD while the shim streams
+# from another, with no error at any build stage).
+_iface = pathlib.Path("shims/include/shim_iface.h").read_text()
+_fad = int(re.search(r"#define\s+CART_FAD\s+(\d+)", _iface).group(1))
+assert CART_LBA + 150 == _fad, \
+    f"cart FAD mismatch: mastering at {CART_LBA + 150}, shim streams from {_fad}"
+_csz = int(re.search(r"#define\s+CART_SIZE\s+(0x[0-9a-fA-F]+)", _iface).group(1), 16)
+assert _csz == CART_SIZE, f"CART_SIZE mismatch: gdi {CART_SIZE:#x} vs shim {_csz:#x}"
+
 
 def run(cmd): subprocess.run(cmd, check=True)
 
@@ -91,7 +116,9 @@ def run(cmd): subprocess.run(cmd, check=True)
 def donor_tracks(out: pathlib.Path) -> pathlib.Path:
     """Extract the donor image from the AW-port 7z (cached in build/donor/)."""
     dest = out / "donor" / DONOR_SUB
-    if not (dest / "track04.iso").exists():
+    # all-files sentinel (final review): a single-file sentinel let an
+    # interrupted extraction serve partial donor tracks forever
+    if not all((dest / f).exists() for f in DONOR_FILES):
         assert DONOR_7Z.exists(), f"donor archive missing: {DONOR_7Z}"
         sz = shutil.which("7zz") or "/opt/homebrew/bin/7zz"
         run([sz, "x", "-y", f"-o{out / 'donor'}"] +

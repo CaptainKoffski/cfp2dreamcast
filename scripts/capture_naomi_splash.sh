@@ -1,9 +1,11 @@
 #!/bin/sh
 REPO=/Users/captainkoffski/AntigravityProjects/cleopatra
 BIN="$REPO/tools/flycast-src/build/Flycast.app/Contents/MacOS/Flycast"
-PNG="$CLAUDE_JOB_DIR/tmp/naomi_boot.png"
-LOG="$CLAUDE_JOB_DIR/tmp/naomi_boot.log"
-rm -f naomi_boot_s*.png
+PNG="${TMPDIR:-/tmp}/naomi_boot.png"
+LOG="${TMPDIR:-/tmp}/naomi_boot.log"
+# stale $PNG from a prior run would be re-served as "this run's frames" if
+# Flycast dies before writing its first dump (final review)
+rm -f naomi_boot_s*.png "$PNG"
 for try in 1 2 3 4; do
   pkill -9 -f "flycast-src.*Flycast" 2>/dev/null; sleep 10
   FLYCAST_SHOT="$PNG" FLYCAST_SHOT_EVERY=15 \

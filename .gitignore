@@ -23,3 +23,6 @@ track*.raw
 # SDD scratch (briefs, reports, review packages, progress ledger)
 .superpowers/
 loader/splash.png
+# final review: donor extraction anywhere + BIOS-splash capture frames
+*.iso
+naomi_boot*.png

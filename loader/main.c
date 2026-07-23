@@ -80,9 +80,11 @@ static int apply_patches(uint8 *img) {
 int main(void) {
     dbglog(DBG_INFO, "CLEO LOADER M2\n");
 
-    /* KOS-stack-collision probe: &probe ~= current SP. Shim region tops out at
-     * SHIM_BOUNCE+2048 = SHIM_BASE+0xa800; the loader only writes up to
-     * G1_MIRROR+0x800 (SHIM_BASE+0x9000). Safe iff SP stays clear of both. */
+    /* KOS-stack-collision probe: &probe ~= current SP. The loader writes shim
+     * home through MAPLE_MIRROR end = SHIM_BASE+0x13100 (0x8cfd3100) -- shim
+     * code/data, mirrors, BIOS slices. Safe iff SP (KOS stack bottom ~0x8cff0000,
+     * top 0x8d000000) stays clear of that. (Final review: this comment used to
+     * quote the pre-BIOS-slice bound SHIM_BASE+0xa800, 35 KB short.) */
     volatile int probe = 0;
     dbglog(DBG_INFO, "SP~%08lx memtop=%08lx shim=%08x..%08x scratch=%08x\n",
            (unsigned long)&probe, (unsigned long)_arch_mem_top,
