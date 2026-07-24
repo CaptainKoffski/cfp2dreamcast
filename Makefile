@@ -10,12 +10,12 @@
 #                     macOS writes ._* AppleDouble sidecars on FAT volumes and
 #                     GDEMU picks the junk ._disc.gdi over the real one — this
 #                     exact foot-gun cost the Phase-5 boot bring-up a day.
-#                     Override the target with: make deploy CARD=/Volumes/GDEMU/11
+#                     Override the target with: make deploy CARD=/Volumes/GDEMU/09
 #
 # Requires: sh-elf toolchain at /opt/toolchains/dc, KOS at tools/kos
 # (docs/kb/tooling.md), the ROM at repo root, 7zz (donor extraction).
 
-CARD    = /Volumes/GDEMU/11
+CARD    = /Volumes/GDEMU/09
 DISC    = build/disc.gdi build/track01.iso build/track02.raw \
           build/track03.iso build/track04.iso
 ZIP     = build/[GDI] Cleopatra Fortune Plus.zip

@@ -90,6 +90,55 @@ def brand_ip(track03: pathlib.Path):
         hdr[0x20:0x24] = b"%04X" % ip_crc16(bytes(hdr[0x40:0x50]))
         f.seek(0)
         f.write(hdr)
+GDTEX_PNG = pathlib.Path("0GDTEX.png")   # repo root, gitignored (fan cover art)
+
+
+def patch_gdtex(track03: pathlib.Path, build: pathlib.Path):
+    """Replace the donor's 0GDTEX.PVR — the disc art the DC BIOS disc menu and
+    the GDEMU on-device menu display — in place. The donor's is 256x256 RGB565
+    square-twiddled with a GBIX+PVRT header (131,104 B); we encode 0GDTEX.png
+    to the exact same format so the encoded file is byte-length-identical and
+    the overwrite touches nothing but the art pixels (same minimal-delta
+    principle as brand_ip: directory records, extent layout, bootstrap all
+    stay donor-verbatim). Twiddle order per Flycast core/rend/texconv.cpp
+    twiddle_slow(): Morton, y bits in even positions, x bits in odd."""
+    if not GDTEX_PNG.exists():
+        print("note: 0GDTEX.png absent -> disc art stays the donor's (Dolphin Blue)")
+        return
+    bmp, raw = build / "gdtex.bmp", build / "gdtex.rgb565"
+    run(["sips", "-s", "format", "bmp", str(GDTEX_PNG), "--out", str(bmp)])
+    run([sys.executable, "scripts/bmp2rgb565.py", str(bmp), str(raw), "256", "256"])
+    src = raw.read_bytes()
+    assert len(src) == 256 * 256 * 2
+    spread = [sum(((v >> b) & 1) << (2 * b) for b in range(8)) for v in range(256)]
+    dst = bytearray(len(src))
+    for y in range(256):
+        ro, sy = y * 512, spread[y]
+        for x in range(256):
+            o = (sy | spread[x] << 1) * 2
+            dst[o] = src[ro + x * 2]
+            dst[o + 1] = src[ro + x * 2 + 1]
+    with open(track03, "r+b") as f:
+        # locate via the ISO9660 directory record (identifier sits 33 bytes
+        # into the record; extent LBA at +2, data length at +10, both LE)
+        head = f.read(1 << 20)
+        i = head.find(b"0GDTEX.PVR;1")
+        assert i > 33, "0GDTEX.PVR directory record not found in donor track03"
+        rec = i - 33
+        lba = int.from_bytes(head[rec + 2:rec + 6], "little")
+        size = int.from_bytes(head[rec + 10:rec + 14], "little")
+        off = (lba - 45000) * SECTOR    # track 3 starts at LBA 45000 (disc.gdi)
+        f.seek(off)
+        hdr = f.read(32)
+        assert hdr[:4] == b"GBIX" and hdr[16:20] == b"PVRT", "extent is not a PVR"
+        assert hdr[24:26] == b"\x01\x01", "donor PVR not RGB565 square-twiddled"
+        assert hdr[28:32] == b"\x00\x01\x00\x01", "donor PVR not 256x256"
+        assert 32 + len(dst) == size, "encoded PVR size != donor extent size"
+        f.seek(off + 32)                # keep the donor's 32-byte header verbatim
+        f.write(dst)
+    print("0GDTEX.PVR: disc art replaced from 0GDTEX.png")
+
+
 DONOR_7Z = pathlib.Path("[GDI] Dolphin Blue.7z")   # repo root, gitignored
 DONOR_SUB = "Dolphin Blue"
 DONOR_FILES = ("track01.iso", "track02.raw", "track03.iso", "track04.iso", "disc.gdi")
@@ -143,6 +192,7 @@ def main():
     for f in ("track01.iso", "track02.raw", "track03.iso", "disc.gdi"):
         shutil.copyfile(donor / f, out / f)
     brand_ip(out / "track03.iso")
+    patch_gdtex(out / "track03.iso", out)
     with open(out / "track04.iso", "wb") as t4:
         t4.write(ldr)
         t4.write(b"\0" * (BOOT_REGION - len(ldr)))

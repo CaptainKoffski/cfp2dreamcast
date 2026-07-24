@@ -26,3 +26,5 @@ loader/splash.png
 # final review: donor extraction anywhere + BIOS-splash capture frames
 *.iso
 naomi_boot*.png
+# disc cover art (third-party fan art, optional build input)
+0GDTEX.png
