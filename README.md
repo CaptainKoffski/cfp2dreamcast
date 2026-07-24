@@ -74,6 +74,11 @@ python3 scripts/extract_jvs_replies.py capture-attract.log
 # 5. Capture the NAOMI boot splash from your BIOS; pick the full-logo frame
 scripts/capture_naomi_splash.sh     # emits naomi_boot_s*.png in the CWD
 cp naomi_boot_s6.png loader/splash.png   # frame number may vary
+
+# 6. Optional: disc cover art (what the DC BIOS menu / GDEMU menu display).
+#    Drop a 256x256 PNG as 0GDTEX.png at the repo root; the mastering step
+#    encodes it to PVR and patches it into the disc. Without it the art
+#    stays the donor's (Dolphin Blue).
 ```
 
 Then, and on every rebuild after:

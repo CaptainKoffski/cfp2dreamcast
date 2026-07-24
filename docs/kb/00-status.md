@@ -246,8 +246,19 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    with the correct device-info CRC (algorithm validated against ChuChu
    Rocket's real header; the AW ports carry a stale CRC and boot fine,
    so the BIOS ignores it). Bootstrap/TOC/FS remain donor-verbatim.
-   In-disc 0GDTEX.PVR is still Dolphin Blue's (donor FS) — optional
-   future task: same-size PVR overwrite in track03. Top-level **Makefile** added: `make` (full
+   In-disc 0GDTEX.PVR (the disc art the DC BIOS menu and GDEMU's
+   on-device menu show) was still Dolphin Blue's — first spotted by an
+   outside tester on GDEMU v5.20.5, who contributed CFP cover art.
+   **Replaced 2026-07-24** (`make_gdi.py patch_gdtex`): the gitignored
+   `0GDTEX.png` (256×256, repo root, optional input) is encoded at
+   mastering time to the donor's exact PVR format — RGB565
+   square-twiddled, GBIX+PVRT header kept verbatim, byte-length
+   identical — and overwritten in place in track03, so FS/extents stay
+   donor-verbatim (same principle as brand_ip). Twiddle order (y bits
+   even, x bits odd) confirmed from Flycast `core/rend/texconv.cpp`
+   `twiddle_slow()`; verified by detwiddle round-trip + region hashes
+   (only IP.BIN fields and the art pixels differ from donor).
+   Top-level **Makefile** added: `make` (full
    disc), `make release` (GDMENUCardManager zip — embeds the ROM, local
    only), `make deploy` (card copy + dot_clean guard). Flycast
    screenshot-verified.
