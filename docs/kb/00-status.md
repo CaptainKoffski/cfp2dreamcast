@@ -312,7 +312,9 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    unattended Flycast canary run (0xA5 canaries must survive, all-zero
    control must get auto-formatted — proves the harness is wired);
    `make test-vmu-play` = same assertions after a headed tester-driven
-   session (recommended pre-release). All verified green 2026-07-26.
+   session (recommended pre-release). All verified green 2026-07-26,
+   including a full user play session through `make test-vmu-play`: all
+   canaries byte-identical, control auto-formatted — PASS, no VMU writes.
 
    **Phase-5 closing items:** graphics/stage-load/sound spot-checks
    during normal play (user reports none so far). **Pre-publication
