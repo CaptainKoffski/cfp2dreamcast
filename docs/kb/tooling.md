@@ -174,6 +174,19 @@ file. No behaviour change unless enabled.
   (`pkill -9 -f "flycast-src.*Flycast"`): a stale instance makes the new one
   fail the SH4 vmem `Verify Failed` (driver.cpp:349) and never boot.
 
+#### VMU-canary harness (2026-07-26)
+
+`scripts/test_vmu_untouched.sh [attract|play]` — proves a run wrote no VMU:
+seeds a temp dir (0xA5 canaries + all-zero control) and redirects Flycast
+there via transient `-config config:Dreamcast.VMUPath=...` (`-config` values
+go through `setTransient()`, never persisted — `core/cfg/cl.cpp:163`; a
+graceful quit does rewrite emu.cfg's ordinary bookkeeping like any manual
+session), then hash-compares after exit. Attract mode quits Flycast
+gracefully via `osascript` — VMU fwrites are stdio-buffered and only
+guaranteed on disk after clean fclose (`core/hw/maple/maple_devs.cpp`
+fullSave/BlockWrite have no fflush), so a `kill -9` could hide a write.
+Static sibling: `scripts/test_maple_literals.py` (wired into `make test`).
+
 ### Ghidra — 12.1.2 (20260605)
 
 - Install: `brew install --cask ghidra` unavailable in Homebrew; direct download used:

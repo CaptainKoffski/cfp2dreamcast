@@ -304,6 +304,16 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    bounds, test_host checksum claim). Rebuilt, both host tests green,
    Flycast attract-verified, redeployed to card.
 
+   **VMU-safety tripwire (2026-07-26):** three deterministic checks that the
+   port never writes a VMU (spec:
+   `docs/superpowers/specs/2026-07-26-vmu-safety-design.md`): `make test` now
+   includes the static maple-literal baseline scan (full cart + BIOS slices +
+   loader objects; 80+1 hits, zero in the streamed region); `make test-vmu` =
+   unattended Flycast canary run (0xA5 canaries must survive, all-zero
+   control must get auto-formatted — proves the harness is wired);
+   `make test-vmu-play` = same assertions after a headed tester-driven
+   session (recommended pre-release). All verified green 2026-07-26.
+
    **Phase-5 closing items:** graphics/stage-load/sound spot-checks
    during normal play (user reports none so far). **Pre-publication
    (2026-07-23):** full git-history audit — CLEAN (no ROM/BIOS/donor

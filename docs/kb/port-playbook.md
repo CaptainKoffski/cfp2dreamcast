@@ -34,6 +34,19 @@ Don't start a phase until the previous gate is green.
    is where the emulator's lies surface (see gotchas). Budget real debugging
    rounds here — it is not a formality.
    *Gate:* boots and plays on real hardware.
+6. **Safety tripwires, then release.** An arcade game has no VMU concept, so
+   the port must never write one (worst case: corrupting a user's saves).
+   Run all three before packaging: `make test` (static maple-literal baseline
+   scan over every executable surface — full cart, BIOS slices, loader
+   objects), `make test-vmu` (unattended emulator canary run: seeded VMU
+   images must survive byte-identical, an all-zero control file must get
+   auto-formatted, proving the harness is wired), and a `make test-vmu-play`
+   session covering settings, 2P, game over, and high-score screens. Method
+   + baselines: `docs/superpowers/specs/2026-07-26-vmu-safety-design.md`,
+   `scripts/test_maple_literals.py`, `scripts/test_vmu_untouched.sh` —
+   reusable for the next port (start from an empty baseline, classify every
+   hit).
+   *Gate:* all three tripwires PASS on the release candidate.
 
 ## Core mechanism
 

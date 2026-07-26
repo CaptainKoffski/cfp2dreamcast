@@ -20,7 +20,7 @@ DISC    = build/disc.gdi build/track01.iso build/track02.raw \
           build/track03.iso build/track04.iso
 ZIP     = build/[GDI] Cleopatra Fortune Plus.zip
 
-.PHONY: disc release deploy test clean
+.PHONY: disc release deploy test test-vmu test-vmu-play clean
 
 disc:
 	$(MAKE) -C shims
@@ -42,6 +42,15 @@ deploy: disc
 
 test:
 	$(MAKE) -C shims test
+	python3 scripts/test_maple_literals.py
+
+# VMU-safety canary runs (spec: docs/superpowers/specs/2026-07-26-vmu-safety-design.md):
+# test-vmu = unattended 90 s attract; test-vmu-play = headed, tester plays then quits.
+test-vmu:
+	scripts/test_vmu_untouched.sh attract
+
+test-vmu-play:
+	scripts/test_vmu_untouched.sh play
 
 clean:
 	$(MAKE) -C shims clean
