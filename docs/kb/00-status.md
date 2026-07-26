@@ -248,7 +248,8 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    so the BIOS ignores it). Bootstrap/TOC/FS remain donor-verbatim.
    In-disc 0GDTEX.PVR (the disc art the DC BIOS menu and GDEMU's
    on-device menu show) was still Dolphin Blue's — first spotted by an
-   outside tester on GDEMU v5.20.5, who contributed CFP cover art.
+   outside tester on GDEMU v5.20.5 (**stuart2773**), who contributed CFP
+   cover art.
    **Replaced 2026-07-24** (`make_gdi.py patch_gdtex`): the gitignored
    `0GDTEX.png` (256×256, repo root, optional input) is encoded at
    mastering time to the donor's exact PVR format — RGB565

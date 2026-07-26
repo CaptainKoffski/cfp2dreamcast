@@ -78,7 +78,7 @@ cp naomi_boot_s6.png loader/splash.png   # frame number may vary
 # 6. Optional: disc cover art (what the DC BIOS menu / GDEMU menu display).
 #    Drop a 256x256 PNG as 0GDTEX.png at the repo root; the mastering step
 #    encodes it to PVR and patches it into the disc. Without it the art
-#    stays the donor's (Dolphin Blue).
+#    stays the donor's (Dolphin Blue). Cover art contributed by stuart2773.
 ```
 
 Then, and on every rebuild after:
