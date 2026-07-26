@@ -65,33 +65,61 @@ or a missed live MMIO literal — on any path the run exercises.
 
 ## Layer 2 — static Maple-literal scan (in fast `make test`)
 
-`scripts/test_maple_literals.py`: scan `tools/boot.bin` (1 MB game boot
-image, base `0x8c020000`) for aligned u32 literals in the Maple MMIO block —
+`scripts/test_maple_literals.py`: scan **every executable byte source on the
+disc** for aligned u32 literals in the Maple MMIO block —
 `(v & 0x1fffff00) == 0x005f6c00` covers the P0/P1/P2 mirrors of
 `0x5f6c00–0x5f6cff`. **PASS iff** the hit set equals the recorded baseline
-exactly (address + value). Same failure class as the 19 unpatched G1
+exactly (offset + value). Same failure class as the 19 unpatched G1
 `0x5f7xxx` literals that caused the HW round-10 stall, but for Maple, where a
 live literal would put game-controlled frames on the real bus.
 
-**Baseline (measured 2026-07-26, 20 hits):**
+**Executable surfaces on the final disc, and how each is covered:**
 
-| Region | Hits | Classification |
+| Surface | Static coverage | Dynamic coverage |
 |---|---|---|
-| `0x8c030fec` = `0xa05f6c00` | 1 | engine maple base — **repointed to shim mirror** by the patch table |
-| `0x8c080a00–0x8c080e90` | 10 | settings/EEPROM BIOS-library region; entry thunks stubbed (33-patch table); no live maple xrefs on any captured path |
-| `0x8c0a3830–0x8c0a3fcc` | 9 | second embedded maple-driver copy; never observed executing in Phase 2/3 instrumented captures (MAPLEPC) |
+| Full cart image (109 MB `.dat` — boot 1 MB **and** all streamed content) | **scanned** (find-trick, ~1 s) | exercised paths only |
+| Naomi BIOS library slices (`build/bios_data.bin`, executable via game thunks incl. unpatched watch-item `0x8c0803a4`) | **scanned** | exercised paths only |
+| Loader (our `main.c`/`handoff.S`) | `nm main.o handoff.o` must show **zero** vmu/maple references (measured: 0) | fully — the loader's whole life is the test's boot |
+| KOS library code in `1ST_READ.BIN` (links `_vmu_block_write` etc. via default init) | own-objects assert above proves nothing of ours calls it; KOS drivers write only on request (KOS kernel source) | canary run covers KOS init + runtime |
+| Shim (`shims/src`) | **excluded by design** — the one authorized Maple user; TX limited to DEVICE REQUEST + GETCOND to main devices (`maple.c:50,85`) | canary run |
+| Donor IP.BIN bootstrap (tracks 1–3, runs pre-loader) | donor-verbatim, hash-pinned by `make_gdi` all-files sentinel | runs in every canary boot |
 
-Full 20-entry (address, value) list lives in the script as the baseline
-constant. Contract: any new/changed/moved hit fails the build; classify it
-(Ghidra `FindMmioXrefs.java` for xrefs, patch it or prove it dead) before
-updating the baseline. For future ports the script is reusable as-is: point
-it at the new boot image, start from an empty baseline, classify every hit.
+**Baseline (measured 2026-07-26):**
+
+- **Cart: 80 hits = exactly 4 × the boot image's 20**, mirrored at
+  `0x200000` stride across `0x0–0x800000` (the region below the first
+  streamed offset; matches the Phase 2 streaming map's `0x800000` floor).
+  The 20: 1 engine maple-base pool word `0x8c030fec` (repointed to shim
+  mirror by the patch table), 10 in the settings/EEPROM BIOS-library region
+  `0x8c0803xx–0x8c080exx` (entry thunks stubbed), 9 at `0x8c0a3830–0x8c0a3fcc`
+  (second embedded maple-driver copy, never observed executing in Phase 2/3
+  MAPLEPC captures).
+- **Streamed region (`≥ 0x800000`, ~101 MB): ZERO hits** — asserted as its
+  own named invariant ("no maple literal ever streams in"), which closes the
+  overlay-code concern for pool-literal SH-4 code.
+- **`bios_data.bin`: 1 hit** — `0xa05f6c18` (SB_MDST) at slice offset
+  `0x14d4`. Reachable in principle via the unpatched thunk; content-benign
+  (MDST kick would resend the shim's last read-only frame), baselined and
+  watched like every other entry.
+
+Full (offset, value) lists live in the script as baseline constants.
+Contract: any new/changed/moved hit fails the build; classify it (Ghidra
+`FindMmioXrefs.java` for xrefs, patch it or prove it dead) before updating
+the baseline. For future ports the script is reusable as-is: point it at the
+new cart, start from an empty baseline, classify every hit.
+
+**Residual risk (stated, not closed statically):** SH-4 code that *computes*
+a Maple register address without a pool literal is invisible to this scan —
+only the dynamic canary (exercised paths) covers it. The game engine's own
+Maple access goes through the one repointed base pointer, so a computed-
+address writer would be wholly new code never observed in any capture.
 
 ## Wiring
 
-- Root `Makefile`: `test` gains the static scan (host-fast, no emulator);
-  new `test-vmu` target runs the canary script (needs ROM, built disc,
-  Flycast — same prerequisites as `make disc`).
+- Root `Makefile`: `test` gains the static scan (host-fast, no emulator;
+  needs the ROM at repo root + `build/bios_data.bin` + loader objects, all
+  produced by a normal `make disc`); new `test-vmu` target runs the canary
+  script (needs ROM, built disc, Flycast — same prerequisites as `make disc`).
 - `docs/kb/tooling.md` + `docs/kb/00-status.md`: short entries; playbook
   (`docs/kb/port-playbook.md`) gets the "run both before release" step.
 
