@@ -1,8 +1,10 @@
 # Project status
 
-**Updated:** 2026-07-22 (Phase 5: GAME FULLY PLAYABLE ON REAL HARDWARE —
+**Updated:** 2026-07-26 (Phase 5: GAME FULLY PLAYABLE ON REAL HARDWARE —
 1P and 2P at full speed, both pads responsive; 2P-slowdown case closed in
-round 18. Remaining: fit/integrity spot-checks, then release packaging.)
+round 18; composite/AV 15 kHz output fixed (patch #34) and HW-verified on
+both cable types. Remaining: fit/integrity spot-checks, then release
+packaging.)
 
 ## What this is
 
@@ -343,8 +345,10 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    (Dreamcast.Cable=3 vs 0): composite keeps NTSC 480i through takeover (no
    SPG_CONTROL 0x100, vclk_div stays 0), attract screenshot-verified; VGA
    run bit-identical to pre-fix (0x100, vclk_div=1), attract
-   screenshot-verified. `make test` green (34 patches). **Awaiting HW
-   verdict: composite sync + VGA regression.**
+   screenshot-verified. `make test` green (34 patches). **HW verdict
+   (2026-07-26): PASS — user tested both AV composite (RetroTink 4K) and
+   VGA on the real Dreamcast, both display properly, no issues found.
+   Composite sync case CLOSED.**
 
    **Phase-5 closing items:** graphics/stage-load/sound spot-checks
    during normal play (user reports none so far). **Pre-publication
