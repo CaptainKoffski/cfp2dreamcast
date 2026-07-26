@@ -1,6 +1,6 @@
 # VMU-safety tripwire — design
 
-**Date:** 2026-07-26. **Status:** approved scope (both layers), pending spec review.
+**Date:** 2026-07-26. **Status:** implemented + verified 2026-07-26 (all three layers green; plan: `docs/superpowers/plans/2026-07-26-vmu-safety-tripwire.md`).
 
 ## Goal
 
