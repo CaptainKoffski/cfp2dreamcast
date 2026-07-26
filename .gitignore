@@ -2,6 +2,7 @@
 tools/
 .DS_Store
 .superpowers/
+.idea/
 bios/
 .venv/
 /capture-*.log
@@ -28,3 +29,4 @@ loader/splash.png
 naomi_boot*.png
 # disc cover art (third-party fan art, optional build input)
 0GDTEX.png
+*.pvr
