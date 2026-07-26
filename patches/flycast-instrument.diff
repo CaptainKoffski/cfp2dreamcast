@@ -34,6 +34,30 @@ index 19bdfee..37cb109 100644
  		endif()
  	elseif(UNIX)
  		if(NOT BUILD_TESTING)
+diff --git a/core/hw/aica/aica_if.cpp b/core/hw/aica/aica_if.cpp
+index 92bfa83..79445eb 100644
+--- a/core/hw/aica/aica_if.cpp
++++ b/core/hw/aica/aica_if.cpp
+@@ -153,7 +153,8 @@ void writeAicaReg(u32 addr, T data)
+ 		{
+ 		case 0x2C00:
+ 			ARMRST = data;
+-			INFO_LOG(AICA_ARM, "ARMRST = %02X", ARMRST);
++			NOTICE_LOG(AICA_ARM, "CLEO-ARMRST = %02X ram0=%08x ram4=%08x", ARMRST,
++					*(u32 *)&aica_ram[0], *(u32 *)&aica_ram[4]);
+ 			ArmSetRST();
+ 			return;
+ 		case 0x2C01:
+@@ -168,7 +169,8 @@ void writeAicaReg(u32 addr, T data)
+ 	{
+ 		VREG = (data >> 8) & 0xFF;
+ 		ARMRST = data & 0xFF;
+-		INFO_LOG(AICA_ARM, "VREG = %02X ARMRST %02X", VREG, ARMRST);
++		NOTICE_LOG(AICA_ARM, "CLEO-ARMRST(w) VREG=%02X ARMRST=%02X ram0=%08x ram4=%08x", VREG, ARMRST,
++				*(u32 *)&aica_ram[0], *(u32 *)&aica_ram[4]);
+ 		ArmSetRST();
+ 		return;
+ 	}
 diff --git a/core/hw/maple/maple_if.cpp b/core/hw/maple/maple_if.cpp
 index 0cade32..4cd559d 100644
 --- a/core/hw/maple/maple_if.cpp
@@ -117,7 +141,7 @@ index 0cade32..4cd559d 100644
  			else
  			{
 diff --git a/core/hw/maple/maple_jvs.cpp b/core/hw/maple/maple_jvs.cpp
-index d01240f..cf0b4a6 100644
+index d01240f..3769317 100644
 --- a/core/hw/maple/maple_jvs.cpp
 +++ b/core/hw/maple/maple_jvs.cpp
 @@ -19,6 +19,8 @@
@@ -129,7 +153,31 @@ index d01240f..cf0b4a6 100644
  #include <xxhash.h>
  #include "oslib/oslib.h"
  #include "oslib/i18n.h"
-@@ -1750,6 +1752,7 @@ void MIEImpl::handle_86_subcommand()
+@@ -1312,6 +1314,11 @@ u32 BaseMIE::RawDma(const u32 *buffer_in, u32 buffer_in_len, u32 *buffer_out)
+ 		const u32 reci = (buffer_in[0] >> 8) & 0xFF;
+ 		const u32 sender = (buffer_in[0] >> 16) & 0xFF;
+ 		buffer_out[0] = (resp << 0 ) | (sender << 8) | (reci << 16) | ((out_len / 4) << 24);
++		if (cmd != 0x86) {
++			char hex[168]; u32 n = out_len + 4; if (n > 80) n = 80;
++			for (u32 k = 0; k < n; k++) snprintf(hex + k*2, 3, "%02x", ((u8*)buffer_out)[k]);
++			NOTICE_LOG(MAPLE, "CLEO-MIE cmd=%02x hdr_in=%08x replylen=%d reply=%s", cmd, buffer_in[0], out_len + 4, hex);
++		}
+ 		return out_len + 4;
+ 	}
+ 	else {
+@@ -1407,6 +1414,11 @@ u32 BaseMIE::RawDma(const u32 *buffer_in, u32 buffer_in_len, u32 *buffer_out)
+ 	printf("\n");
+ #endif
+ 
++	if (cmd != 0x86) {
++		char hex[168]; u32 n = out_len; if (n > 80) n = 80;
++		for (u32 k = 0; k < n; k++) snprintf(hex + k*2, 3, "%02x", ((u8*)buffer_out)[k]);
++		NOTICE_LOG(MAPLE, "CLEO-MIE cmd=%02x hdr_in=%08x replylen=%d reply=%s", cmd, buffer_in[0], out_len, hex);
++	}
+ 	return out_len;
+ }
+ 
+@@ -1750,6 +1762,7 @@ void MIEImpl::handle_86_subcommand()
  		return;
  	}
  	u32 subcode = dma_buffer_in[0];
@@ -137,7 +185,7 @@ index d01240f..cf0b4a6 100644
  
  	// CT fw uses 13 as a 17, and 17 as 13 and also uses 19
  	if (crazy_mode)
-@@ -2225,6 +2228,7 @@ u32 jvs_io_board::handle_jvs_message(const u8 *buffer_in, u32 length_in, u8 *buf
+@@ -2225,6 +2238,7 @@ u32 jvs_io_board::handle_jvs_message(const u8 *buffer_in, u32 length_in, u8 *buf
  
  						u32 inputs[4];
  						read_digital_in(buttons, inputs);
@@ -146,7 +194,7 @@ index d01240f..cf0b4a6 100644
  						LOGJVS("btns ");
  						for (int player = 0; player < buffer_in[cmdi + 1]; player++)
 diff --git a/core/hw/mem/addrspace.cpp b/core/hw/mem/addrspace.cpp
-index c08cb8e..fcf3fc6 100644
+index c08cb8e..ff9a1f8 100644
 --- a/core/hw/mem/addrspace.cpp
 +++ b/core/hw/mem/addrspace.cpp
 @@ -4,6 +4,7 @@
@@ -217,7 +265,7 @@ index c08cb8e..fcf3fc6 100644
  	u32 page = addr >> 24;	//1 op, shift/extract
  	uintptr_t iirf = (uintptr_t)memInfo_ptr[page]; //2 ops, insert + read [vmem table will be on reg ]
  	void *ptr = (void *)(iirf & ~HANDLER_MAX);     //2 ops, and // 1 op insert
-@@ -150,6 +199,24 @@ void DYNACALL writet(u32 addr, T data)
+@@ -150,6 +199,27 @@ void DYNACALL writet(u32 addr, T data)
  {
  	constexpr u32 sz = sizeof(T);
  
@@ -236,6 +284,9 @@ index c08cb8e..fcf3fc6 100644
 +		if (pa >= 0x0cfc8800 && pa < 0x0cfc9000)
 +			cartlog("MIRRORWR pc=%08x off=%03x val=%08x\n",
 +					Sh4cntx.pc - 2, pa - 0x0cfc8800, (u32)data);
++		if (pa == 0x0c0e842c || pa == 0x0c0e6298)
++			NOTICE_LOG(SH4, "CLEO-WATCH [%08x] = %08x pc=%08x pr=%08x",
++					pa, (u32)data, Sh4cntx.pc - 2, Sh4cntx.pr);
 +	}
 +	cartlog_hwaccess('W', addr, (u32)data);
 +
@@ -253,45 +304,6 @@ index d9f2051..8994318 100644
          atomiswave.cpp
          atomiswave.h
          awave_regs.h
-diff --git a/core/hw/naomi/cartlog.cpp b/core/hw/naomi/cartlog.cpp
-new file mode 100644
-index 0000000..52f3c59
---- /dev/null
-+++ b/core/hw/naomi/cartlog.cpp
-@@ -0,0 +1,23 @@
-+// core/hw/naomi/cartlog.cpp
-+// Phase 2 instrumentation (Cleopatra Naomi->DC port). Not upstream.
-+#include "cartlog.h"
-+#include <cstdio>
-+#include <cstdlib>
-+#include <cstdarg>
-+
-+void cartlog(const char *fmt, ...)
-+{
-+	static FILE *f = nullptr;
-+	if (f == nullptr)
-+	{
-+		const char *path = getenv("FLYCAST_CARTLOG");
-+		f = fopen(path != nullptr ? path : "flycast-cartlog.txt", "w");
-+		if (f == nullptr)
-+			return; // ponytail: if the log file won't open, stay silent rather than crash the emu
-+	}
-+	va_list ap;
-+	va_start(ap, fmt);
-+	vfprintf(f, fmt, ap);
-+	va_end(ap);
-+	fflush(f);
-+}
-diff --git a/core/hw/naomi/cartlog.h b/core/hw/naomi/cartlog.h
-new file mode 100644
-index 0000000..e2c7ef6
---- /dev/null
-+++ b/core/hw/naomi/cartlog.h
-@@ -0,0 +1,4 @@
-+// core/hw/naomi/cartlog.h
-+// Phase 2 instrumentation (Cleopatra Naomi->DC port). Not upstream.
-+#pragma once
-+void cartlog(const char *fmt, ...);
 diff --git a/core/hw/naomi/naomi.cpp b/core/hw/naomi/naomi.cpp
 index 45005d7..d2dfef7 100644
 --- a/core/hw/naomi/naomi.cpp
@@ -432,6 +444,51 @@ index 4011837..0d2f910 100644
  	void AdvancePtr(u32 size) override {
  		DmaOffset += size;
  	}
+diff --git a/core/hw/pvr/pvr_regs.cpp b/core/hw/pvr/pvr_regs.cpp
+index 0538b3c..84a205d 100644
+--- a/core/hw/pvr/pvr_regs.cpp
++++ b/core/hw/pvr/pvr_regs.cpp
+@@ -1,5 +1,6 @@
+ #include "pvr_regs.h"
+ #include "pvr_mem.h"
++#include "hw/sh4/sh4_if.h"
+ #include "Renderer_if.h"
+ #include "ta.h"
+ #include "spg.h"
+@@ -156,6 +157,7 @@ void pvr_WriteReg(u32 paddr,u32 data)
+ 	case SPG_LOAD_addr:
+ 		if (PvrReg(addr, u32) != data)
+ 		{
++			NOTICE_LOG(PVR, "CLEO-SPG write %s = %08x (was %08x) pc=%08x pr=%08x", regName(paddr), data, PvrReg(addr, u32), p_sh4rcb->cntx.pc, p_sh4rcb->cntx.pr);
+ 			PvrReg(addr, u32) = data;
+ 			CalculateSync();
+ 		}
+@@ -164,6 +166,8 @@ void pvr_WriteReg(u32 paddr,u32 data)
+ 	case FB_R_CTRL_addr:
+ 		{
+ 			bool vclk_div_changed = (PvrReg(addr, u32) ^ data) & (1 << 23);
++			if (PvrReg(addr, u32) != data)
++				NOTICE_LOG(PVR, "CLEO-SPG write FB_R_CTRL = %08x (was %08x, vclk_div=%d)", data, PvrReg(addr, u32), (int)((data >> 23) & 1));
+ 			PvrReg(addr, u32) = data;
+ 			if (vclk_div_changed)
+ 				CalculateSync();
+@@ -216,6 +220,16 @@ void pvr_WriteReg(u32 paddr,u32 data)
+ 		pal_needs_update = pal_needs_update || ((data ^ PAL_RAM_CTRL) & 3) != 0;
+ 		break;
+ 
++	case VO_CONTROL_addr:
++	case SPG_HBLANK_addr:
++	case SPG_VBLANK_addr:
++	case SPG_WIDTH_addr:
++	case VO_STARTX_addr:
++	case VO_STARTY_addr:
++		if (PvrReg(addr, u32) != data)
++			NOTICE_LOG(PVR, "CLEO-SPG write %s = %08x (was %08x) pc=%08x pr=%08x", regName(paddr), data, PvrReg(addr, u32), p_sh4rcb->cntx.pc, p_sh4rcb->cntx.pr);
++		break;
++
+ 	default:
+ 		if (addr >= PALETTE_RAM_START_addr && PvrReg(addr,u32) != data)
+ 			pal_needs_update = true;
 diff --git a/core/hw/sh4/interpr/sh4_interpreter.cpp b/core/hw/sh4/interpr/sh4_interpreter.cpp
 index 54a2b02..8b9ca81 100644
 --- a/core/hw/sh4/interpr/sh4_interpreter.cpp
@@ -607,6 +664,60 @@ index 26df085..3c2f5e1 100644
  	//just wait for an Interrupt
  	int i = 0, s = 1;
  
+diff --git a/core/hw/sh4/modules/bsc.cpp b/core/hw/sh4/modules/bsc.cpp
+index 04ece27..c23dca4 100644
+--- a/core/hw/sh4/modules/bsc.cpp
++++ b/core/hw/sh4/modules/bsc.cpp
+@@ -18,6 +18,8 @@ static void write_BSC_PDTRA_arcade(u32 addr, u16 data)
+ 
+ static void write_BSC_PDTRA(u32 addr, u16 data)
+ {
++	if (data != BSC_PDTRA.full)
++		NOTICE_LOG(SH4, "CLEO-GPIO PDTRA = %04x (was %04x) pc=%08x", data, BSC_PDTRA.full, p_sh4rcb->cntx.pc);
+ 	BSC_PDTRA.full = data;
+ }
+ 
+@@ -26,6 +28,18 @@ static u16 read_BSC_PDTRA_arcade(u32 addr)
+ 	return NaomiBoardIDRead();
+ }
+ 
++static u32 read_BSC_PCTRA(u32 addr)
++{
++	return BSC_PCTRA.full;
++}
++
++static void write_BSC_PCTRA(u32 addr, u32 data)
++{
++	if (data != BSC_PCTRA.full)
++		NOTICE_LOG(SH4, "CLEO-GPIO PCTRA = %08x (was %08x) pc=%08x", data, BSC_PCTRA.full, p_sh4rcb->cntx.pc);
++	BSC_PCTRA.full = data;
++}
++
+ static u16 read_BSC_PDTRA(u32 addr)
+ {
+ 	/* as seen on chankast */
+@@ -91,7 +105,7 @@ void BSCRegisters::init()
+ 
+ 	//BSC PCTRA 0xFF80002C 0x1F80002C 32 0x00000000 Held Held Held Bclk
+ 	// Naomi BIOS writes u16 in this register but ignoring them doesn't seem to hurt
+-	setRW<BSC_PCTRA_addr, u32>();
++	setHandlers<BSC_PCTRA_addr>(read_BSC_PCTRA, write_BSC_PCTRA);
+ 
+ 	//BSC PDTRA 0xFF800030 0x1F800030 16 Undefined Held Held Held Bclk
+ 	setRW<BSC_PDTRA_addr, u16>();
+diff --git a/core/hw/sh4/modules/ccn.cpp b/core/hw/sh4/modules/ccn.cpp
+index ae5003b..eafb7ec 100644
+--- a/core/hw/sh4/modules/ccn.cpp
++++ b/core/hw/sh4/modules/ccn.cpp
+@@ -63,6 +63,8 @@ static void CCN_CCR_write(u32 addr, u32 value)
+ {
+ 	CCN_CCR_type temp;
+ 	temp.reg_data = value & 0x89AF;
++	if ((value & 0x89AF & ~0x0808u) != (CCN_CCR.reg_data & ~0x0808u))
++		NOTICE_LOG(SH4, "CLEO-CCR write = %08x (was %08x) pc=%08x", value, CCN_CCR.reg_data, Sh4cntx.pc);
+ 
+ 	if (temp.ICI) {
+ 		DEBUG_LOG(SH4, "Sh4: i-cache invalidation %08X", Sh4cntx.pc);
 diff --git a/core/ui/gui.cpp b/core/ui/gui.cpp
 index b3da1be..0fb5e50 100644
 --- a/core/ui/gui.cpp

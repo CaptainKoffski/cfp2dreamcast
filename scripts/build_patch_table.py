@@ -269,6 +269,21 @@ hook(0x8C080456, 0x7FFC, sym("shim_ee_lib_post"), "EE-lib post-kicker thunk C ->
 # a fault-restart loop on an INTACT insn at 0x8c081224 (SPC/SGR/frame proofs);
 # EXPEVT/TEA on-screen probes identify the fault class + address first.
 
+# ---- video: composite/RGB sync (2026-07-26) ------------------------------
+# The game hardcodes display mode 0x31 (640x480, monitor class 1 = 31 kHz VGA)
+# into its SDK display init FUN_8c034020 -- the Naomi DIP-1 monitor decision
+# belongs to the Naomi BIOS this conversion bypasses, so on a TV cable the
+# game outputs 31 kHz and never syncs (RetroTink 2x2 ghost image). Class 0 of
+# the same SDK dispatch (FUN_8c0409e0) is the native NTSC 480i builder.
+# shim_vid_init clears the class bits when the DC cable isn't VGA (PDTRA 9:8,
+# KOS vid_check_cable) and tail-calls the real init. Sole live reference =
+# this pool word (full-cart scan: boot mirrors only). Caller chain confirmed
+# dynamically: game init pr=8c0262ac/8c026274 -> FUN_8c026xxx (mode stored
+# @0x8c0e6298, pc=8c02636e) -> pool[0x8c026570] -> FUN_8c034020 ->
+# handler[mode&3] -> SPG writes (pc=8c03df06 accessor, CLEO-SPG capture).
+ptr(0x8C026570, 0x8C034020, sym("shim_vid_init"),
+    "TV-cable 15 kHz: display-init call -> shim_vid_init (mode class 1->0)")
+
 # NOTE (Task 14b history, RESOLVED by Task 14f above): FUN_8c03c2c6 is reached via
 # BOTH pool[0x8c02ed6c] (Mode A) and pool[0x8c02ee88] (Mode B, DC takes this); Task
 # 14 swapped only the first, and swapping the second to shim_maple_entry regressed

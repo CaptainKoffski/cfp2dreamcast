@@ -80,6 +80,37 @@ void shim_hex(unsigned int x, unsigned int y, unsigned int val) {
     hex_paint(x, y, val);
 }
 
+/* DC video-cable sense, KOS-identical RMW (tools/kos .../hardware/video.c:211
+ * vid_check_cable): PCTRA bits 19:16 := 0xa (ports 8/9 input), then PDTRA
+ * bits 9:8 = 0 VGA / 2 RGB / 3 composite. Latched once (.data non-zero init
+ * per house style -- loader does not zero .bss); safe: the game never touches
+ * PCTRA/PDTRA (zero CLEO-GPIO lines across all captures). */
+static unsigned int cable_latch = 0xff;    /* >3 = not yet read */
+int shim_cable_is_vga(void) {
+    if (cable_latch > 3u) {
+        volatile unsigned int *pctra = (volatile unsigned int *)0xff80002c;
+        *pctra = (*pctra & 0xfff0ffffu) | 0x000a0000u;
+        cable_latch = (*(volatile unsigned short *)0xff800030 >> 8) & 3u;
+    }
+    return cable_latch == 0;
+}
+
+/* Composite/RGB sync fix. The game hardcodes display mode 0x31 = 640x480,
+ * monitor class 1 (31 kHz VGA) into its SDK display init FUN_8c034020; the
+ * Naomi DIP-1 monitor choice never reaches it in this conversion (that
+ * decision lives in the Naomi BIOS we bypass), so on a TV cable the game
+ * drives 31 kHz timing and the picture never syncs. Class 0 of the same SDK
+ * (FUN_8c0409e0) is its native NTSC 480i builder (field consts 0x106/0x204/
+ * 0x102 = KOS DM_640x480_NTSC_IL): same 640x480 frame, interlaced scanout.
+ * Pool word 0x8c026570 (sole live reference; full-cart scan = boot mirrors
+ * only) repoints the game's one call here. VGA cable passes through as-is. */
+int shim_vid_init(unsigned int mode, unsigned int b, unsigned int c, unsigned int d) {
+    if (!shim_cable_is_vga())
+        mode &= ~3u;               /* class 1 (VGA 31k) -> class 0 (NTSC 480i) */
+    return ((int (*)(unsigned int, unsigned int, unsigned int, unsigned int))
+            0x8c034020)(mode, b, c, d);
+}
+
 void shim_die(unsigned int code, unsigned int a, unsigned int b) {
     volatile unsigned int *e = P2(SHIM_ERR);
     e[1] = a; e[2] = b; e[3] = 0xdeadcafe; e[0] = code;

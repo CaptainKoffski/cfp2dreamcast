@@ -5,6 +5,7 @@ void shim_die(u32, u32, u32);
 void *xmemcpy(void *, const void *, u32);
 void shim_mark(u32 slot, unsigned short color);   /* util.c: real-HW breadcrumb HUD */
 void shim_hex(u32 x, u32 y, u32 val);             /* util.c: on-screen hex printer */
+int  shim_cable_is_vga(void);                     /* util.c: DC cable sense (PDTRA) */
 static void mie_probe_reply(u32 cmd, u32 fh, u32 rcv, u32 frame);  /* MIE init ladder */
 /* shim_cart_service lives in src/cart.c (Task 10) */
 
@@ -200,7 +201,20 @@ static void maple_reply(u32 sub, u32 recvaddr, u32 frame) {
                           transmit trio and Flycast's reply shape is identical
                           to 0x21 -- final review: ACK it, don't shim_die) */
     case 0x27: xmemcpy(rx, mie_sub27, mie_sub27_len); break;   /* kick-scan ACK */
-    case 0x31: xmemcpy(rx, mie_sub31, mie_sub31_len); break;   /* DIP switches */
+    case 0x31:                              /* DIP switches. Reply byte 10 = Flycast
+                                               in(5) (maple_jvs.cpp:1959), bit0 =
+                                               Naomi SW1:1 monitor freq: 1 = 31 kHz
+                                               VGA, 0 = 15 kHz NTSCi (MAME
+                                               naomi.cpp:1486). Header 0x42a = 0 ->
+                                               game supports both; key the DIP off
+                                               the real DC cable so composite/RGB
+                                               TVs get the game's native 15 kHz
+                                               mode (the canned capture hardwired
+                                               31 kHz -> out-of-sync on AV out). */
+        xmemcpy(rx, mie_sub31, mie_sub31_len);
+        if (!shim_cable_is_vga())
+            ((u8 *)rx)[10] &= 0xfeu;
+        break;
     case 0xff: xmemcpy(rx, mie_subff, mie_subff_len); break;   /* broadcast/reset ACK */
     case 0x0b: {                            /* EEPROM write: MIE sub-0x0b. Payload (Flycast
                                                maple_jvs.cpp:1888-1896, dma_buffer_in=frame+0xc):

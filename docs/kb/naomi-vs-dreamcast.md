@@ -366,9 +366,17 @@ DC boot structures.
   low-risk, folded into §8-4.
 - **DIP switches.** Naomi reads 4 DIP switches (frequency 15/31 kHz, etc.) via
   the MIE (`tools/netboot/naomi/README.md` frequencies/orientations). On DC
-  these don't exist; the loader forces 31 kHz / horizontal-or-vertical to match
-  what the game's header requires (header `0x42a`/`0x42b`,
-  `tools/netboot/docs/naomi.md:68-73`).
+  these don't exist; the shim replays a captured sub-0x31 reply (header
+  `0x42a`/`0x42b` = 0 → any frequency/orientation valid,
+  `tools/netboot/docs/naomi.md:68-73`). **Phase-5 finding (2026-07-26): this
+  game never consults the DIP for video** — it hardcodes display mode 0x31
+  (monitor class = 31 kHz VGA) into its SDK display init `FUN_8c034020`; the
+  frequency DIP is a Naomi-BIOS decision our conversion bypasses (control
+  test: flipping the sub-0x31 reply's DIP-1 bit — byte 10 bit 0, Flycast
+  `maple_jvs.cpp:1959`, MAME `naomi.cpp:1486` — changed nothing). TV-cable
+  output instead comes from patch #34 / `shim_vid_init`: DC cable sense
+  (PDTRA 9:8) selects the game's own class-0 NTSC-480i mode builder
+  `FUN_8c0409e0`. See `00-status.md` composite-fix entry.
 - **Cart decryption.** M1/M2/M4 cart types support on-the-fly
   decrypt/decompress selected by DMA-offset mode bits (`naomibd.cpp:38-53`).
   **Our dump is already decrypted** (`docs/kb/game.md`), so the loader reads

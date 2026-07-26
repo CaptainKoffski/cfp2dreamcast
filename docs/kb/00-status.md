@@ -316,6 +316,36 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    including a full user play session through `make test-vmu-play`: all
    canaries byte-identical, control auto-formatted — PASS, no VMU writes.
 
+   **Composite/AV sync fix (2026-07-26, patch #34):** user HW report — VGA
+   fine; composite (RetroTink 4K) loses sync exactly when the game takes
+   over video (SEGA + loader NAOMI-splash screens fine = KOS's cable-correct
+   NTSC 480i still active; RT4K shows the classic 31-kHz-on-15-kHz 2x2
+   ghost). Dissected with instrumented Flycast (CLEO-SPG logs grew pc/pr;
+   new CLEO-WATCH RAM watch in addrspace.cpp writet): the game **hardcodes
+   display mode 0x31** (640x480, monitor-class bits 1:0 = 1 = 31 kHz VGA)
+   in its init (mode stored @0x8c0e6298 pc=8c02636e, callers
+   pr=8c0262ac/8c026274) → sole pool word **0x8c026570** → SDK display init
+   FUN_8c034020 (flags @0x8c0e842c) → handler[mode&3] → SPG via accessor
+   FUN_8c03df00 (takeover write pc=8c03df06: SPG_CONTROL 0x150→0x100,
+   FB_R_CTRL vclk_div 0→1 = the sync killer). The Naomi DIP-1 monitor
+   choice never reaches this path — that decision belongs to the Naomi BIOS
+   we bypass (control test: flipping the MIE sub-0x31 DIP reply bit0
+   changed nothing). The SDK's class-0 handler FUN_8c0409e0 is a complete
+   native **NTSC 480i** builder (field consts 0x106/0x204/0x102 = KOS
+   DM_640x480_NTSC_IL; class 2 = PAL 0x35f/0x34b, class 1 = VGA). Fix:
+   `shim_vid_init` (util.c) reads the real DC cable (PDTRA bits 9:8, KOS
+   vid_check_cable idiom, latched once — game never touches PCTRA/PDTRA,
+   zero CLEO-GPIO hits) and clears the mode class (0x31→0x30) on non-VGA
+   cables, then tail-calls FUN_8c034020; **patch #34** repoints pool word
+   0x8c026570 (sole live ref; full-cart scan = boot mirrors only). The MIE
+   sub-0x31 DIP reply now also reports DIP-1 = 15 kHz on TV cables
+   (test-menu truthfulness; provably not consulted for video). Flycast A/B
+   (Dreamcast.Cable=3 vs 0): composite keeps NTSC 480i through takeover (no
+   SPG_CONTROL 0x100, vclk_div stays 0), attract screenshot-verified; VGA
+   run bit-identical to pre-fix (0x100, vclk_div=1), attract
+   screenshot-verified. `make test` green (34 patches). **Awaiting HW
+   verdict: composite sync + VGA regression.**
+
    **Phase-5 closing items:** graphics/stage-load/sound spot-checks
    during normal play (user reports none so far). **Pre-publication
    (2026-07-23):** full git-history audit — CLEAN (no ROM/BIOS/donor
