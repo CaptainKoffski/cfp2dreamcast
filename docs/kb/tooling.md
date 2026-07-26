@@ -138,6 +138,10 @@ input, and serial pokes. Distinct from the release Flycast above.
 
 Self-verify the on-screen display without a macOS screen-capture (TCC)
 permission — the emulator reads its **own** GL framebuffer, no OS screenshot API.
+("Headless" here = no OS capture API, **not** windowless: this Flycast build
+always opens a window — there is no true headless mode; that's why every
+unattended launch forces `rend.vsync=no`, so an unfocused window can't
+deadlock the emu thread. Same applies to the VMU-canary harness below.)
 Added in `core/ui/gui.cpp` `gui_dumpFramebuffer()` (called from
 `core/ui/mainui.cpp` `mainui_rend_frame()`, render thread, after `emu.render()`),
 which **reuses the built-in screenshot readback** `getScreenshot()` →
