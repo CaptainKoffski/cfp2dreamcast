@@ -27,12 +27,23 @@ port:
 - The KOS loader phase and the game are both covered by the dynamic test
   below, so no per-component claim is load-bearing.
 
-## Layer 1 — dynamic VMU-canary test (`make test-vmu`)
+## Layer 1 — dynamic VMU-canary test (`make test-vmu` / `make test-vmu-play`)
 
-One headless Flycast run of `build/disc.gdi` through boot + attract (~90 s,
-same launch pattern as `scripts/capture.sh` / `docs/kb/tooling.md` Task 18:
+One Flycast run of `build/disc.gdi`, in one of two modes of the same script
+(same launch pattern as `scripts/capture.sh` / `docs/kb/tooling.md` Task 18:
 abs path, `ApplePersistenceIgnoreState`, transient `rend.vsync=no`, stale
-instances killed first).
+instances killed first):
+
+- **`attract` (default, `make test-vmu`):** unattended background run through
+  boot + attract, auto-killed after ~90 s. CI-style, deterministic.
+- **`play` (`make test-vmu-play`):** foreground, headed — the tester plays
+  the game for as long as they like (settings, 2P, game over, high-score
+  screens: the longer and wider the session, the more paths the canary
+  observes). The script blocks until the tester quits the emulator, then
+  runs the **identical** seed/hash assertions. This is the recommended
+  pre-release mode, since it shrinks the "exercised paths only" caveat that
+  bounds every dynamic layer. Same `capture.sh play`-pass precedent
+  (foreground + vsync=no is the proven combination from Phase 2/3 sessions).
 
 **Oracle (Flycast source, instrumented tree in repo):**
 
@@ -54,7 +65,8 @@ instances killed first).
    `input:device1=0`, `input:device1.1=1`, `input:device2=0`,
    `input:device2.1=1` (cfg keys/sections:
    `tools/flycast-src/core/cfg/option.cpp:145,201-215,234,238`).
-3. Kill after the run window; hash all four files.
+3. `attract`: kill after the run window. `play`: wait for the tester to
+   quit. Then hash all four files.
 4. **PASS iff** every canary is byte-identical **and** the control file
    changed (auto-format proves the VMUPath override, VMU attachment, and the
    hash logic are actually wired — the control-test rule applied to a
@@ -118,8 +130,9 @@ address writer would be wholly new code never observed in any capture.
 
 - Root `Makefile`: `test` gains the static scan (host-fast, no emulator;
   needs the ROM at repo root + `build/bios_data.bin` + loader objects, all
-  produced by a normal `make disc`); new `test-vmu` target runs the canary
-  script (needs ROM, built disc, Flycast — same prerequisites as `make disc`).
+  produced by a normal `make disc`); new `test-vmu` (attract) and
+  `test-vmu-play` (headed, tester-driven) targets run the canary script
+  (needs ROM, built disc, Flycast — same prerequisites as `make disc`).
 - `docs/kb/tooling.md` + `docs/kb/00-status.md`: short entries; playbook
   (`docs/kb/port-playbook.md`) gets the "run both before release" step.
 
