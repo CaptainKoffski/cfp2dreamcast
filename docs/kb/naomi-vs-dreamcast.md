@@ -237,6 +237,38 @@ EEPROM-parse function, replace the byte-load instructions with immediate loads).
 If the game wants persistent settings/high-scores on DC, they can be redirected
 to flashrom or VMU, but the minimum viable port just forces defaults.
 
+### Hardware safety: can a buggy port brick the console?
+
+No. Every writable store on the DC sits behind a read-only firmware layer that
+game code cannot reach, so the worst case from bad flash/VMU writes is
+corrupted *data*, not a bricked device:
+
+- **BIOS** is a mask ROM, not flash — physically read-only, no software write
+  path exists. Region-free/modded BIOS therefore requires a hardware chip
+  swap, never a software flash
+  ([Dreamcast BIOS ROM overview](https://ps2bios.gitlab.io/blog/dreamcast-bios-rom/);
+  modding threads confirm chip replacement is the only route, e.g.
+  [dreamcast-talk.com BIOS flashing thread](https://www.dreamcast-talk.com/forum/viewtopic.php?t=17974)).
+- **Onboard flashrom** — partition 0 (region byte `0x1a002`, default
+  language/video system) is a read-only partition; changing it needs a
+  hardware +12V mod, not a normal `FLASHROM_WRITE` syscall. Only the later
+  writable partitions (2+), used for per-game data such as PSO's
+  serial/access keys, can be corrupted by a rogue write
+  ([dreamcast.wiki Flash Memory Eraser](https://dreamcast.wiki/Flash_Memory_Eraser),
+  [mc.pp.se flash memory docs](http://mc.pp.se/dc/flashmem.html)).
+- **VMU** — its own BIOS/OS lives in a 16 KB mask ROM inside the Sanyo LC8670
+  ("Potato") CPU, not writable via Maple bus commands. Games can only
+  read/write the separate 128 KB flash user area (saves + minigames) through
+  the block/FAT filesystem
+  ([dreamcast.wiki VMU hardware overview](https://dreamcast.wiki/VMU_hardware_overview),
+  [dmitry.gr VMU teardown PDF](https://dmitry.gr/images/VMU.pdf)). Garbage
+  writes there corrupt the directory/FAT or a save — recoverable by
+  reformatting, never a bricked VMU.
+
+Practical implication for this port: a buggy flash/VMU write from the ported
+binary can at worst clobber a save slot or another game's flash data block.
+It cannot render the console or a VMU unbootable.
+
 ## 6. BIOS & boot
 
 ### Naomi boot sequence
