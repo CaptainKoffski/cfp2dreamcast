@@ -58,8 +58,12 @@ instances killed first):
 
 1. Fresh temp dir; seed `vmu_save_A1.bin`, `A2`, `B2` with 128 KB of `0xA5`
    (canaries) and `vmu_save_B1.bin` with 128 KB of zeros (control).
-2. Launch with transient, non-mutating CLI config (same `-config` mechanism
-   capture.sh uses; `emu.cfg` untouched):
+2. Launch with transient CLI config (same `-config` mechanism capture.sh
+   uses; values go through `setTransient()` and are never saved back —
+   `tools/flycast-src/core/cfg/cl.cpp:163`. The graceful quit does rewrite
+   `emu.cfg`'s ordinary bookkeeping — recents, window state — exactly like
+   any manual Flycast session; verified 2026-07-26 that no transient value
+   persists):
    `config:Dreamcast.VMUPath=<tempdir>`, `config:PerGameVmu=no`,
    `config:UsePhysicalVmuMemory=no`, `config:rend.vsync=no`,
    `input:device1=0`, `input:device1.1=1`, `input:device2=0`,
