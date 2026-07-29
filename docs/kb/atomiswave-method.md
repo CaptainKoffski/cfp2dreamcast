@@ -105,6 +105,53 @@ process?"). Mapped to our six touchpoint categories:
 - **Gap:** the loader is *not published as source* (§4, §6-1). We know it exists
   and what it must do; we do not have its code.
 
+### The animated boot logo — RE'd from two shipped ports (2026-07-30)
+
+**Finding: the Sammy/Atomiswave opening logo + jingle is the *game's own* code,
+not the AW BIOS and not something megavolt85 added.** It ships inside each game
+binary via Sammy's SDK and survives the port automatically because DC's PVR +
+AICA are the same silicon the SDK targets — megavolt85 gets it for free by *not
+removing it*.
+
+Method (reproducible; stdlib only, no copyrighted bytes committed): extract
+`1ST_READ.BIN` from the two ports we hold (Dolphin Blue, Sushi Bar — both
+megavolt85 GDIs) with a GDI-aware ISO9660 reader (high-density volume base
+LBA 45000, PVD at track03 file offset `0x8000`, extents are absolute disc LBAs
+so `1ST_READ.BIN` at LBA 450000 lives in track04). Each disc holds only two
+files: `0GDTEX.PVR` + one monolithic `1ST_READ.BIN` (loader **and** game in one
+blob — DB 3,538,016 B, SB 813,056 B). String-scan both:
+
+```
+sx_AwLogo Ver 0.90 Build:May 23 2003 13:14:14   opening-logo module (SystemX SDK)
+SystemX Library Version 1.01                    Sammy's Atomiswave SDK
+Nindows Library by Y.Ito / S.Uchida ...         its graphics lib
+AW_LOGO1.PVR AW_LOGO2.PVR AW_LOGO3.PVR (+.PVP)  layered logo textures + palettes
+SammyRogo / SammyRogo.pvp                        Sammy logo (rogo = ロゴ)
+SREQ_OPENING_LOGO / MIDI_OPENING_LOGO            opening-logo sound request + jingle
+```
+
+Present in **both** games but at **different offsets** (DB `sx_AwLogo` @1069037,
+SB @272913) → per-game *linkage* of the SDK module, not a fixed blob pasted in
+by the porter. Build-dated 2003 (the AW SDK), long before the 2020 ports —
+unambiguously original game code. The module renders the logo PVRs and fires
+`MIDI_OPENING_LOGO` through AICA as part of the game's own startup.
+
+**Why our Naomi port cannot inherit this.** The Naomi platform logo lives in the
+**BIOS** (§1 "Boot/BIOS"; naomi-vs-dreamcast.md §6), runs *before* the game, and
+is never in the cart — our conversion bypasses that BIOS, so there is nothing to
+keep. Confirmed against our cart: `Cleopatra Fortune Plus.dat` has **zero**
+`AwLogo`/`SammyRogo`/`OPENING_LOGO`/`SystemX` hits; it links "SEGA Ninja2
+Library" and carries only its own game assets (`ACTBG*.pvr`).
+
+| | Boot logo lives in | Survives the port? |
+|---|---|---|
+| Atomiswave | the game (SystemX SDK module) | yes — automatically |
+| Naomi | the BIOS (separate from game) | no — must be re-created |
+
+So an animated Naomi boot logo is never free for us: it means capture-and-replay
+of the Naomi BIOS logo (frames + jingle) driven from our own loader, with the
+sound path being the hard/risky half (the loader has no audio today).
+
 ### ROM access redirection (the central mechanism)
 The AW cart is **not** memory-mapped; like Naomi it is reached through G1-bus
 registers, but with a *different, higher-level* scheme than Naomi — a
@@ -283,6 +330,11 @@ cited to `docs/kb/naomi-vs-dreamcast.md` (not re-derived here).
    have the *method* (§3) from MAME + author forum posts, but not the reference
    implementation. *Resolves in:* our own Phase 3/4 — we implement the redirection
    ourselves against Naomi's register set; AW gives strategy, not code.
+   **Partially resolved 2026-07-30** (§3 "The animated boot logo"): we no longer
+   have to guess about *one* part of the loader — the animated boot logo/sound is
+   NOT in megavolt85's loader at all; it is the game's own SDK code. The
+   cart→GD-ROM redirection and input-remap shim remain unknown from the binaries
+   (not chased yet), so this stays open for those parts.
 2. **Whether `AFS_Tools` is actually the MPR-ROM repack path, or something
    else.** §3 infers AFS↔MPR from the identical 64-byte-record structure and the
    tool living in megavolt85's `tools_for_DC`, but no post states "the loader
@@ -303,3 +355,8 @@ cited to `docs/kb/naomi-vs-dreamcast.md` (not re-derived here).
    jumps to. *Tried:* MAME `init_atomiswave` + FAQ; loader source unavailable
    (see #1). *Resolves in:* moot for us — our entry/load table comes from the
    Naomi header (naomi-vs-dreamcast.md §6), not from AW.
+   **Update 2026-07-30:** the *animated logo* piece of the boot experience is now
+   understood (§3 "The animated boot logo") — it's the game's own SystemX-SDK
+   opening-logo module, so it needs no loader support at all on AW. The exact
+   RAM addresses/entry the loader jumps to are still unconfirmed, but moot as
+   noted.
