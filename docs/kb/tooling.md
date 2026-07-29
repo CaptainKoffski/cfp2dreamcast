@@ -225,6 +225,13 @@ Static sibling: `scripts/test_maple_literals.py` (wired into `make test`).
     words are single-referenced before repointing them).
   `tools/boot.bin` = first 1 MB of `Cleopatra Fortune Plus.dat` (gitignored;
   regenerate: `dd if="Cleopatra Fortune Plus.dat" of=tools/boot.bin bs=1M count=1`).
+- **Portable analysis export (`docs/kb/ghidra/`, committed):** the `cleo3`
+  analysis serialized as Ghidra Program XML (`boot.xml`) — copyright-clean
+  (markup only; the byte-image goes to a separate `*.bytes`, gitignored). Anyone
+  with their own `boot.bin` reconstructs the exact project via *File → Import →
+  `boot.xml`* — no auto-analysis, no version drift. Round-trip verified: 1645/1645
+  functions, 22,415/22,415 typed data. Export script `scripts/ghidra/ExportToXML.java`;
+  regen + import steps in `docs/kb/ghidra/README.md`.
 
 ### KallistiOS (KOS) + sh-elf toolchain
 

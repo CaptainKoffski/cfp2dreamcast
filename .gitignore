@@ -20,6 +20,8 @@ loader/*.elf
 *.cdi
 track*.bin
 track*.raw
+# Ghidra Program XML companion image (byte-identical to boot.bin — copyrighted)
+*.bytes
 
 # SDD scratch (briefs, reports, review packages, progress ledger)
 .superpowers/
