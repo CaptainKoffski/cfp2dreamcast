@@ -169,7 +169,6 @@ int main(void) {
     say("shim + BIOS data placed");
     dbglog(DBG_INFO, "jumping to %08x\n", GAME_ENTRY);
     say("HANDOFF -> game");
-    thd_sleep(2000);            /* let the breadcrumbs be read on a real TV */
     irq_disable();
     /* Deliberately NO TMU stop / ARM reset here: the game reads TCNT0 for its
      * delay loops relying on the BIOS-left-running timer (12 TCNT0 literals;
