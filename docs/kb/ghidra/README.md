@@ -26,13 +26,19 @@ restore-drift — the tool that wrote it reads it back.
 
 Tested on Ghidra 12.1.2, JDK 26, macOS.
 
-1. Extract your own `boot.bin` from your ROM (see `../boot-binary.md`). It must
-   be the same dump — 0x100000 (1 MiB) — as ours; the XML memory image expects
-   byte-for-byte identical contents.
-2. Provide it as the companion image next to `boot.xml`:
+1. Slice the SH-4 program out of your own cart image — it's the first 1 MiB,
+   nothing else needed:
    ```sh
-   cp /path/to/your/boot.bin docs/kb/ghidra/boot.bytes   # gitignored
+   dd if="Cleopatra Fortune Plus.dat" of=docs/kb/ghidra/boot.bytes bs=1M count=1
    ```
+   Why only 1 MiB: the `.dat` is the whole ~104 MB Naomi cartridge (program +
+   graphics/audio/tables). Only the first 1 MiB is the SH-4 code that runs at
+   `0x8c020000` — the region this analysis covers (see `../boot-binary.md`). The
+   rest is streamed assets, not code, and irrelevant here. The file must be named
+   `boot.bytes` (the XML references it by that name) and be the same dump — the
+   XML memory image expects byte-for-byte identical contents.
+2. (already done by step 1 — `boot.bytes` now sits next to `boot.xml`, and is
+   gitignored so it never gets committed.)
 3. Import — GUI: **File → Import File → `boot.xml`** (loader: *XML Input
    Format*). Or headless:
    ```sh
