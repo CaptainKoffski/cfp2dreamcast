@@ -5,6 +5,7 @@ tools/
 .idea/
 bios/
 .venv/
+games/
 /capture-*.log
 flycast-*.txt
 __pycache__/

@@ -152,6 +152,19 @@ So an animated Naomi boot logo is never free for us: it means capture-and-replay
 of the Naomi BIOS logo (frames + jingle) driven from our own loader, with the
 sound path being the hard/risky half (the loader has no audio today).
 
+**Confirmed dynamically (2026-07-30, Flycast).** Booted the Dolphin Blue *port*
+(needs a real `dc_boot.bin` — megavolt85's loader issues GDROM MISC INIT cmd 3,
+which Flycast HLE `reios` lacks; our own KOS loader avoids that on the normal
+path, which is why our disc boots under `reios` and the AW ports do not) and,
+as a control test, the Dolphin Blue *arcade* original (`awbios` + `dolphin`
+romset). Captured opening-logo frames from both. The animation is: a glowing
+sprite **traces the logo outline as a neon-cyan wireframe**, which then **fills
+into the solid orange/green gradient logo** ("ATOMISWAVE™"), rendered via PVR
+from the `AW_LOGO*.PVR` layers; the jingle is an AICA-ARM sound program uploaded
+during the window (`CLEO-ARMRST` shows `ram0` advancing 0 → real ARM code). The
+filled-logo frame is **byte-identical (same md5) between the arcade original and
+the DC port** — proof the port runs the exact same `sx_AwLogo` module unchanged.
+
 ### ROM access redirection (the central mechanism)
 The AW cart is **not** memory-mapped; like Naomi it is reached through G1-bus
 registers, but with a *different, higher-level* scheme than Naomi — a
