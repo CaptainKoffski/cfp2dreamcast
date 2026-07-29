@@ -130,6 +130,7 @@ was considered and deferred (see the reuse spec).
 
 - Technique catalog & what transfers to Naomi: `atomiswave-method.md`
 - Hardware deltas: `naomi-vs-dreamcast.md`
+- Can a game damage the ODE / real GD-ROM drive? `drive-safety.md`
 - Toolchain install recipes: `tooling.md`
 - This port's RE findings: `boot-binary.md`
 - Deferred tooling handoff (kit repo, instrumented-Flycast fork) and the full
