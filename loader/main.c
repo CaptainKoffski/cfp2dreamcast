@@ -52,7 +52,7 @@ static void halt(const char *msg) {
  * serial cost it measures. The breakdown is painted to the framebuffer (read
  * off the TV, like every prior HUD) and paused, not printed to serial.
  * Compile-time flag like LOADER_QUIET; set 0 to remove entirely. */
-#define LOADER_TIMING 1
+#define LOADER_TIMING 0        /* 1 = per-stage loader timers + read pause (HW profiling) */
 #if LOADER_TIMING
 static uint64 tmk_us[16];
 static const char *tmk_lbl[16];

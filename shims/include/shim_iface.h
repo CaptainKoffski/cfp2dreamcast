@@ -54,7 +54,7 @@
  * (release). Per-read/per-frame VRAM paint blacks Flycast's present -- HW-only,
  * like SHIM_HUD. */
 #ifndef SHIM_LOADSTAT
-#define SHIM_LOADSTAT 1
+#define SHIM_LOADSTAT 0        /* 1 = on-screen load-time counters (HW profiling) */
 #endif
 
 /* GD-ROM cart streaming via G1-DMA (CD_CMD_DMAREAD) instead of polled PIO -- the
