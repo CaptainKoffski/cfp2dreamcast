@@ -420,7 +420,17 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    half a day). Watch item: thunk 0x8c0803a4 (same table, via trampoline
    0x8c081ae8) is NOT on the boot path and left unpatched — the SPC row will
    name it if it ever bites. Remaining
-   watch items: VRAM ~9.2 MB > DC 8 MB texture fit, sound-RAM fit
+   watch items: VRAM ~9.2 MB > DC 8 MB texture fit (still open).
+   **Sound-RAM fit CLOSED (2026-08-01):** write-truth remeasure in Flycast
+   (zero ARAM at game handoff, then high-water + 256 KB histogram of genuine
+   post-handoff writes — `cartlog_aram_profile`, `patches/flycast-instrument.diff`)
+   shows the game writes only ARAM `0x0-0x1fffff` = **exactly 2 MB, 0 bytes above**,
+   loaded once at boot as a fixed bank; confirmed on a hands-on gameplay round
+   (`capture-aram-fit-gameplay.log`, 603 cart DMAs / 10 snapshots — high-water
+   never left `0x200000` through drops/clears/combos/stage changes). Fits DC's
+   2 MB, no sample cuts — the old
+   "8 MB / inconclusive" was the backwards content scan fooled by a stale byte.
+   See `docs/kb/phase2-measurements.md`.
    (GD-ROM PIO→DMA latency = I1 CLOSED by the SHIM_GD_DMA upgrade above).
 
 ## Phase 1 checklist
