@@ -29,6 +29,9 @@ void cart_split(u32 off, u32 len, split_t *s) {
 void shim_die(u32, u32, u32);
 void *xmemcpy(void *, const void *, u32);
 int gd_read_sectors(void *dst, u32 fad, u32 n);
+#if SHIM_GD_DMA
+int gd_read_sectors_dma(u32 phys, u32 fad, u32 n);          /* gd.c: G1-DMA body reads */
+#endif
 void scif_puts(const char *); void scif_puthex(u32);
 void shim_mark(u32 slot, unsigned short color);   /* util.c: real-HW breadcrumb HUD */
 
@@ -61,6 +64,12 @@ static void gd_or_die(void *dst, u32 rel_fad, u32 n) {
     int r = gd_read_sectors(dst, CART_FAD + rel_fad, n);
     if (r < 0) shim_die(4, rel_fad, gd_last_err);
 }
+#if SHIM_GD_DMA
+static void gd_or_die_dma(u32 phys, u32 rel_fad, u32 n) {   /* body via G1-DMA (32-aligned phys) */
+    int r = gd_read_sectors_dma(phys, CART_FAD + rel_fad, n);
+    if (r < 0) shim_die(4, rel_fad, gd_last_err);
+}
+#endif
 
 /* dest_phys is a main-RAM phys addr (0x0c......). The game reads streamed cart
  * assets UNCACHED (P2, 0xa0......) or via hardware DMA (PVR/TA/AICA) -- real-DMA
@@ -89,7 +98,17 @@ void cart_read(u32 off, u32 len, u32 dest_phys) {
         dst += s.head_take;
     }
     if (s.body_sect) {
-        gd_or_die(dst, s.body_fad, s.body_sect);
+#if SHIM_GD_DMA
+        /* dest_phys is a physical addr (0x0c..); the head bytes are already
+         * written, so the body starts head_take further in. G1-DMA needs a
+         * 32-byte-aligned dest -- off is usually sector-aligned (no head), so
+         * the body qualifies; the rare unaligned body falls back to PIO. */
+        u32 body_phys = dest_phys + s.head_take;
+        if ((body_phys & 31u) == 0)
+            gd_or_die_dma(body_phys, s.body_fad, s.body_sect);
+        else
+#endif
+            gd_or_die(dst, s.body_fad, s.body_sect);
         dst += s.body_sect * 2048;
     }
     if (s.tail_take) {

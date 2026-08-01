@@ -57,4 +57,14 @@
 #define SHIM_LOADSTAT 1
 #endif
 
+/* GD-ROM cart streaming via G1-DMA (CD_CMD_DMAREAD) instead of polled PIO -- the
+ * deferred I1 "GD-DMA upgrade". Whole-sector, 32-byte-aligned body reads go by
+ * DMA (the bulk); partial head/tail and any unaligned body stay PIO. 1 = DMA
+ * (this build, under test), 0 = the proven polled-PIO path (instant fallback if
+ * HW regresses). HW-only: Flycast's virtual drive returns instantly for both PIO
+ * and DMA, so it can neither exercise nor confirm this path. */
+#ifndef SHIM_GD_DMA
+#define SHIM_GD_DMA 1
+#endif
+
 #endif

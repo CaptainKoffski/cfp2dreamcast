@@ -3,11 +3,10 @@
 **Updated:** 2026-08-01 (Phase 5: GAME FULLY PLAYABLE ON REAL HARDWARE —
 1P and 2P at full speed, both pads responsive; 2P-slowdown case closed in
 round 18; composite/AV 15 kHz output fixed (patch #34) and HW-verified on
-both cable types; boot-time reduction underway — patch #35 trimmed a ~2 s
-hardcoded JVS post-RESET settle, post-handoff black screen 9.6→7.6 s
-HW-verified, the ~4.5 s GD-PIO asset preload (I1 → GD-DMA) now the remaining
-lever. Remaining: GD-DMA upgrade, fit/integrity spot-checks, then release
-packaging.)
+both cable types. Boot-time reduction (HW-verified): patch #35 trimmed a ~2 s
+hardcoded JVS post-RESET settle and the GD-DMA upgrade (SHIM_GD_DMA, I1) made
+cart streaming 2.4× faster — post-handoff black screen cut ~9.5→~5 s.
+Remaining: fit/integrity spot-checks, then release packaging.)
 
 ## What this is
 
@@ -383,6 +382,30 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    LOADER_TIMING=1) for the GD-DMA profiling to follow — flip both to 0 for
    the release build (removes the counters + the loader debug pause).
 
+   **GD-DMA cart streaming (SHIM_GD_DMA, 2026-08-01) — I1 addressed:** the
+   post-handoff cart asset preload streamed via polled PIO (~2.5 MiB/s, ~4.5 s);
+   the deferred I1 "GD-DMA upgrade" swaps the whole-sector body reads to
+   `CD_CMD_DMAREAD` (gd.c `gd_read_sectors_dma`: 32-byte-aligned PHYSICAL dest,
+   OCBI dcache-invalidate, same polled EXEC/CHECK completion + retry/reinit
+   hardening; partial head/tail + unaligned bodies stay PIO). KOS ABI
+   cross-checked (CD_CMD_DMAREAD=17, physical dest, 32-B align). **The blocker
+   was the exact "G1-DMA side effect" the original PIO-only choice avoided:**
+   real GD-DMA fires the GD-DMA-complete interrupt (SB_ISTNRM bit 14), and the
+   game — which runs its cart DMA mirrored + polled — still has its Naomi-legacy
+   handler armed and mishandles it. Symptom (HW): the DMA data landed correctly
+   (a dest canary + no poll-hang, confirmed via SHIM_LOADSTAT death-screen
+   diagnostics) but the game hung after ~14 reads with the frame loop alive.
+   **Fix (HW-confirmed): mask GD-DMA (bit 14) from all three ASIC IRQ levels
+   (IRQD/IRQB/IRQ9 @ 0xa05f6910/20/30) + ack SB_ISTNRM bit 14 per read** — the
+   game never needs a real GD-DMA IRQ (it polls the mirror); vblank etc.
+   untouched. **HW verdict (2026-08-01): GD-time 4526 → 1874 ms (2.4×,
+   ~6.1 MiB/s), post-handoff black screen ~7.6 → ~5 s; attract, 1P and 2P all
+   play correctly.** SHIM_GD_DMA defaults 1 (proven upgrade); 0 = instant PIO
+   fallback. Combined with patch #35, the post-handoff black screen went
+   ~9.5 → ~5 s. Possible follow-up: async (hook the DMA-kick, not the wait) to
+   overlap the transfer with the game's decompression — diminishing returns
+   (the shim hooks the completion-wait, by when the game is already blocking).
+
    **Phase-5 closing items:** graphics/stage-load/sound spot-checks
    during normal play (user reports none so far). **Pre-publication
    (2026-07-23):** full git-history audit — CLEAN (no ROM/BIOS/donor
@@ -397,8 +420,8 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    half a day). Watch item: thunk 0x8c0803a4 (same table, via trampoline
    0x8c081ae8) is NOT on the boot path and left unpatched — the SPC row will
    name it if it ever bites. Remaining
-   watch items: GD-ROM PIO→DMA latency, VRAM ~9.2 MB > DC 8 MB texture fit,
-   sound-RAM fit.
+   watch items: VRAM ~9.2 MB > DC 8 MB texture fit, sound-RAM fit
+   (GD-ROM PIO→DMA latency = I1 CLOSED by the SHIM_GD_DMA upgrade above).
 
 ## Phase 1 checklist
 

@@ -23,6 +23,7 @@ typedef int (*gdc_t)(u32, u32, u32, u32);
 
 #define GDC       ((gdc_t)(*(volatile u32 *)0x8c0000bc))
 #define CMD_PIOREAD   16
+#define CMD_DMAREAD   17  /* G1-DMA read (SHIM_GD_DMA); KOS CD_CMD_DMAREAD */
 #define CMD_INIT      24  /* drive re-init (KOS cdrom_reinit path) */
 #define GD_SEND       0   /* r7 func codes (superfn r6 = 0) */
 #define GD_CHECK      1
@@ -99,3 +100,58 @@ int gd_read_sectors(void *dst, u32 fad, u32 n) {
     }
     return -2;
 }
+
+#if SHIM_GD_DMA
+/* Invalidate the D-cache over [phys, phys+len) (SH-4 cache line = 32 B) BEFORE a
+ * DMA read: OCBI discards any lines (incl. dirty) so (a) no stale write-back can
+ * land on top of the incoming DMA, and (b) later reads fetch fresh from RAM. The
+ * shim is freestanding (no KOS dcache_inval_range), so hit the P1 cached alias of
+ * the physical dest directly. Range is line-aligned (callers DMA only 32-aligned
+ * dests, whole 2048-B sectors). */
+static void dcache_inval(u32 phys, u32 len) {
+    u32 a = (phys & 0x1fffffffu) | 0x80000000u, end = a + len;
+    for (a &= ~31u; a < end; a += 32u)
+        __asm__ volatile ("ocbi @%0" :: "r"(a));
+}
+
+/* DMA variant of gd_read_sectors: CD_CMD_DMAREAD to a 32-byte-aligned PHYSICAL
+ * dest -- the G1-DMA engine writes RAM directly, no per-word CPU cost. Same
+ * polled EXEC/CHECK completion + retry/reinit hardening as the PIO path (the
+ * shim drives GD without IRQs, unlike KOS's semaphore path). The BIOS uses the
+ * REAL G1 regs 0x5f74xx; the game only ever touches the mirror (the 13 pool
+ * patches), so no collision. */
+int gd_read_sectors_dma(u32 phys, u32 fad, u32 n) {
+    phys &= 0x1fffffffu;                    /* physical for the G1-DMA engine */
+    /* Mask the real GD-DMA-complete IRQ (SB_ISTNRM bit 14) from all three ASIC
+     * IRQ levels (IRQD/IRQB/IRQ9 @ 0xa05f6910/20/30). The game runs its cart DMA
+     * mirrored + polled and never needs a real GD-DMA interrupt, but its Naomi-
+     * legacy handler is still armed -- our real G1-DMA fires it and the game
+     * mishandles it -> hang after a few reads (exactly the "G1-DMA side effect"
+     * this path was written to avoid). HW-CONFIRMED: masking bit 14 is what makes
+     * DMA cart streaming work. Clear only bit 14 (vblank etc. untouched);
+     * idempotent per call in case the game re-arms it. */
+    *(volatile u32 *)0xa05f6910 &= ~(1u << 14);
+    *(volatile u32 *)0xa05f6920 &= ~(1u << 14);
+    *(volatile u32 *)0xa05f6930 &= ~(1u << 14);
+    for (u32 attempt = 0; attempt < 4; attempt++) {
+        if (attempt) { gd_sys_reinit(); gd_init_drive(); }
+        dcache_inval(phys, n * 2048u);
+        u32 param[4], stat[4], guard = 0;
+        param[0] = fad; param[1] = n; param[2] = phys; param[3] = 0;
+        int req = GDC((u32)CMD_DMAREAD, (u32)param, 0, GD_SEND);
+        if (req <= 0) { gd_last_err = 0xcafe0002u; continue; }
+        for (;;) {
+            GDC(0, 0, 0, GD_EXEC);          /* pump the drive + DMA state machine */
+            int s = GDC((u32)req, (u32)stat, 0, GD_CHECK);
+            if (s == GD_COMPLETED) {
+                *(volatile u32 *)0xa05f6900 = (1u << 14);   /* ack the GD-DMA status */
+                return 0;
+            }
+            if (s <= GD_FAILED) { gd_last_err = stat[0]; break; }
+            if (s == GD_NOT_FOUND && guard > 1000000u) { gd_last_err = 0xcafe0001; break; }
+            if (++guard > 100000000u) shim_die(5, fad, n);
+        }
+    }
+    return -2;
+}
+#endif /* SHIM_GD_DMA */
