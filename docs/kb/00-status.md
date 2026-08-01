@@ -1,9 +1,12 @@
 # Project status
 
-**Updated:** 2026-07-26 (Phase 5: GAME FULLY PLAYABLE ON REAL HARDWARE —
+**Updated:** 2026-08-01 (Phase 5: GAME FULLY PLAYABLE ON REAL HARDWARE —
 1P and 2P at full speed, both pads responsive; 2P-slowdown case closed in
 round 18; composite/AV 15 kHz output fixed (patch #34) and HW-verified on
-both cable types. Remaining: fit/integrity spot-checks, then release
+both cable types; boot-time reduction underway — patch #35 trimmed a ~2 s
+hardcoded JVS post-RESET settle, post-handoff black screen 9.6→7.6 s
+HW-verified, the ~4.5 s GD-PIO asset preload (I1 → GD-DMA) now the remaining
+lever. Remaining: GD-DMA upgrade, fit/integrity spot-checks, then release
 packaging.)
 
 ## What this is
@@ -349,6 +352,36 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    (2026-07-26): PASS — user tested both AV composite (RetroTink 4K) and
    VGA on the real Dreamcast, both display properly, no issues found.
    Composite sync case CLOSED.**
+
+   **Boot-time reduction — load-timing instrumentation + JVS post-RESET
+   settle (patch #35, 2026-08-01):** the post-handoff black screen was
+   profiled on real HW with compile-gated on-screen instrumentation — loader
+   stage timers (`LOADER_TIMING`, loader/main.c → framebuffer table) and shim
+   load-stat counters (`SHIM_LOADSTAT`, single toggle in shim_iface.h;
+   cart.c/main.c/util.c paint live cart bytes/reads/GD-ms + a post-handoff
+   init timeline via a fg/bg-parameterized `hex_paint_c`). The loader itself
+   is ~607 ms (dominated by the 1 MB PIO cart read 378 ms + 34 patch-log SCIF
+   lines 183 ms; dbglog routes to scif — scif_detected()==1, empirically
+   baud-limited). The real cost is the ~9.5 s black screen AFTER handoff,
+   HW-measured: ~4.5 s GD-PIO asset preload (I1) + **~2.1 s a hardcoded JVS
+   post-RESET settle** + ~0.9 s early init + ~0.8 s enum→stream + ~1.5 s
+   interleaved. The 2.1 s was pinned by disasm (new
+   `scripts/ghidra/Decomp.java` — decompile-by-address + callers): the
+   config-JVS node-count probe FUN_8c082bc4 double-RESETs the bus
+   (FUN_8c0814e8 ×2) then **busy-waits 0x78 (120) vblanks** via the vsync-wait
+   FUN_8c0342c0 before enumerating — a real arcade I/O-board reboot settle,
+   dead wait on this port (the I/O board is the instant shim; the MIE-txn
+   counter measured exactly 2 transactions crossing the gap = the two RESETs,
+   zero during the 120-frame wait). **Patch #35** (insn16 0x8c082bec,
+   `mov #0x78,r14` 0xEE78 → `mov #0x4,r14` 0xEE04) cuts 120→4 frames (a small
+   settle margin, not 0 — tunable knob). **HW verdict (2026-08-01): black
+   screen 9568 → 7638 ms (−1.9 s); JVS-enum milestone 2679 → 748 ms;
+   streaming (11.4 MiB / 149 reads / 4.5 s GD), controllers, gameplay, and
+   attract all unchanged/normal.** Remaining boot-time lever: the ~4.5 s
+   GD-PIO preload → the deferred **GD-DMA upgrade (I1)**. The timing
+   instrumentation is compile-gated and currently ON (SHIM_LOADSTAT=1,
+   LOADER_TIMING=1) for the GD-DMA profiling to follow — flip both to 0 for
+   the release build (removes the counters + the loader debug pause).
 
    **Phase-5 closing items:** graphics/stage-load/sound spot-checks
    during normal play (user reports none so far). **Pre-publication

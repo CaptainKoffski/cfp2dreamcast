@@ -214,6 +214,19 @@ for _w in (0x8C082BB0, 0x8C082C8C, 0x8C082D10, 0x8C082E4C):
 for _w in (0x8C082BB8, 0x8C082C94, 0x8C082D18):
     ptr(_w, 0x8C081626, sym("shim_cfg_rx"), "Task15c: config JVS RX -> shim_cfg_rx")
 
+# §JVS post-RESET settle (patch #35, 2026-08-01 -- disasm via scripts/ghidra/Decomp.java +
+# on-TV load-timing measurement, shims SHIM_LOADSTAT). The config node-count probe
+# FUN_8c082bc4 double-RESETs the JVS bus (FUN_8c0814e8 x2) then BUSY-WAITS 0x78 (120)
+# vblanks via the vsync-wait FUN_8c0342c0 before it enumerates -- a hardcoded ~2 s settle
+# for a real arcade I/O board to reboot after RESET. On this port the I/O board is the
+# instant shim (shim_cfg_tx/rx replay canned enum replies, always ready), so all 120 frames
+# are dead wait = ~2 s of the post-handoff black screen (HW-measured: exactly 2 MIE
+# transactions cross the gap = the two RESETs; zero during the 120-frame wait). FUN_8c0342c0
+# latches a vblank counter and spins until it ticks -- pure frame wait, no device dependency
+# -- so shortening the count is safe; keep 4 frames as a settle margin, not 0 (calibration
+# knob: bump the 0x04 if a slower path ever needs it). mov #0x78,r14 (0xEE78) -> mov #0x4,r14.
+insn16(0x8C082BEC, 0xEE78, 0xEE04, "patch#35 JVS post-RESET settle: 120 vblanks -> 4 (I/O is instant shim)")
+
 # §Task 16 (M5): free-play sticks. The settings validator FUN_8c080094 reads the
 # 93C46 via FUN_8c080f50, which issues the read through the shared async engine
 # (FUN_8c03000c/FUN_8c02f158); on DC that reply lands a frame late -- AFTER the
@@ -309,7 +322,13 @@ out.append(f"static const patch_t cleo_patches[] = {{\n{rows}\n}};")
 out.append(f"enum {{ CLEO_NPATCHES = {len(patches)} }};")
 (ROOT / "build").mkdir(exist_ok=True)
 (ROOT / "build/patch_table.h").write_text("\n".join(out) + "\n")
+# Breakdown computed from old-byte length (was a stale hardcoded string): insn16=2 B,
+# pool/ptr=4 B (both old-byte-verified word writes), hook=6+ B thunk.
+_i16  = sum(1 for _, o, _, _ in patches if len(o) == 2)
+_word = sum(1 for _, o, _, _ in patches if len(o) == 4)
+_hook = sum(1 for _, o, _, _ in patches if len(o) >= 6)
 print(f"OK patch_table.h: {len(patches)} patches "
-      f"(2 hook, 16 pool, 9 ptr, 1 insn16; Task 14f async-MIE + 15c config-JVS-enum + 16 free-play EEPROM); "
+      f"({_hook} hook, {_word} pool/ptr, {_i16} insn16; Task 14f async-MIE + 15c config-JVS-enum "
+      f"+ 16 free-play EEPROM + 35 JVS post-RESET settle); "
       f"MIRROR_P2={MIRROR_P2:#010x} MAPLE_MIRROR_P2={MAPLE_MIRROR_P2:#010x} "
       f"BIOS_60000_P2={BIOS_60000_P2:#010x} BIOS_1FFD00_P2={BIOS_1FFD00_P2:#010x}")

@@ -37,6 +37,25 @@ void shim_mark(u32 slot, unsigned short color);   /* util.c: real-HW breadcrumb 
 static u32 cart_first = 1;
 u32 cart_count = 1;
 
+/* ---- HW load-time measurement (SHIM_LOADSTAT) --------------------------
+ * The post-handoff black screen is dominated by the boot asset preload
+ * streamed through this shim's synchronous PIO GD path (watch-item I1; the
+ * loader clocked PIO at 1 MiB / 378 ms). Paint cumulative stream bytes,
+ * request count, and time-in-GD (ms) LIVE, so the TV shows the counters climb
+ * during the black screen and settle when the title presents -- streaming vs
+ * other-init cost, read off the peak values + a stopwatch. Per-read VRAM paint
+ * blacks Flycast's present (round 12; HW-only, like SHIM_HUD). Set 0 to remove. */
+#if SHIM_LOADSTAT
+void hex_paint_c(unsigned int, unsigned int, unsigned int,
+                 unsigned short, unsigned short);           /* util.c (unconditional) */
+void ls_stampA(unsigned int);                               /* main.c: init-timeline stamp */
+#define LS_FG 0x0000                                        /* black digits ... */
+#define LS_BG 0xffff                                        /* ... on a white box (splash-readable) */
+#define LS_TCNT0 (*(volatile u32 *)0xffd8000c)               /* BIOS-left free-running timer */
+#define LS_TCR0  (*(volatile unsigned short *)0xffd80010)
+static u32 ls_bytes = 0, ls_reads = 0, ls_ticks = 0, ls_sh = 0xff; /* ls_sh: .data sentinel */
+#endif
+
 extern u32 gd_last_err;                       /* gd.c: raw CHECK status of last failure */
 static void gd_or_die(void *dst, u32 rel_fad, u32 n) {
     int r = gd_read_sectors(dst, CART_FAD + rel_fad, n);
@@ -109,7 +128,25 @@ void shim_cart_service(void) {
         scif_puts(" len="); scif_puthex(len);
         scif_puts(" dst="); scif_puthex(dest); scif_puts("\n");
     }
+#if SHIM_LOADSTAT
+    if (ls_sh == 0xff) {                   /* TCR0.TPSC -> prescaler shift (Pck 50 MHz) */
+        static const u32 sh[8] = {2, 4, 6, 8, 10, 10, 10, 10};
+        ls_sh = sh[LS_TCR0 & 7u];
+    }
+    u32 ls_t0 = LS_TCNT0;
+#endif
     cart_read(off, len, dest);
     m[0x418/4] = 0;                     /* SB_GDST mirror reads "done" */
+#if SHIM_LOADSTAT
+    u32 ls_dt = ls_t0 - LS_TCNT0;          /* down-counter: elapsed = start - now */
+    if (ls_dt < (50000000u >> ls_sh)) ls_ticks += ls_dt;  /* skip a reload-wrap sample (>1 s) */
+    ls_bytes += len; ls_reads++;
+    ls_stampA(4);                          /* latch "streaming started" on the init timeline */
+    /* ms = ticks/rate*1000 = (ticks<<sh)/50000 -- variable shift + CONSTANT divide,
+     * so no libgcc __udivsi3 (this shim is -nostdlib). */
+    hex_paint_c(20, 152, ls_bytes,              LS_FG, LS_BG);  /* cumulative cart-stream bytes (hex) */
+    hex_paint_c(20, 166, ls_reads,             LS_FG, LS_BG);  /* cumulative stream requests */
+    hex_paint_c(20, 180, (ls_ticks << ls_sh) / 50000u, LS_FG, LS_BG);  /* time in GD path, ms */
+#endif
 }
 #endif /* !HOST_TEST */

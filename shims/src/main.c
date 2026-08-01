@@ -103,6 +103,55 @@ static u32 gc_rate = 1, cc_rate = 1;         /* last 1s-window rates (heartbeat-
  * = the "clunky controls"). Compute the ~8 ms window from TCR0.TPSC. */
 static u32 pad_thresh = 1;                   /* 1 = not yet computed (.data) */
 
+/* ---- post-handoff init timeline (SHIM_LOADSTAT, part A) ------------------
+ * The ~3 s black screen BEFORE cart streaming: pre-frame-loop game CPU, or a
+ * hooked init stage (config JVS enum / EEPROM / video)? shim_maple_steady is
+ * vblank-driven and runs from early init, so it is our clock: la_ticks =
+ * reload-safe elapsed (per-frame TCNT0 deltas, clamped) from the FIRST maple
+ * tick; la_beat = frame count (reload-immune cross-check). ls_stampA latches
+ * the clock at each milestone's first fire -> the timeline, painted (x=340) next
+ * to the cart counters (x=20). Time BEFORE the first maple tick is the stopwatch
+ * gap before this clock appears on-screen. Reuses TCNT0/TCR0 (defined above). */
+#if SHIM_LOADSTAT
+void hex_paint_c(u32, u32, u32, unsigned short, unsigned short);   /* util.c */
+#define LS_A_FG 0x0000                                             /* black digits ... */
+#define LS_A_BG 0xffff                                             /* ... on a white box */
+static u32 la_ticks = 0, la_last = 0, la_beat = 0, la_sh = 0xff;   /* la_sh: .data sentinel */
+static u32 la_stamp[5];        /* first-fire ticks: 0=maple 1=cfg 2=ee 3=vid 4=cart */
+static u8  la_seen = 0;
+static u32 mie_count = 0;       /* maple_reply calls = MIE transactions serviced (ladder probe) */
+static u32 la_mie[5];           /* mie_count latched at each milestone (parallel to la_stamp) */
+static u32 la2ms(u32 t) { return (t << la_sh) / 50000u; }   /* la_sh set on 1st tick */
+void ls_stampA(u32 slot);
+void ls_stampA(u32 slot) {
+    if (la_sh != 0xff && !(la_seen & (1u << slot))) {
+        la_seen |= 1u << slot; la_stamp[slot] = la_ticks; la_mie[slot] = mie_count;
+    }
+}
+static void la_tick(void) {                 /* once per maple frame */
+    if (la_sh == 0xff) {                     /* first tick: latch prescaler + t0 */
+        static const u32 sh[8] = {2, 4, 6, 8, 10, 10, 10, 10};
+        la_sh = sh[TCR0 & 7u]; la_last = TCNT0; la_seen |= 1u;     /* slot0 = 0 ms */
+    } else {
+        u32 now = TCNT0, dt = la_last - now; la_last = now;        /* down-counter */
+        if (dt < (50000000u >> la_sh)) la_ticks += dt;            /* clamp reload wrap */
+    }
+    la_beat++;
+    hex_paint_c(340, 152, la2ms(la_ticks),    LS_A_FG, LS_A_BG);  /* live clock, ms */
+    hex_paint_c(340, 166, la_beat,            LS_A_FG, LS_A_BG);  /* frames (reload-immune) */
+    hex_paint_c(340, 180, la2ms(la_stamp[1]), LS_A_FG, LS_A_BG);  /* cfg JVS-enum first, ms */
+    hex_paint_c(340, 194, la2ms(la_stamp[2]), LS_A_FG, LS_A_BG);  /* EEPROM read first, ms */
+    hex_paint_c(340, 208, la2ms(la_stamp[3]), LS_A_FG, LS_A_BG);  /* video init first, ms */
+    hex_paint_c(340, 222, la2ms(la_stamp[4]), LS_A_FG, LS_A_BG);  /* first cart stream, ms */
+    hex_paint_c(470, 152, mie_count,          LS_A_FG, LS_A_BG);  /* live MIE txn count */
+    hex_paint_c(470, 166, la_mie[2],          LS_A_FG, LS_A_BG);  /* MIE count @ EEPROM read */
+    hex_paint_c(470, 180, la_mie[1],          LS_A_FG, LS_A_BG);  /* MIE count @ JVS enum */
+}
+#else
+#define ls_stampA(x) ((void)0)
+#define la_tick()    ((void)0)
+#endif
+
 static void jvs_digital(u32 sub, void *rx) {
     HUD_ONCE(0x08, 3, 0xffe0);                           /* slot3 yellow: input poll live */
     if (pad_thresh == 1) {
@@ -160,6 +209,9 @@ static void jvs_digital(u32 sub, void *rx) {
  * DMA-to-RAM write -- the game's reply reader treats recvaddr as a DMA buffer
  * (reads it uncached / post-invalidate), so an uncached store is what it sees. */
 static void maple_reply(u32 sub, u32 recvaddr, u32 frame) {
+#if SHIM_LOADSTAT
+    mie_count++;                                         /* count MIE transactions (ladder probe) */
+#endif
     HUD_ONCE(0x02, 1, 0x07e0);                           /* slot1 green: first MIE service */
     if (((++reply_ticks) & 15u) == 0)                    /* slot9: replies still flowing? */
         shim_mark(9, (reply_ticks & 16u) ? 0xffff : 0x39e7);
@@ -330,6 +382,7 @@ extern int shim_maple_steady(void);   /* both fn-ptr slots point here (ptr patch
 #define MMIR(off) (*(volatile u32 *)P2ADDR(MAPLE_MIRROR + (off)))   /* mirror reg (uncached, game view) */
 
 int shim_maple_steady(void) {
+    la_tick();                                     /* SHIM_LOADSTAT: phase-A clock (no-op if off) */
     /* Task18 (M5, SUPERSEDES Task16's coin-byte pin): force FREE PLAY every frame.
      * PROVEN by screenshot (task-18-report): the free-play flag the credit display
      * AND the credit-decrement read is the settings-struct field at +0xc =
@@ -618,6 +671,7 @@ const unsigned char *shim_cfg_rx(void);                      /* FUN_8c081626 rep
 int shim_cfg_tx(u32 node, u32 arg1, u32 len, u32 payload) {
     (void)node; (void)arg1; (void)len;
     HUD_ONCE(0x10, 7, 0xfc00);          /* slot7 orange: config-enum transmit reached */
+    ls_stampA(1);                        /* SHIM_LOADSTAT: config JVS enum reached */
     pending_cfg = GB(payload);          /* payload[0] = JVS command byte */
     return 0;                            /* callers ignore r0 */
 }
@@ -723,6 +777,7 @@ void shim_ee_read(void);
 static u8 eeread_logged = 1;
 void shim_ee_read(void) {
     HUD_ONCE(0x01, 0, 0xffff);                          /* slot0 white: first config contact */
+    ls_stampA(2);                                       /* SHIM_LOADSTAT: EEPROM read reached */
     xmemcpy((void *)0x8c1c954c, eeprom_img, 128);      /* full 128-B image */
     xmemcpy((void *)0x8c1c9528, eeprom_img, 18);       /* system copy1 (CRC+data) */
     xmemcpy((void *)0x8c1c953a, eeprom_img + 18, 18);  /* system copy2 (CRC+data) */

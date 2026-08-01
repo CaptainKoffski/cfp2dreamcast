@@ -47,4 +47,14 @@
 #define P2(a)           ((volatile unsigned int *)P2ADDR(a))
 #endif
 
+/* HW load-time measurement toggle. Single source so cart.c/main.c/util.c agree
+ * (a per-file mismatch would link-error on ls_stampA). 1 = paint live counters
+ * to the framebuffer: cart bytes/reads/GD-ms (streaming) + the post-handoff init
+ * timeline (which stage burns the pre-stream black screen). 0 = compiled out
+ * (release). Per-read/per-frame VRAM paint blacks Flycast's present -- HW-only,
+ * like SHIM_HUD. */
+#ifndef SHIM_LOADSTAT
+#define SHIM_LOADSTAT 1
+#endif
+
 #endif

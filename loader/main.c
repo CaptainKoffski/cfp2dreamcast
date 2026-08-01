@@ -1,4 +1,5 @@
 #include <kos.h>
+#include <arch/timer.h>         /* arch_timer_gettime() -- load-stage timing */
 #include "shim_iface.h"
 #include "patch_table.h"        /* generated (build/), gitignored */
 
@@ -41,6 +42,49 @@ static void halt(const char *msg) {
     for(;;) thd_sleep(1000);
 }
 
+/* ---- load-stage timing (LOADER_TIMING) ---------------------------------
+ * Answers "where does the black-screen load time actually go" on REAL HW --
+ * Flycast can't: its virtual GD-ROM returns instantly (the 1 MB cart read is
+ * PIO, cdrom.c CD_CMD_PIOREAD) and its serial drains instantly (the patch
+ * stage's real cost is its 34 dbglog lines at 115200 baud, ~87us/char, not
+ * the memcpy). Each mark is one arch_timer_gettime() (80ns tick) + two stores
+ * -- captured into RAM, NO serial -- so the instrument doesn't pollute the
+ * serial cost it measures. The breakdown is painted to the framebuffer (read
+ * off the TV, like every prior HUD) and paused, not printed to serial.
+ * Compile-time flag like LOADER_QUIET; set 0 to remove entirely. */
+#define LOADER_TIMING 1
+#if LOADER_TIMING
+static uint64 tmk_us[16];
+static const char *tmk_lbl[16];
+static int tmk_n;
+static void tmark(const char *lbl) {
+    struct timespec t = arch_timer_gettime();
+    if (tmk_n >= 16) return;
+    tmk_us[tmk_n]  = (uint64)t.tv_sec * 1000000ull + (uint64)t.tv_nsec / 1000ull;
+    tmk_lbl[tmk_n] = lbl;
+    tmk_n++;
+}
+static void tmark_dump(void) {
+    char line[48];
+    for (int i = 1; i < tmk_n; i++) {
+        uint64 d = tmk_us[i] - tmk_us[i - 1];
+        snprintf(line, sizeof line, "%-16s %4lu.%03lu ms", tmk_lbl[i],
+                 (unsigned long)(d / 1000), (unsigned long)(d % 1000));
+        dbglog(DBG_INFO, "TIMING %s\n", line);
+        bfont_draw_str(vram_s + (180 + i * 26) * 640 + 20, 640, 1, line);
+    }
+    uint64 tot = tmk_us[tmk_n - 1] - tmk_us[0];
+    snprintf(line, sizeof line, "%-16s %4lu.%03lu ms", "TOTAL",
+             (unsigned long)(tot / 1000), (unsigned long)(tot % 1000));
+    dbglog(DBG_INFO, "TIMING %s\n", line);
+    bfont_draw_str(vram_s + (180 + tmk_n * 26) * 640 + 20, 640, 1, line);
+    thd_sleep(8000);   /* read/photograph window; whole block gated by LOADER_TIMING */
+}
+#else
+#define tmark(x)     ((void)0)
+#define tmark_dump() ((void)0)
+#endif
+
 /* Rehearse the shim's exact GD path (BIOS syscall vector 0x8c0000bc, polled
  * PIO — see shims/src/gd.c) before handing the game to it. Flycast HLEs these
  * calls statelessly; the real BIOS runs a state machine in low RAM, so this is
@@ -78,6 +122,7 @@ static int apply_patches(uint8 *img) {
 }
 
 int main(void) {
+    tmark("start");
     dbglog(DBG_INFO, "CLEO LOADER M2\n");
 
     /* KOS-stack-collision probe: &probe ~= current SP. The loader writes shim
@@ -97,13 +142,16 @@ int main(void) {
      * blob is prepared as raw RGB565 in framebuffer layout. */
     if (LOADER_QUIET)
         memcpy(vram_s, splash_bin, 640 * 480 * 2);
+    tmark("splash");
 
     say("CLEO LOADER M2");
     cdrom_reinit();             /* inits the GD subsystem the shim's BIOS syscalls reuse */
     say("GD init OK");
+    tmark("gd init");
     uint8 *stage = (uint8 *)STAGING_ADDR;
     if (cdrom_read_sectors(stage, CART_FAD, GAME_SECTORS) != ERR_OK)
         halt("KOS GD READ FAIL");
+    tmark("read 1MB PIO");      /* the dominant term -- pure cdrom_read_sectors */
     if (memcmp(stage, "NAOMI", 5)) {
         dbglog(DBG_INFO, "bad image: %02x %02x %02x %02x %02x %02x %02x %02x @FAD %d\n",
                stage[0], stage[1], stage[2], stage[3],
@@ -118,10 +166,12 @@ int main(void) {
     if (sr != 0)  halt("SYSCALL GD READ FAIL");
     if (memcmp(sysbuf, "NAOMI", 5)) halt("BAD IMAGE (SYSCALL READ)");
     say("cart read OK (BIOS syscall)");
+    tmark("syscall rd");
 
     if (apply_patches(stage))   /* verify old bytes then patch; abort on mismatch */
         halt("PATCH ABORT");
     say("patches OK");
+    tmark("patches+log");       /* memcpy is us; this bucket is the 34 dbglog serial lines */
 
     uint32 shim_len = (uint32)(shim_bin_end - shim_bin);
     memcpy((void *)SHIM_BASE, shim_bin, shim_len);
@@ -165,10 +215,13 @@ int main(void) {
     /* Flush our BIOS-data writes: the game reads them via P2 uncached. */
     dcache_purge_range(BIOS_DATA_60000,  BIOS_DATA_60000_LEN);
     dcache_purge_range(BIOS_DATA_1FFD00, BIOS_DATA_1FFD00_LEN);
+    tmark("place+purge");       /* shim/bios/mirror memcpys + 1MB uncached copy + purges */
 
     say("shim + BIOS data placed");
     dbglog(DBG_INFO, "jumping to %08x\n", GAME_ENTRY);
     say("HANDOFF -> game");
+    tmark("handoff prep");
+    tmark_dump();               /* paint breakdown + pause (LOADER_TIMING only) */
     irq_disable();
     /* Deliberately NO TMU stop / ARM reset here: the game reads TCNT0 for its
      * delay loops relying on the BIOS-left-running timer (12 TCNT0 literals;

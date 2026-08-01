@@ -1,6 +1,9 @@
 #include "shim_iface.h"
 #include <stddef.h>
 void scif_puts(const char *); void scif_puthex(unsigned int);
+#if SHIM_LOADSTAT
+void ls_stampA(unsigned int);                  /* main.c: init-timeline stamp */
+#endif
 /* Freestanding -Os lets GCC lower sized array copies/inits to memcpy/memset
  * calls, so the runtime must supply them. xmemcpy stays for explicit callers. */
 void *memcpy(void *d, const void *s, size_t n) {
@@ -54,7 +57,13 @@ static const unsigned char hexfont[16][5] = {
     {7,5,7,5,7},{7,5,7,1,7},{2,5,7,5,5},{6,5,6,5,6},
     {7,4,4,4,7},{6,5,5,5,6},{7,4,7,4,7},{7,4,7,4,4},
 };
-static void hex_paint(unsigned int x, unsigned int y, unsigned int val) {
+/* fg/bg-parameterized core (non-static: cart.c's SHIM_LOADSTAT paint calls it
+ * directly for dark-on-white -- readable over the white Naomi splash where the
+ * cyan default washes out; unconditional, unlike SHIM_HUD-gated shim_hex).
+ * Every glyph cell is written (set->fg, unset->bg), so bg is a solid box behind
+ * each digit. hex_paint keeps the classic cyan-on-black for death screen + HUD. */
+void hex_paint_c(unsigned int x, unsigned int y, unsigned int val,
+                 unsigned short fg, unsigned short bg) {
     *(volatile unsigned int *)0xa05f80e8 &= ~8u;            /* unblank video */
     unsigned int base = *(volatile unsigned int *)0xa05f8050 & 0x00fffffcu;
     volatile unsigned short *fb = (volatile unsigned short *)(0xa5000000u + base);
@@ -62,8 +71,7 @@ static void hex_paint(unsigned int x, unsigned int y, unsigned int val) {
         unsigned int nib = (val >> ((7u - d) * 4u)) & 0xfu;
         for (unsigned int r = 0; r < 5; r++)
             for (unsigned int c = 0; c < 3; c++) {
-                /* cyan digits: white merged with the loader's bfont text on TV */
-                unsigned short px = ((hexfont[nib][r] >> (2u - c)) & 1u) ? 0x07ff : 0x0000;
+                unsigned short px = ((hexfont[nib][r] >> (2u - c)) & 1u) ? fg : bg;
                 unsigned int px_x = x + d * 10u + c * 2u, px_y = y + r * 2u;
                 fb[px_y * 640u + px_x]        = px;
                 fb[px_y * 640u + px_x + 1u]   = px;
@@ -71,6 +79,9 @@ static void hex_paint(unsigned int x, unsigned int y, unsigned int val) {
                 fb[(px_y + 1u) * 640u + px_x + 1u] = px;
             }
     }
+}
+void hex_paint(unsigned int x, unsigned int y, unsigned int val) {
+    hex_paint_c(x, y, val, 0x07ff, 0x0000);                 /* cyan on black */
 }
 
 void shim_hex(unsigned int x, unsigned int y, unsigned int val) {
@@ -105,6 +116,9 @@ int shim_cable_is_vga(void) {
  * Pool word 0x8c026570 (sole live reference; full-cart scan = boot mirrors
  * only) repoints the game's one call here. VGA cable passes through as-is. */
 int shim_vid_init(unsigned int mode, unsigned int b, unsigned int c, unsigned int d) {
+#if SHIM_LOADSTAT
+    ls_stampA(3);                              /* video init reached, on the init timeline */
+#endif
     if (!shim_cable_is_vga())
         mode &= ~3u;               /* class 1 (VGA 31k) -> class 0 (NTSC 480i) */
     return ((int (*)(unsigned int, unsigned int, unsigned int, unsigned int))
