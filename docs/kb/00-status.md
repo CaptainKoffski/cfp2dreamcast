@@ -6,7 +6,8 @@ round 18; composite/AV 15 kHz output fixed (patch #34) and HW-verified on
 both cable types. Boot-time reduction (HW-verified): patch #35 trimmed a ~2 s
 hardcoded JVS post-RESET settle and the GD-DMA upgrade (SHIM_GD_DMA, I1) made
 cart streaming 2.4× faster — post-handoff black screen cut ~9.5→~5 s.
-Remaining: fit/integrity spot-checks, then release packaging.)
+Fit checks all CLOSED 2026-08-01 — sound RAM exactly 2 MB, VRAM never
+writes above 8 MB (write-truth remeasures). Remaining: release packaging.)
 
 ## What this is
 
@@ -237,7 +238,9 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    scales with animation load. Cross-check if ever desired: arcade
    footage of the same multi-row combos. VRAM overfit (9.2 MB > 8 MB)
    demoted from slowdown suspect to graphics-integrity watch item — it
-   would show as wrong/missing textures, none reported. **Disc identity
+   would show as wrong/missing textures, none reported (watch item since
+   CLOSED 2026-08-01: write-truth remeasure proved no overfit ever existed —
+   stale BIOS framebuffer content; see the Phase-5 entry below). **Disc identity
    (2026-07-23):** the B5 clone shipped Dolphin Blue's IP.BIN metadata
    (serial T0006M → GDMENUCardManager auto-assigned the Dolphin Blue
    cover). `make_gdi.py brand_ip()` now stamps title CLEOPATRA FORTUNE
@@ -420,8 +423,18 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    pointers into moved functions — deterministic self-inflicted wedge, cost
    half a day). Watch item: thunk 0x8c0803a4 (same table, via trampoline
    0x8c081ae8) is NOT on the boot path and left unpatched — the SPC row will
-   name it if it ever bites. Remaining
-   watch items: VRAM ~9.2 MB > DC 8 MB texture fit (still open).
+   name it if it ever bites. **VRAM fit CLOSED (2026-08-01):** write-truth remeasure in Flycast (same
+   method as sound RAM below — zero VRAM at game handoff, then profile genuine
+   post-handoff writes + snapshot the TA/FB layout registers;
+   `cartlog_vram_profile`, `patches/flycast-instrument.diff`) shows the game's
+   VRAM writes peak at `0x7cd7d5` (**7.8 MB, 0 bytes at/above 8 MB** in every
+   snapshot; `capture-vram-fit-attract.log`, 433 cart DMAs / 7 snapshots), and
+   the game's own TA/FB layout double-buffers entirely below `0x800000`. The
+   old ~9.2 MB was the Naomi BIOS boot screen in the BIOS framebuffer at
+   `0x800000` — stale content the never-cleared scan counted. **Fits DC's
+   8 MB, no texture cuts**; corroborated by 18 clean HW rounds (no
+   wrong/missing textures). See `docs/kb/phase2-measurements.md` §Video RAM.
+   No fit watch items remain.
    **Sound-RAM fit CLOSED (2026-08-01):** write-truth remeasure in Flycast
    (zero ARAM at game handoff, then high-water + 256 KB histogram of genuine
    post-handoff writes — `cartlog_aram_profile`, `patches/flycast-instrument.diff`)
@@ -458,8 +471,9 @@ real Dreamcast via a GDEMU-class SD-card ODE (build + run guide:
 3. **Controller input** — real Maple `GetCondition` (I2: relies on KOS's
    one-time Maple HW setup persisting through handoff).
 
-Then fit: VRAM ~9.2 MB > DC 8 MB (likely texture cuts). Sound-RAM CLOSED —
-fits DC's 2 MB exactly (write-truth remeasure, 2026-08-01).
+Fit checks: **all CLOSED (2026-08-01).** Sound RAM fits DC's 2 MB exactly;
+VRAM fits DC's 8 MB (both by write-truth remeasure — the old 9.2 MB VRAM
+figure was stale BIOS framebuffer content; see `phase2-measurements.md`).
 
 ## Key facts so far
 
@@ -516,7 +530,9 @@ Shipped deliverable = **KOS loader (`1ST_READ.BIN`) + freestanding SH-4 shim
   hit near the top of Naomi's 32 MB was **stale data, not a real stack** —
   Phase 3 pinned the SP low in RAM (`0x8c00e6e8`..`0x8c00ef28` during play; see
   `boot-binary.md` §3), so **main RAM is safe on DC's 16 MB with no SP
-  relocation**. VRAM ~9.2 MB (over DC 8 MB → likely texture cuts in Phase 5).
+  relocation**. VRAM **fits DC's 8 MB** — write-truth remeasure (2026-08-01):
+  game writes peak at 7.8 MB with 0 bytes at/above 8 MB; the old ~9.2 MB scan
+  figure was stale BIOS-framebuffer content at `0x800000`.
   Sound RAM **fits DC's 2 MB** — write-truth remeasure (2026-08-01) shows the
   game uses exactly 2 MB, 0 bytes above; the earlier "inconclusive (scan
   artifact)" is resolved.

@@ -51,7 +51,7 @@ PIO seeks (unique): 1
 cart offset range: 0x00800000..0x0609c000
 main-RAM DMA high-water (dest+len): 0x0cb378e0 (11.2 MB above base) vs DC 16 MB
 WATERMARK main: 0x01fff60b (32.0 MB — see phase2-measurements.md)
-WATERMARK vram: 0x0093e738 (9.2 MB)
+WATERMARK vram: 0x0093e738 (9.2 MB — stale BIOS-framebuffer content, see phase2-measurements.md)
 WATERMARK aram: 0x00800000 (8.0 MB — scan artifact, see phase2-measurements.md)
 serial/network pokes: 0
 CHECK dest_in_ram: PASS

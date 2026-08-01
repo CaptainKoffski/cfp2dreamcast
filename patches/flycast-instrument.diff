@@ -304,11 +304,50 @@ index d9f2051..8994318 100644
          atomiswave.cpp
          atomiswave.h
          awave_regs.h
+diff --git a/core/hw/naomi/cartlog.cpp b/core/hw/naomi/cartlog.cpp
+new file mode 100644
+index 0000000..52f3c59
+--- /dev/null
++++ b/core/hw/naomi/cartlog.cpp
+@@ -0,0 +1,23 @@
++// core/hw/naomi/cartlog.cpp
++// Phase 2 instrumentation (Cleopatra Naomi->DC port). Not upstream.
++#include "cartlog.h"
++#include <cstdio>
++#include <cstdlib>
++#include <cstdarg>
++
++void cartlog(const char *fmt, ...)
++{
++	static FILE *f = nullptr;
++	if (f == nullptr)
++	{
++		const char *path = getenv("FLYCAST_CARTLOG");
++		f = fopen(path != nullptr ? path : "flycast-cartlog.txt", "w");
++		if (f == nullptr)
++			return; // ponytail: if the log file won't open, stay silent rather than crash the emu
++	}
++	va_list ap;
++	va_start(ap, fmt);
++	vfprintf(f, fmt, ap);
++	va_end(ap);
++	fflush(f);
++}
+diff --git a/core/hw/naomi/cartlog.h b/core/hw/naomi/cartlog.h
+new file mode 100644
+index 0000000..e2c7ef6
+--- /dev/null
++++ b/core/hw/naomi/cartlog.h
+@@ -0,0 +1,4 @@
++// core/hw/naomi/cartlog.h
++// Phase 2 instrumentation (Cleopatra Naomi->DC port). Not upstream.
++#pragma once
++void cartlog(const char *fmt, ...);
 diff --git a/core/hw/naomi/naomi.cpp b/core/hw/naomi/naomi.cpp
-index 45005d7..5b97187 100644
+index 45005d7..363fa74 100644
 --- a/core/hw/naomi/naomi.cpp
 +++ b/core/hw/naomi/naomi.cpp
-@@ -35,6 +35,14 @@
+@@ -35,6 +35,15 @@
  #include "midiffb.h"
  #include "atomiswave.h"
  #include "oslib/i18n.h"
@@ -318,12 +357,13 @@ index 45005d7..5b97187 100644
 +// mem_b/RAM_SIZE = main system RAM (sh4_mem.h, already included); vram/VRAM_SIZE
 +// (pvr_mem.h); aica::aica_ram/ARAM_SIZE (aica_if.h). Sizes are macros in types.h.
 +#include "hw/pvr/pvr_mem.h"
++#include "hw/pvr/pvr_regs.h"   // Phase 5: TA/FB layout regs for the VRAM profile
 +#include "hw/aica/aica_if.h"
 +#include <cstdio>              // Phase 5: snprintf for the ARAM histogram line
  
  #include <memory>
  #include <algorithm>
-@@ -106,6 +114,8 @@ void WriteMem_naomi(u32 address, u32 data, u32 size)
+@@ -106,6 +115,8 @@ void WriteMem_naomi(u32 address, u32 data, u32 size)
  		INFO_LOG(NAOMI, "called without cartridge");
  		return;
  	}
@@ -332,7 +372,7 @@ index 45005d7..5b97187 100644
  	if (!settings.naomi.slave && m3comm != nullptr && address >= NAOMI_COMM_CTRL_addr && address <= NAOMI_COMM_STATUS2_addr) {
  		m3comm->WriteMem(address, data, size);
  		return;
-@@ -148,6 +158,85 @@ static int naomiDmaSched(int tag, int sch_cycl, int jitter, void *arg)
+@@ -148,6 +159,121 @@ static int naomiDmaSched(int tag, int sch_cycl, int jitter, void *arg)
  	}
  }
  
@@ -384,6 +424,42 @@ index 45005d7..5b97187 100644
 +	cartlog("ARAMHIST %s\n", line);   // nz-byte count per 256 KB bucket (bucket 8+ = past 2 MB)
 +}
 +
++// Phase 5 (VRAM fit): write-truth profile, same method as cartlog_aram_profile
++// above. The 9.2 MB WATERMARK figure came from the never-cleared content scan --
++// stale BIOS/boot bytes count toward it. Fix: zero VRAM once at game handoff
++// (first cart DMA; the game's texture uploads can only start after its first
++// asset fetch, and the BIOS boot screen is expendable), after which every
++// non-zero byte is a genuine post-handoff write. Report true high-water +
++// non-zero counts below/above DC's 8 MB + a 256 KB-bucket histogram.
++// Blind spot: in Flycast the TA parses display lists into host-side structures
++// and rendering happens on the host GPU, so ISP/OL buffers and framebuffers
++// never appear as vram-array content (on real HW they occupy VRAM). VRAMREGS
++// snapshots their layout registers instead -- the real footprint is
++// max(content high-water, TA_*_LIMIT, FB_W/R_SOF extents).
++static void cartlog_vram_profile()
++{
++	const u32 size = VRAM_SIZE, BUCK = 0x40000;   // 256 KB buckets (64 for Naomi's 16 MB)
++	u32 hist[64] = {0}, nb = size / BUCK;
++	if (nb > 64) nb = 64;
++	u32 high = 0, nz = 0, nz_below8m = 0;
++	for (u32 i = 0; i < size; i++)
++		if (vram[i]) {
++			nz++; high = i + 1;
++			if (i < 0x800000) nz_below8m++;
++			u32 b = i / BUCK; if (b < 64) hist[b]++;
++		}
++	cartlog("VRAMPROFILE high=%x nz=%x nz_below8m=%x nz_above8m=%x size=%x\n",
++			high, nz, nz_below8m, nz - nz_below8m, size);
++	char line[576]; int p = 0;
++	for (u32 b = 0; b < nb; b++)
++		p += snprintf(line + p, sizeof(line) - p, "%x ", hist[b]);
++	cartlog("VRAMHIST %s\n", line);   // nz-byte count per 256 KB bucket (bucket 32+ = past 8 MB)
++	cartlog("VRAMREGS isp_base=%x isp_limit=%x ol_base=%x ol_limit=%x fb_w_sof1=%x fb_w_sof2=%x fb_r_sof1=%x\n",
++			TA_ISP_BASE & VRAM_MASK, TA_ISP_LIMIT & VRAM_MASK,
++			TA_OL_BASE & VRAM_MASK, TA_OL_LIMIT & VRAM_MASK,
++			FB_W_SOF1 & VRAM_MASK, FB_W_SOF2 & VRAM_MASK, FB_R_SOF1 & VRAM_MASK);
++}
++
 +// Phase 4 (Task 4, V2) instrumentation: any-write detector for the planned shim
 +// home, phys 0x0cfc0000-0x0cffffff (== mem_b offset 0x00fc0000-0x00ffffff).
 +// ponytail: this is a content scan, not a live write-intercept -- the arm64
@@ -418,7 +494,7 @@ index 45005d7..5b97187 100644
  //Dma Start
  static void Naomi_DmaStart(u32 addr, u32 data)
  {
-@@ -165,6 +254,25 @@ static void Naomi_DmaStart(u32 addr, u32 data)
+@@ -165,6 +291,31 @@ static void Naomi_DmaStart(u32 addr, u32 data)
  	else if ((m3comm == nullptr || !m3comm->DmaStart(addr, data)) && CurrentCartridge != nullptr)
  	{
  		DEBUG_LOG(NAOMI, "NAOMI-DMA start addr %08X len %x", SB_GDSTAR, SB_GDLEN);
@@ -433,6 +509,11 @@ index 45005d7..5b97187 100644
 +			aram_zeroed = true;
 +			aica::aica_ram.zero();
 +			cartlog("ARAMHANDOFF zeroed size=%x\n", ARAM_SIZE);
++			// Phase 5: same baseline for VRAM (see cartlog_vram_profile). Texture
++			// uploads can't precede the game's first asset fetch; only the BIOS
++			// boot screen is lost.
++			vram.zero();
++			cartlog("VRAMHANDOFF zeroed size=%x\n", VRAM_SIZE);
 +		}
 +		static u32 cartlog_dma_count = 0;
 +		if ((cartlog_dma_count++ & 63) == 0)   // ponytail: every 64th DMA; the scan is cheap but not free
@@ -440,6 +521,7 @@ index 45005d7..5b97187 100644
 +			cartlog_watermarks();
 +			cartlog_shimwatch();   // Phase 4 (Task 4, V2): shim-home content scan, same cadence
 +			cartlog_aram_profile();   // Phase 5: sound-RAM fit (write-truth, post-handoff)
++			cartlog_vram_profile();   // Phase 5: VRAM fit (write-truth, post-handoff)
 +		}
  		verify(1 == SB_GDDIR);
  		SB_GDST = 1;
