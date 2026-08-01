@@ -406,8 +406,9 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    overlap the transfer with the game's decompression — diminishing returns
    (the shim hooks the completion-wait, by when the game is already blocking).
 
-   **Phase-5 closing items:** graphics/stage-load/sound spot-checks
-   during normal play (user reports none so far). **Pre-publication
+   **Phase-5 closing items:** graphics/stage-load spot-checks
+   during normal play (user reports none so far; sound-RAM fit CLOSED —
+   see below). **Pre-publication
    (2026-07-23):** full git-history audit — CLEAN (no ROM/BIOS/donor
    data ever committed on any branch; disasm excerpts + the §V-EEPROM
    18-byte decode table judged de minimis and kept by user decision).
@@ -457,7 +458,8 @@ real Dreamcast via a GDEMU-class SD-card ODE (build + run guide:
 3. **Controller input** — real Maple `GetCondition` (I2: relies on KOS's
    one-time Maple HW setup persisting through handoff).
 
-Then fit: VRAM ~9.2 MB > DC 8 MB (likely texture cuts), sound-RAM fit.
+Then fit: VRAM ~9.2 MB > DC 8 MB (likely texture cuts). Sound-RAM CLOSED —
+fits DC's 2 MB exactly (write-truth remeasure, 2026-08-01).
 
 ## Key facts so far
 
@@ -515,7 +517,9 @@ Shipped deliverable = **KOS loader (`1ST_READ.BIN`) + freestanding SH-4 shim
   Phase 3 pinned the SP low in RAM (`0x8c00e6e8`..`0x8c00ef28` during play; see
   `boot-binary.md` §3), so **main RAM is safe on DC's 16 MB with no SP
   relocation**. VRAM ~9.2 MB (over DC 8 MB → likely texture cuts in Phase 5).
-  Sound RAM inconclusive (scan artifact).
+  Sound RAM **fits DC's 2 MB** — write-truth remeasure (2026-08-01) shows the
+  game uses exactly 2 MB, 0 bytes above; the earlier "inconclusive (scan
+  artifact)" is resolved.
 - **Input map:** all 7 gameplay controls confirmed to single JVS bits
   (Start 0x8000, Up/Down/Left/Right 0x2000/1000/0800/0400, B1/B2 0x0200/0100).
 - **Serial/watchdog:** 0 pokes → no serial or watchdog shim needed.
