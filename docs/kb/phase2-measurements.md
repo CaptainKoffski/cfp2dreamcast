@@ -123,11 +123,17 @@ entire working set fits DC's physical 8 MB.
 **Verdict: the game's VRAM working set fits DC's 8 MB — no texture cuts
 needed.** Corroborated on the real target: 18 real-hardware rounds on an
 8 MB DC with no wrong/missing textures (a genuine overfit would have shown
-there — `00-status.md` round-18 note). Scope: attract+demo (the demo plays
-real gameplay); the Phase-2 play pass moved no region peaks vs attract+demo,
-and the ARAM hands-on round confirmed that pattern holds under live play. An
-optional `capture.sh play` round can top this up for full symmetry with the
-ARAM closure.
+there — `00-status.md` round-18 note).
+
+Confirmed on hands-on gameplay (2026-08-01): a second capture with a real play
+round (`capture-vram-fit-gameplay.log`, 490 cart DMAs / 8 snapshots — gameplay
+added ~57 cart DMAs of in-game asset streaming over the attract-only run) held
+**`nz_above8m=0` in every snapshot**, peak high-water `0x7adbe0` (7.7 MB,
+marginally below the attract peak — different stages stream different texture
+sets), and the same sub-8 MB TA/FB double-buffer layout throughout (the only
+new `VRAMREGS` line is a mid-flip transitional state of that same ping-pong).
+This round also re-held ARAM at exactly `0x200000` with `nz_above2m=0`.
+**Fully closed — attract and hands-on play agree.**
 
 ## Serial / watchdog (resolves §8-4)
 

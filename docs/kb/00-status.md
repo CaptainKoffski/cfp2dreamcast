@@ -428,7 +428,9 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    post-handoff writes + snapshot the TA/FB layout registers;
    `cartlog_vram_profile`, `patches/flycast-instrument.diff`) shows the game's
    VRAM writes peak at `0x7cd7d5` (**7.8 MB, 0 bytes at/above 8 MB** in every
-   snapshot; `capture-vram-fit-attract.log`, 433 cart DMAs / 7 snapshots), and
+   snapshot; `capture-vram-fit-attract.log`, 433 cart DMAs / 7 snapshots;
+   confirmed on a hands-on gameplay round `capture-vram-fit-gameplay.log`,
+   490 cart DMAs / 8 snapshots — `nz_above8m` stayed 0 through live play), and
    the game's own TA/FB layout double-buffers entirely below `0x800000`. The
    old ~9.2 MB was the Naomi BIOS boot screen in the BIOS framebuffer at
    `0x800000` — stale content the never-cleared scan counted. **Fits DC's
