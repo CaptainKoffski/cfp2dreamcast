@@ -57,6 +57,17 @@
 #define SHIM_LOADSTAT 0        /* 1 = on-screen load-time counters (HW profiling) */
 #endif
 
+/* Boot-preload progress bar (release UX): the post-handoff black screen is ~5 s
+ * of asset streaming + game init with zero feedback. shim_cart_service paints a
+ * bar into the live scanout FB per cart stream, ONLY until the boot-preload
+ * byte total is reached -- painting then stops for good, so stage-boundary
+ * streams during play never draw over a visible game frame. Invisible in
+ * Flycast (FB writes don't reach its rendered output -- same as the splash and
+ * HUD); the TV shows it. 0 = compiled out. */
+#ifndef SHIM_LOADBAR
+#define SHIM_LOADBAR 1
+#endif
+
 /* GD-ROM cart streaming via G1-DMA (CD_CMD_DMAREAD) instead of polled PIO -- the
  * deferred I1 "GD-DMA upgrade". Whole-sector, 32-byte-aligned body reads go by
  * DMA (the bulk); partial head/tail and any unaligned body stay PIO. 1 = DMA

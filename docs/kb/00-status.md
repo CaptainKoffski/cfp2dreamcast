@@ -409,6 +409,44 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    overlap the transfer with the game's decompression — diminishing returns
    (the shim hooks the completion-wait, by when the game is already blocking).
 
+   **Boot progress bar (SHIM_LOADBAR, 2026-08-01):** release-UX answer to the
+   remaining ~5 s black screen (speed levers exhausted: streaming is GD-DMA at
+   ~6.1 MiB/s, the rest is game init; async overlap already assessed
+   diminishing-returns). `shim_cart_service` paints a 320×6 px bar (util.c
+   `loadbar_paint`, same live-scanout idiom as `hex_paint_c`) per cart stream
+   until a 10 MiB countdown expires — deliberately UNDER the measured
+   ~11.4 MiB boot preload so painting stops for good BEFORE the title
+   presents; stage-boundary streams during play can never draw on a visible
+   frame (the round-12/17 paint hazards don't apply: paints are load-time
+   only). 10 MiB = 320 px << 15, so the fill is a shift, no libgcc divide.
+   Flycast attract screenshot-verified (no present regression; the bar itself
+   is an FB write Flycast doesn't render — same as splash/HUD, TV shows it).
+   `make test` green. SHIM_LOADBAR=0 compiles it out.
+   HW round 1 (photo, 2026-08-01): bar visible and working, but the unblank
+   exposed the stale loader splash in the scanout FB, washed out, and the
+   0x39e7 dark-gray track showed light OLIVE — the game scans the FB in a
+   different pixel format than the loader's RGB565 splash bytes. Fix:
+   BLACK/WHITE ONLY (0x0000/0xffff are the only colors identical in every
+   FB format — no detection needed); first paint blacks out the whole
+   stale-splash FB (provably just splash residue: it was what the screen
+   showed) → clean splash → black + white-outlined-bar transition.
+   HW round 2 (photo): bar looks good, but a splash BLINK flashed between
+   the init black and the bar — the first paint unblanked video BEFORE the
+   1–2-frame FB clear, so the live scanout showed the stale splash for
+   exactly the clear's duration. Fix: blackout + outline run while still
+   blanked; unblank moved to after the paint — HW round 3: blink gone,
+   user calls the game good. Round-3 polish: `shim_vid_init` now also
+   paints the EMPTY bar (loadbar_paint(0)) right after the SDK video init
+   it wraps, so the outline appears at video takeover instead of at the
+   first cart stream — closes the remaining ~1 s splash→bar solid-black
+   gap (re-entry safe: the one-shot blackout is loadbar_paint's own virgin
+   latch; if the game re-blanks between vid-init and streaming the outline
+   just stays hidden until the first stream — no worse than before).
+   Flycast attract screenshot-verified for all four bar versions (no
+   present regression; the bar itself is an FB write Flycast doesn't
+   render — same as splash/HUD, TV shows it). **Pending: HW look check of
+   the early-outline polish.**
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication

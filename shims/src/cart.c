@@ -59,6 +59,18 @@ void ls_stampA(unsigned int);                               /* main.c: init-time
 static u32 ls_bytes = 0, ls_reads = 0, ls_ticks = 0, ls_sh = 0xff; /* ls_sh: .data sentinel */
 #endif
 
+#if SHIM_LOADBAR
+void loadbar_paint(unsigned int fill);                      /* util.c: 320-px bar */
+/* Boot-preload byte countdown. 10 MiB (= 320px << 15, so fill = bytes >> 15,
+ * no divide) is deliberately UNDER the HW-measured ~11.4 MiB boot preload:
+ * the bar hits 100% and painting stops for good BEFORE the title presents --
+ * an overshoot would leave the bar short of full and let the first
+ * stage-boundary stream repaint it over live gameplay.
+ * ponytail: knob -- retune only if the boot preload ever shrinks below 10 MiB. */
+#define PB_TOTAL (320u << 15)
+static u32 pb_left = PB_TOTAL;         /* .data non-zero init (house style) */
+#endif
+
 extern u32 gd_last_err;                       /* gd.c: raw CHECK status of last failure */
 static void gd_or_die(void *dst, u32 rel_fad, u32 n) {
     int r = gd_read_sectors(dst, CART_FAD + rel_fad, n);
@@ -156,6 +168,12 @@ void shim_cart_service(void) {
 #endif
     cart_read(off, len, dest);
     m[0x418/4] = 0;                     /* SB_GDST mirror reads "done" */
+#if SHIM_LOADBAR
+    if (pb_left) {                      /* boot preload only; 0 = done forever */
+        pb_left = (len >= pb_left) ? 0 : pb_left - len;
+        loadbar_paint((PB_TOTAL - pb_left) >> 15);
+    }
+#endif
 #if SHIM_LOADSTAT
     u32 ls_dt = ls_t0 - LS_TCNT0;          /* down-counter: elapsed = start - now */
     if (ls_dt < (50000000u >> ls_sh)) ls_ticks += ls_dt;  /* skip a reload-wrap sample (>1 s) */

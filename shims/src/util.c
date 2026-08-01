@@ -84,6 +84,41 @@ void hex_paint(unsigned int x, unsigned int y, unsigned int val) {
     hex_paint_c(x, y, val, 0x07ff, 0x0000);                 /* cyan on black */
 }
 
+#if SHIM_LOADBAR
+/* Boot-preload progress bar: 320x6 px fill in a 1-px outline, centered, low on
+ * screen (inside the composite safe area, below the death-screen/LOADSTAT hex
+ * rows). Same live-scanout idiom as hex_paint_c (unblank + FB_R_SOF1 base).
+ * BLACK/WHITE ONLY: the game scans the FB in a different pixel format than the
+ * loader's RGB565 splash bytes (HW photo 2026-08-01: splash washed out, the
+ * 0x39e7 dark-gray track showed light olive) -- 0x0000/0xffff are the only
+ * colors identical in every format, so the bar needs no format detection.
+ * First paint blacks out the whole stale-splash FB (provably just splash
+ * residue: it is what the screen was showing) -> clean splash -> black + bar
+ * transition. fill is the lit width in px; cost irrelevant during load. */
+void loadbar_paint(unsigned int fill) {
+    static unsigned int pb_virgin = 1;     /* .data non-zero init (house style) */
+    if (fill > 320u) fill = 320u;
+    unsigned int base = *(volatile unsigned int *)0xa05f8050 & 0x00fffffcu;
+    volatile unsigned short *fb = (volatile unsigned short *)(0xa5000000u + base);
+    if (pb_virgin) {                       /* blackout WHILE STILL BLANKED, then
+                                            * unblank below -- unblank-first showed
+                                            * the stale splash for the 1-2 frames
+                                            * the clear takes (HW: splash blink) */
+        pb_virgin = 0;
+        volatile unsigned int *fb32 = (volatile unsigned int *)fb;
+        for (unsigned int i = 0; i < 640u * 480u / 2u; i++) fb32[i] = 0;
+        for (unsigned int x = 158u; x < 483u; x++)          /* outline: top/bottom */
+            fb[417u * 640u + x] = fb[428u * 640u + x] = 0xffffu;
+        for (unsigned int y = 418u; y < 428u; y++)          /* outline: sides */
+            fb[y * 640u + 158u] = fb[y * 640u + 482u] = 0xffffu;
+    }
+    for (unsigned int y = 420u; y < 426u; y++)
+        for (unsigned int x = 0; x < fill; x++)
+            fb[y * 640u + 160u + x] = 0xffffu;
+    *(volatile unsigned int *)0xa05f80e8 &= ~8u;            /* unblank video */
+}
+#endif
+
 void shim_hex(unsigned int x, unsigned int y, unsigned int val) {
 #if !SHIM_HUD
     (void)x; (void)y; (void)val; return;
@@ -121,8 +156,16 @@ int shim_vid_init(unsigned int mode, unsigned int b, unsigned int c, unsigned in
 #endif
     if (!shim_cable_is_vga())
         mode &= ~3u;               /* class 1 (VGA 31k) -> class 0 (NTSC 480i) */
-    return ((int (*)(unsigned int, unsigned int, unsigned int, unsigned int))
-            0x8c034020)(mode, b, c, d);
+    int r = ((int (*)(unsigned int, unsigned int, unsigned int, unsigned int))
+             0x8c034020)(mode, b, c, d);
+#if SHIM_LOADBAR
+    /* Empty bar right at video takeover (the SDK init above just programmed
+     * the FB regs this paint reads), not at the first cart stream ~1 s later
+     * -- kills the splash->bar solid-black gap (HW round 3). Re-entry safe:
+     * the one-shot blackout is loadbar_paint's own virgin latch. */
+    loadbar_paint(0);
+#endif
+    return r;
 }
 
 void shim_die(unsigned int code, unsigned int a, unsigned int b) {
