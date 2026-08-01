@@ -444,8 +444,9 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    just stays hidden until the first stream — no worse than before).
    Flycast attract screenshot-verified for all four bar versions (no
    present regression; the bar itself is an FB write Flycast doesn't
-   render — same as splash/HUD, TV shows it). **Pending: HW look check of
-   the early-outline polish.**
+   render — same as splash/HUD, TV shows it). **HW verdict (2026-08-01):
+   works fine, user-confirmed — boot UX case CLOSED** (splash → outlined
+   bar → fill climbs → title; no blink, no gap).
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
