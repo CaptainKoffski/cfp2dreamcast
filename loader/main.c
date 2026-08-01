@@ -27,6 +27,20 @@ extern uint8 handoff_end[];     /* end-of-stub label in handoff.S (stub is PIC) 
 #define LOADER_QUIET 1
 extern uint8 splash_bin[];      /* objcopy-embedded 640x480 RGB565 (Makefile) */
 
+/* Serial kill-switch (release default 0): serial-SD dongles (DreamShell
+ * isoldr) drive their SD card over the SCIF pins, so a release build must
+ * never transmit. KOS's dbgio_init is weak (kernel/debug/dbgio.c:110);
+ * overriding it with a no-op means no dbgio device is ever selected and
+ * dbgio_enabled stays 0, killing all dbglog/printf output from before the
+ * KOS boot banner (every dbgio_write_* is guarded, dbgio.c:162-169).
+ * Residue: kernel init.c:165 still runs scif_init() -> one SCSPTR2=0 write
+ * on an idle bus (hardware/scif.c:249); harmless, no clock edge reaches a
+ * selected SD card. Flip to 1 for serial diagnostics (debug builds). */
+#define LOADER_SERIAL 0
+#if !LOADER_SERIAL
+int dbgio_init(void) { return 0; }   /* strong override of KOS weak symbol */
+#endif
+
 static int say_row = 0;
 static void say(const char *s) {
     dbglog(DBG_INFO, "%s\n", s);
