@@ -86,8 +86,8 @@ void hex_paint(unsigned int x, unsigned int y, unsigned int val) {
 
 #if SHIM_LOADBAR
 /* Boot-preload progress bar: 320x6 px fill in a 1-px outline, centered, low on
- * screen (inside the composite safe area, below the death-screen/LOADSTAT hex
- * rows). Same live-scanout idiom as hex_paint_c (unblank + FB_R_SOF1 base).
+ * screen (below the death-screen/LOADSTAT hex rows; row is cable-dependent --
+ * see yb). Same live-scanout idiom as hex_paint_c (unblank + FB_R_SOF1 base).
  * BLACK/WHITE ONLY: the game scans the FB in a different pixel format than the
  * loader's RGB565 splash bytes (HW photo 2026-08-01: splash washed out, the
  * 0x39e7 dark-gray track showed light olive) -- 0x0000/0xffff are the only
@@ -95,11 +95,19 @@ void hex_paint(unsigned int x, unsigned int y, unsigned int val) {
  * First paint blacks out the whole stale-splash FB (provably just splash
  * residue: it is what the screen was showing) -> clean splash -> black + bar
  * transition. fill is the lit width in px; cost irrelevant during load. */
+int shim_cable_is_vga(void);               /* defined below */
 void loadbar_paint(unsigned int fill) {
     static unsigned int pb_virgin = 1;     /* .data non-zero init (house style) */
     if (fill > 320u) fill = 320u;
     unsigned int base = *(volatile unsigned int *)0xa05f8050 & 0x00fffffcu;
     volatile unsigned short *fb = (volatile unsigned short *)(0xa5000000u + base);
+    /* Bar row, per cable. The game's TV-cable (class-0) mode scans only FB
+     * lines 0..236 -- FB_R_SIZE ysize=236, modulus=1, SOF1==SOF2, i.e. a
+     * 240-line arcade picture (Flycast CLEO-SPG A/B, Cable=3 vs 0,
+     * 2026-08-02); VGA scans lines 0..477. y=417 sat in the never-scanned
+     * half on TV cables -> HW showed solid black. 200..211 keeps ~10%
+     * bottom margin inside the 237-line field (NTSC safe area). */
+    unsigned int yb = shim_cable_is_vga() ? 417u : 200u;
     if (pb_virgin) {                       /* blackout WHILE STILL BLANKED, then
                                             * unblank below -- unblank-first showed
                                             * the stale splash for the 1-2 frames
@@ -107,12 +115,17 @@ void loadbar_paint(unsigned int fill) {
         pb_virgin = 0;
         volatile unsigned int *fb32 = (volatile unsigned int *)fb;
         for (unsigned int i = 0; i < 640u * 480u / 2u; i++) fb32[i] = 0;
-        for (unsigned int x = 158u; x < 483u; x++)          /* outline: top/bottom */
-            fb[417u * 640u + x] = fb[428u * 640u + x] = 0xffffu;
-        for (unsigned int y = 418u; y < 428u; y++)          /* outline: sides */
-            fb[y * 640u + 158u] = fb[y * 640u + 482u] = 0xffffu;
     }
-    for (unsigned int y = 420u; y < 426u; y++)
+    /* Outline every paint, not one-shot: the game flips the scanout base
+     * between two buffers each vblank even during load (CLEO-SPG: SOF1
+     * 0xfd000<->0x4fd000 on TV cable), so a once-painted outline lives in
+     * one flip buffer and vanishes every other frame. Repainting converges
+     * both buffers; cost irrelevant during load. */
+    for (unsigned int x = 158u; x < 483u; x++)              /* outline: top/bottom */
+        fb[yb * 640u + x] = fb[(yb + 11u) * 640u + x] = 0xffffu;
+    for (unsigned int y = yb + 1u; y < yb + 11u; y++)       /* outline: sides */
+        fb[y * 640u + 158u] = fb[y * 640u + 482u] = 0xffffu;
+    for (unsigned int y = yb + 3u; y < yb + 9u; y++)
         for (unsigned int x = 0; x < fill; x++)
             fb[y * 640u + 160u + x] = 0xffffu;
     *(volatile unsigned int *)0xa05f80e8 &= ~8u;            /* unblank video */

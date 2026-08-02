@@ -1,13 +1,16 @@
 # Project status
 
-**Updated:** 2026-08-01 (Phase 5: GAME FULLY PLAYABLE ON REAL HARDWARE —
+**Updated:** 2026-08-02 (Phase 5: GAME FULLY PLAYABLE ON REAL HARDWARE —
 1P and 2P at full speed, both pads responsive; 2P-slowdown case closed in
 round 18; composite/AV 15 kHz output fixed (patch #34) and HW-verified on
 both cable types. Boot-time reduction (HW-verified): patch #35 trimmed a ~2 s
 hardcoded JVS post-RESET settle and the GD-DMA upgrade (SHIM_GD_DMA, I1) made
 cart streaming 2.4× faster — post-handoff black screen cut ~9.5→~5 s.
 Fit checks all CLOSED 2026-08-01 — sound RAM exactly 2 MB, VRAM never
-writes above 8 MB (write-truth remeasures). Remaining: release packaging.)
+writes above 8 MB (write-truth remeasures). Loadbar-on-composite bug fixed
+2026-08-02 (bar row now cable-dependent — the game's TV mode scans only FB
+lines 0..236) and HW-verified on both cable types. Remaining: release
+packaging.)
 
 ## What this is
 
@@ -447,6 +450,33 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    render — same as splash/HUD, TV shows it). **HW verdict (2026-08-01):
    works fine, user-confirmed — boot UX case CLOSED** (splash → outlined
    bar → fill climbs → title; no blink, no gap).
+
+   **Loadbar on composite — REOPENED and fixed (2026-08-02):** user HW
+   report — bar perfect on VGA, **solid black on composite** (all four
+   2026-08-01 HW rounds were VGA-only; Flycast can't render the bar's FB
+   writes, so composite+bar had never actually been seen). Root cause via
+   instrumented-Flycast A/B (Cable=3 vs 0; CLEO-SPG grew `FB_R_SIZE`/
+   `FB_R_SOF1/2` logging): at takeover the game's class-0 TV mode programs
+   `FB_R_SIZE=0x0013b13f` → ysize=236, modulus=1, `SOF1==SOF2` — a
+   **240-line arcade picture: only FB lines 0..236 are ever scanned** (VGA:
+   `0x0017753f` → lines 0..477). The bar lived at lines 417–428 — never
+   scanned on TV cables; the screen showed only the shim's own blackout.
+   (The loader's KOS 480i is a true 480-line weave — modulus 0x141,
+   SOF2=SOF1+1280 — which is why the *splash* shows fine on composite; the
+   240-line scanout is the game's own TV mode, not patch #34's.) Fix
+   (util.c `loadbar_paint`): bar row is cable-dependent — `yb =
+   shim_cable_is_vga() ? 417 : 200` (rows 200–211 keep ~10% bottom margin
+   in the 237-line field); outline now repaints every call, not one-shot,
+   because the game flips the scanout base between two buffers each vblank
+   even during load (CLEO-SPG: SOF1 0xfd000↔0x4fd000) and a one-shot
+   outline lands in a single flip buffer. Verified byte-exact in Flycast
+   via new `CLEO-VRAMDUMP` (VRAM snapshot at each shim unblank, decoded
+   through `pvr_map32`'s 32↔64-bit bank swizzle): composite run — outline
+   at rows 200/211 x158–482 + growing fill at the live scanout base,
+   nothing at 417–428; VGA run — bar byte-identical at the HW-proven
+   417–428, nothing at 200–211. `make test` green. **HW verdict
+   (2026-08-02): PASS — user sees the bar on both composite and VGA, game
+   plays fine. Composite-loadbar case CLOSED.**
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
