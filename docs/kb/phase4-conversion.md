@@ -496,7 +496,7 @@ write there? If yes, the shim home must move.
 
 ### Method
 
-Instrumented Flycast (`patches/flycast-instrument.diff`,
+Instrumented Flycast (the flycast fork,
 `core/hw/naomi/naomi.cpp` `cartlog_shimwatch()`): a content scan of mem_b
 offsets `0x00fc0000`–`0x00ffffff`, sampled at the same every-64th-cart-DMA
 cadence as the `WATERMARK` scan, emitting `SHIMWATCH addr=` on the first
@@ -1402,7 +1402,7 @@ Added `gui_dumpFramebuffer()` in Flycast `core/ui/gui.cpp` (called from
 (`core/rend/gles/gldraw.cpp:814`) then `stbi_write_png`. Enable with env
 `FLYCAST_SHOT=/abs/shot.png`; dumps every `FLYCAST_SHOT_EVERY` frames (default
 60) **and** on `SIGUSR1`. No OS permission needed. Full usage: `docs/kb/tooling.md`
-§"Headless framebuffer → PNG screenshot". In `patches/flycast-instrument.diff`.
+§"Headless framebuffer → PNG screenshot". In the flycast fork.
 
 ### Job 2 — the REAL free-play flag: settings-struct `+0xc` = `0x8c1c9790`
 
@@ -2097,7 +2097,7 @@ lets the game leave the I/O-check scene loop and stream further.
 
 ### How the decision was located (dynamic, instrumented DC-mode interpreter)
 
-`patches/flycast-instrument.diff` adds two read-only probes (Task 14c):
+the flycast fork adds two read-only probes (Task 14c):
 - **STRWATCH** (`core/hw/mem/addrspace.cpp readt`): logs guest reads of the I/O
   status-string block phys `0x0c0ca6dc–0x0c0ca740` (the strings have no static
   xref — computed resource base+offset). Caught the screen build at copy PC

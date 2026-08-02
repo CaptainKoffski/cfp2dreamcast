@@ -20,7 +20,7 @@ via `scripts/ghidra/run.sh script NAME.java` (`-noanalysis`):
 | `DumpEntryChain.java` | Follows the trampoline at the header entrypoint; resolves pool-jump targets |
 | `WhichFunc.java` | Maps a list of addresses to `(fn entry, body range)` |
 
-**Dynamic (Flycast interpreter + BIOSEXEC guard):** `patches/flycast-instrument.diff`
+**Dynamic (Flycast interpreter + BIOSEXEC guard):** the flycast fork
 extends the guest-PC / SP log with:
 - `CARTDMAPC pc= sp=` — PC at SB_GDST store (cart DMA trigger)
 - `MAPLEPC cmd=86 sub= pc=` — PC at Maple DMA store

@@ -44,8 +44,9 @@ Linux would need minor Makefile tweaks). You need:
   `tools/kos` (with `tools/kos/environ.sh` configured) — setup recipe in
   `docs/kb/tooling.md`
 - **python3**, **7zz** (Homebrew p7zip), **git**
-- **Instrumented Flycast** at `tools/flycast-src` — clone Flycast at the
-  pinned commit and apply the two diffs per `patches/README.md`, then build.
+- **Instrumented Flycast** at `tools/flycast-src` — clone our fork
+  (github.com/CaptainKoffski/flycast4naomi2dreamcast), init submodules, apply
+  the Syphon patch per `patches/README.md`, then build.
   It adds the capture instrumentation (CARTDMA/MIERESP/… log lines) and a
   headless screenshot hook; needed for the one-time blob harvest below and
   for emulator testing. Also copy `bios/naomi.zip` to

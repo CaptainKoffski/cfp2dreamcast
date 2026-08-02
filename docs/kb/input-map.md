@@ -1,7 +1,7 @@
 # Input map (Phase 2)
 
 The JVS digital-input word as this game reads it, from the instrumented Flycast
-`JVSREPORT` log (`patches/flycast-instrument.diff` logs `inputs[0] & 0xffff` —
+`JVSREPORT` log (the flycast fork logs `inputs[0] & 0xffff` —
 Player 1's low 16-bit JVS word, once per frame).
 
 **Polarity: active-HIGH.** The idle word (nothing pressed) is `0x0000`

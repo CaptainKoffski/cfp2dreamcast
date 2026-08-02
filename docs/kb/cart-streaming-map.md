@@ -1,7 +1,7 @@
 # Cart streaming map (Phase 2 capture)
 
 The runtime cart reads *Cleopatra Fortune Plus* issues, captured from the
-instrumented Flycast (`patches/flycast-instrument.diff`). Machine-readable rows
+instrumented Flycast (the flycast fork). Machine-readable rows
 are in `cart-streaming-map.csv` (`cart_offset,length,dest,mode`). Each `DMA`
 row is a `(cart byte offset, length, physical RAM dest)` request that Phase 4
 must reissue as a GD-ROM read; `mode=PIO` rows are small scattered seeks via

@@ -465,7 +465,7 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    name it if it ever bites. **VRAM fit CLOSED (2026-08-01):** write-truth remeasure in Flycast (same
    method as sound RAM below — zero VRAM at game handoff, then profile genuine
    post-handoff writes + snapshot the TA/FB layout registers;
-   `cartlog_vram_profile`, `patches/flycast-instrument.diff`) shows the game's
+   `cartlog_vram_profile`, the flycast fork) shows the game's
    VRAM writes peak at `0x7cd7d5` (**7.8 MB, 0 bytes at/above 8 MB** in every
    snapshot; `capture-vram-fit-attract.log`, 433 cart DMAs / 7 snapshots;
    confirmed on a hands-on gameplay round `capture-vram-fit-gameplay.log`,
@@ -478,7 +478,7 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    No fit watch items remain.
    **Sound-RAM fit CLOSED (2026-08-01):** write-truth remeasure in Flycast
    (zero ARAM at game handoff, then high-water + 256 KB histogram of genuine
-   post-handoff writes — `cartlog_aram_profile`, `patches/flycast-instrument.diff`)
+   post-handoff writes — `cartlog_aram_profile`, the flycast fork)
    shows the game writes only ARAM `0x0-0x1fffff` = **exactly 2 MB, 0 bytes above**,
    loaded once at boot as a fixed bank; confirmed on a hands-on gameplay round
    (`capture-aram-fit-gameplay.log`, 603 cart DMAs / 10 snapshots — high-water

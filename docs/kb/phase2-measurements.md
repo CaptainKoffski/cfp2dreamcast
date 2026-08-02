@@ -1,6 +1,6 @@
 # Phase 2 measurements — RAM footprint and serial/watchdog
 
-Measured from the instrumented Flycast (`patches/flycast-instrument.diff`) over
+Measured from the instrumented Flycast (the flycast fork) over
 three merged passes: attract (`capture-attract.log`), extended demo
 (`capture-demo-extended.log`), and a **hands-on play pass reaching a game-over**
 (`capture-play.log`). **Coverage note:** the play pass barely moved the numbers
@@ -49,7 +49,7 @@ content:
    per-bucket histogram (so a lone stray write is distinguishable from dense use).
 
 Instrumentation: `cartlog_aram_profile()` + the handoff-zero in `Naomi_DmaStart`
-(`patches/flycast-instrument.diff`, `core/hw/naomi/naomi.cpp`). Run: launch the
+(the flycast fork, `core/hw/naomi/naomi.cpp`). Run: launch the
 instrumented Flycast on the ROM with `FLYCAST_CARTLOG` set, let boot+attract+demo
 run. Evidence: `capture-aram-fit.log`.
 
@@ -89,7 +89,7 @@ additionally snapshots the TA/FB layout registers (`VRAMREGS`) because of a
 Flycast blind spot: the TA parses display lists into host-side structures and
 rendering happens on the host GPU, so ISP/OL buffers and framebuffer pixels
 never appear as vram-array *content* — those regions are covered by *layout*
-instead. Instrumentation: `patches/flycast-instrument.diff`
+instead. Instrumentation: the flycast fork
 (`core/hw/naomi/naomi.cpp`). Evidence: `capture-vram-fit-attract.log`
 (boot + attract + demo incl. auto-played gameplay, 433 cart DMAs / 7 snapshots,
 2026-08-01).
