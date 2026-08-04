@@ -32,10 +32,12 @@ Two deliverables:
    2026-08-01: RGB565 splash washed out, 0x39e7 gray showed olive —
    consistent with RGB0555. The bar dodged this with black/white-only; a
    color animation cannot. Must be pinned by measurement (see A4).
-4. **~180 KB of proven-safe RAM is free** in the shim carve-out:
-   `SHIM_BASE`+0x13100 (above MAPLE_MIRROR) to RAM top 0x8d000000
-   (`shims/include/shim_iface.h`; carve-out V2-verified clean, game write
-   watermark 15.5 MB).
+4. **~114 KB of proven-safe RAM is free** in the shim carve-out:
+   `SHIM_BASE`+0x13800 (above MAPLE_MIRROR) to 0x8cff0000 — the KOS loader
+   stack bottom, the region map's existing ceiling (`test_shim_iface.c:32`);
+   the loader memcpys blobs while running on that stack, so the top 64 KB is
+   off limits. (Plan correction 2026-08-04: an earlier draft said ~180 KB by
+   counting to RAM top.)
 5. **A load-window-only paint gate exists.** The SHIM_LOADBAR 10 MiB byte
    countdown (`cart.c` PB_TOTAL/pb_left) expires before the title presents;
    painting latched off by it can never draw on a visible game frame.
