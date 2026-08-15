@@ -669,6 +669,35 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    `make -C shims clean && make DEFS='-DSHIM_GD_DIAG=1 -DSHIM_PROBES=1'`,
    same DreamShell settings. Expected: round-6-like boot (bar fills) →
    post-preload pin → photo of y96 decides ARM-dead vs pump-dead.
+   **Round 8 tester result:** bar fills → same post-preload pin, bottom
+   diag IDENTICAL to round 6 (req 0x9A, fad 0x7A331, phase AAAA0003 /
+   AAAA8003, checksum 2FB0FC09, E0000096; SPC cycling 8C0xxxxx = the
+   FUN_8c032e00 allocator spin) — the wall is stable and reproducible.
+   New cells: TEA=0, EXPEVT=0x20 (manual-reset leftover, benign),
+   VBR=8C00F400. y96: ctx=**8C0F3B80** (valid; init flag=1 → the game's
+   SDRV boot COMPLETED under DreamShell), hb=**BAD10001** — which is a
+   PROBE BUG, not a dead driver: [ctx+0x98] holds an **ARAM OFFSET**
+   (0x0001xxxx ≈ 64 KB in), not an absolute pointer. Primary source:
+   FUN_8c03a3a4 passes [ctx+0x98]+0x18 to ARAM-word-reader FUN_8c039688,
+   whose literal pool holds bound 0x00200000 (2 MB ARAM) and base
+   0xa0800000 (boot.bin file offs 0x196cc/0x196d0). Round 8's probe
+   demanded a 0x008xxxxx pointer and painted BAD1 over a healthy offset.
+   **Round-7 verdict RETRACTED:** tester reports both round-7 builds were
+   made WITHOUT `make -C shims clean` — stale shim objects explain the
+   missing digits (and possibly the 0% bar, if the stale objects predated
+   the MMU medicine). "spu_disable froze earliest init" is unproven; it
+   stays reverted anyway since round 8 proves the game's SDRV boot
+   completes over DreamShell's live driver, so the quiesce buys nothing.
+   **Build hygiene (tester-confirmed foot-gun, bit twice): the shim
+   Makefile does not track CFLAGS — ALWAYS `make -C shims clean` when
+   DEFS change.**
+   **Round 9 (deployed): heartbeat probe fixed** — reads
+   0xa0800000 + [ctx+0x98] + 0x18 with the game's own validity checks
+   (offset < 0x200000, 4-aligned). Tester round 9: same build command +
+   settings as round 8; photo of the y96 RIGHT cell at the pin, twice a
+   few seconds apart — CHANGING value = ARM driver alive → fix targets
+   the SH4-side sound pump; FROZEN value = driver died post-handshake →
+   fix targets ARM/ARAM state.
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —

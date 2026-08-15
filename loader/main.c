@@ -159,14 +159,14 @@ int main(void) {
     tmark("splash");
 
     say("CLEO LOADER M2");
-    /* DreamShell round 8: do NOT quiesce the AICA here. Round 7 tried
-     * spu_disable() (hold the ARM like a BIOS boot) and it froze the game's
-     * EARLIEST init on the DreamShell path -- before the first vblank tick,
-     * inside the game's own SDRV sound-driver boot (FUN_8c02a4f4: halt ->
-     * upload -> start -> heartbeat waits). The game's own sequence provably
-     * tolerates a foreign driver RUNNING at entry (round 6 booted through
-     * with DreamShell's driver live) but not our long-pre-held ARM +
-     * spu_reset_chans state; mechanism unresolved, reverted empirically. */
+    /* DreamShell round 8/9: no AICA quiesce here. Round 7 tried
+     * spu_disable() (hold the ARM like a BIOS boot) and the tester saw bar
+     * 0% + no diag digits -- but that round was built WITHOUT
+     * `make -C shims clean`, so the shim objects were stale (round-9 tester
+     * confession); the "spu_disable froze earliest init" verdict is
+     * unproven. It stays out anyway: round 8 showed the game's own SDRV
+     * boot (FUN_8c02a4f4) completes fine over DreamShell's live driver, so
+     * the quiesce buys nothing. */
     cdrom_reinit();             /* inits the GD subsystem the shim's BIOS syscalls reuse */
     say("GD init OK");
     tmark("gd init");
