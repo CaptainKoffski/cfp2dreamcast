@@ -159,6 +159,14 @@ void shim_cart_service(void) {
         scif_puts(" len="); scif_puthex(len);
         scif_puts(" dst="); scif_puthex(dest); scif_puts("\n");
     }
+#if SHIM_GD_DIAG
+    /* Phase marker (x=220,y=134): 0xA|count = stream requested, 0xB = data
+     * delivered + checksummed, 0xE = stream done, back to game code. A photo
+     * frozen at E pins the hang inside the game itself (data suspect). */
+    void hex_paint_c(unsigned int, unsigned int, unsigned int,
+                     unsigned short, unsigned short);
+    hex_paint_c(220, 134, 0xA0000000u | (cart_count & 0x00ffffffu), 0xffff, 0x001f);
+#endif
 #if SHIM_LOADSTAT
     if (ls_sh == 0xff) {                   /* TCR0.TPSC -> prescaler shift (Pck 50 MHz) */
         static const u32 sh[8] = {2, 4, 6, 8, 10, 10, 10, 10};
@@ -168,11 +176,26 @@ void shim_cart_service(void) {
 #endif
     cart_read(off, len, dest);
     m[0x418/4] = 0;                     /* SB_GDST mirror reads "done" */
+#if SHIM_GD_DIAG
+    {   /* Position-sensitive checksum (rotl1-xor) of the delivered bytes,
+         * read back uncached, painted at (220,120) -- compare against the
+         * ROM-derived expected value for this stream to prove/disprove
+         * data corruption on the wire (isoldr serve path). */
+        volatile unsigned char *p = (volatile unsigned char *)(dest | 0xa0000000u);
+        u32 ck = 0;
+        for (u32 i = 0; i < len; i++) ck = ((ck << 1) | (ck >> 31)) ^ p[i];
+        hex_paint_c(220, 120, ck, 0xffff, 0x001f);
+        hex_paint_c(220, 134, 0xB0000000u | (cart_count & 0x00ffffffu), 0xffff, 0x001f);
+    }
+#endif
 #if SHIM_LOADBAR
     if (pb_left) {                      /* boot preload only; 0 = done forever */
         pb_left = (len >= pb_left) ? 0 : pb_left - len;
         loadbar_paint((PB_TOTAL - pb_left) >> 15);
     }
+#endif
+#if SHIM_GD_DIAG
+    hex_paint_c(220, 134, 0xE0000000u | (cart_count & 0x00ffffffu), 0xffff, 0x001f);
 #endif
 #if SHIM_LOADSTAT
     u32 ls_dt = ls_t0 - LS_TCNT0;          /* down-counter: elapsed = start - now */

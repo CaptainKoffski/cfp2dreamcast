@@ -533,6 +533,39 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    `make -C shims clean && make DEFS='-DSHIM_GD_DIAG=1'` and photograph
    the two rows. Expectation note: serial SD moves ~150 KB/s — a healthy
    boot preload (11.4 MiB) fills the bar over ~1.5–2 minutes.
+   **Round 3 verdict (tester diag photo, 2026-08-15): GD PATH NOW HEALTHY —
+   the wall moved into the game.** Screen read req=7, status=2 (COMPLETED),
+   heartbeat=0 (completed on first poll), fad=0x6F536. Decode: fad rel
+   0x1010 = cart byte 0x808000 = boot-preload **stream #2** (the stream
+   program mined from the round-2 capture's MIRRORWR lines: 231 streams;
+   #1 = 2 KB table → 0x8c0e6a00, #2.. = 2 KB compressed chunks through a
+   fixed window at 0x0c115960). So with the private stack, sends are
+   accepted and reads COMPLETE cleanly — the freeze is between stream #2
+   returning and stream #3 being requested, i.e. inside the game's own
+   decompressor consuming chunk #1. GDEMU-proven code freezing on data ⇒
+   the delivered bytes are suspect. **Root-cause candidate found in isoldr
+   source: KOS memcpy.S FPU carnage.** isoldr links KOS's optimized
+   `memcpy.S`; its big-block path (`kos/src/memcpy.S:499-560`) copies via
+   `fmov` pairs through dr0-dr14 AND xd0-xd14 — BOTH FPU banks, saving
+   only fr12-15 — and switches FPSCR to paired precision assuming KOS's
+   baseline. The real BIOS GD driver is integer-only (why 18 GDEMU rounds
+   never saw this); under isoldr, every big serve-path copy runs with —
+   and tramples — whatever FPU state the Naomi game holds live across its
+   patched cart-wait call. Loader phase was immune (KOS's own FPSCR/regs).
+   **Round 4 (deployed, `make test` green, Flycast attract-verified):
+   gdc_call grew an FPU QUARANTINE** — saves the game's complete FPU
+   context (both banks + FPSCR + FPUL), runs the syscall under KOS-default
+   FPSCR 0x00040001, restores everything (gdstack.S; ~136 B on the private
+   GD stack, negligible vs a serial read). SHIM_GD_DIAG also grew a
+   data-truth instrument: per-stream position-sensitive checksum
+   (rotl1-xor) of the delivered bytes painted at (220,120) + a phase cell
+   at (220,134) (0xA|n requested → 0xB|n delivered → 0xE|n done). Expected
+   checksums (from the ROM): stream1 0x5AB35E19, s2 0xC5A1AA96,
+   s3 0x74267D2E, s4 0xCEC68B8C, s5 0xEADC93AF, s6 0x858FFB64,
+   s7 0xA902CD97, s8 0x1F742ED0. Tester round 4: diag build, same
+   settings — full boot = FPU case closed (ship with SHIM_GD_DIAG=0);
+   still frozen = photo gives phase + on-screen vs expected checksum,
+   separating wire corruption from a game-internal stall.
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
