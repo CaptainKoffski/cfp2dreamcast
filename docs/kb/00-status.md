@@ -893,7 +893,15 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    |---|---|---|
    | unfixed round-12 (`v4-unfixed.log`) | `w0=00000000` | PIN (STARTRENDER frozen at 541) |
    | gdstack fix only (`v3-fixed.log`) | `w0=00000000` | PIN — per-tick clear alone is fatal |
-   | both fixes (`v5-bothfixes.log`) | — | verification run, see below |
+   | both fixes (`v5-bothfixes.log`) | `w0=818c0002` | **TITLE RUNS** — STARTRENDER 541→4252+, all 5 lists close per frame |
+
+   V5's MMUCR timeline confirms the fix live: gdc_call clear/restore pairs
+   (`pc=8cfc1714`/`8cfc1724`), restores carrying the game's `val=00040001`
+   (AT=1 preserved; the 0x40005 enable at `pc=8c03b1c8` reads back with TI
+   self-cleared), zero per-tick writers. **Round 13 HW test: rebuild with
+   the same diag command, same DreamShell settings — expected outcome is
+   the game booting into the title. If it still pins, photograph the same
+   five cyan probe rows.**
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
