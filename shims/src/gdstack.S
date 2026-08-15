@@ -80,6 +80,17 @@ _gdc_call:
     jsr     @r0
     nop
 
+    /* MMU off after every syscall. The DreamShell environment runs with the
+     * MMU enabled (DreamShell OS uses it; the SD isoldr never disables it);
+     * the loader clears MMUCR at handoff, but the rounds-2-5 first-stream
+     * wedge vanished under the probe build whose per-tick MMUCR clear was
+     * the only semantic delta -- so keep translation provably off on the
+     * only path that talks to the emu. Games assume AT=0 forever (unpopulated
+     * VBR miss vectors); a single 0-store, free vs a serial read. */
+    mov.l   .Lmmucr_k, r1
+    mov     #0, r2
+    mov.l   r2, @r1
+
     mov.l   .Lfpscr_kos_k, r1   /* known move width/bank for the restore */
     lds     r1, fpscr
     frchg                       /* front = physical bank 1 */
@@ -129,6 +140,7 @@ _gdc_call:
 .Lsp_save_k:    .long _gdc_saved_sp
 .Lstack_top_k:  .long GD_STACK_TOP
 .Lvec_k:        .long 0x8c0000bc
+.Lmmucr_k:      .long 0xff000010
 .Lfpscr_kos_k:  .long 0x00040001    /* KOS default: DN=1, RM=chop, SZ=PR=FR=0 */
 
     .section .data

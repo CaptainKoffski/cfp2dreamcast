@@ -159,6 +159,15 @@ int main(void) {
     tmark("splash");
 
     say("CLEO LOADER M2");
+    /* AICA quiesce: hold the ARM sound CPU in reset, like a BIOS boot does.
+     * On GDEMU the BIOS already leaves it held; under DreamShell its own
+     * sound driver is still RUNNING on the ARM when isoldr launches us --
+     * the game then overwrites all 2 MB of sound RAM under the live driver,
+     * the ARM crashes into garbage, the game's SDK sound-command rings
+     * (32-slot pools, FUN_8c032e00) never drain, and boot pins right after
+     * the preload (DreamShell round 6, SPC=0x8c032e6x spin). KOS never does
+     * this in normal init (only arch_abort); idempotent when already held. */
+    spu_disable();
     cdrom_reinit();             /* inits the GD subsystem the shim's BIOS syscalls reuse */
     say("GD init OK");
     tmark("gd init");

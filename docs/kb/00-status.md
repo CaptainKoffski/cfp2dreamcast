@@ -613,6 +613,37 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    Flycast's present — round-12 — so this build is verified boots+streams
    via cartlog, not screenshots; HW-only diagnostics as in probe rounds
    4-11). Same DreamShell settings (Memory 0x8cf80000, Heap 0x8cf90000).
+   **Round 6 verdict (tester photo, 2026-08-15): BREAKTHROUGH ×2.** (1) The
+   probe build BOOTED THROUGH the old wedge — the bar filled completely,
+   ~150 streams served (req id 0x9A, phase E|0x96, CHECK in-flight/returned
+   pair matched, EXPEVT=0x020 stale-reset = zero exceptions all run). The
+   only semantic delta vs the round-5 freeze is the probe block's per-tick
+   MMUCR clear — the round-9 medicine, accidentally reintroduced. (The SD
+   isoldr never touches MMUCR — mmu_disable/restore compile only for the CD
+   device build — so the exact re-enabler remains unidentified; DreamShell
+   itself runs MMU-on.) (2) The NEXT wall showed itself: post-preload the
+   main thread spins at SPC≈0x8c032e68 = FUN_8c032e00, a 3-priority
+   32-slot × 0x40-byte command-ring ALLOCATOR that returns NULL on pool-full
+   — the classic queue-full/consumer-dead spin, precisely when the title
+   BGM would start. Consumer = the AICA ARM sound driver. Root cause: a
+   BIOS boot hands the game a HALTED ARM (upload driver, then release);
+   KOS never quiesces the SPU in normal init (spu_disable only in
+   arch_abort, init.c:428) and neither does isoldr — so under DreamShell
+   the game boots with DreamShell's own sound driver still RUNNING on the
+   ARM, overwrites all 2 MB ARAM under it, the ARM crashes, the rings never
+   drain, pool pins full. **Round 7 (deployed, make test green, Flycast
+   attract screenshot-verified incl. game sound init): loader calls
+   spu_disable() before GD init** (BIOS-equivalent ARM state on every boot
+   path; idempotent on GDEMU) **+ gdc_call clears MMUCR after every
+   syscall** (the medicine's Flycast-safe mainline home — per-syscall, not
+   per-tick, so no round-12 present hazard). Tester round 7: rebuild with
+   `make -C shims clean && make DEFS='-DSHIM_GD_DIAG=1'` (diag cells kept,
+   probes OFF — this is also the controlled test that the per-syscall
+   MMUCR clear suffices without the per-tick one), same DreamShell
+   settings. Expected: bar fills ~1.5-2 min → title WITH SOUND → attract.
+   If it freezes at the bar again: per-syscall clear insufficient → next
+   build gates a per-tick clear behind a DreamShell detect. If it freezes
+   post-bar silently: AICA theory needs the SPC probes back.
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
