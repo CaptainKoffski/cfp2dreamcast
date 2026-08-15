@@ -21,7 +21,15 @@
 typedef unsigned int u32;
 typedef int (*gdc_t)(u32, u32, u32, u32);
 
+#if SHIM_GD_STACK
+/* gdstack.S: same live-vector call, but on the private GD stack -- see the
+ * rationale there (DreamShell isoldr runs its whole emu on the caller's
+ * stack; the game's is ~2 KB). */
+int gdc_call(u32, u32, u32, u32);
+#define GDC       gdc_call
+#else
 #define GDC       ((gdc_t)(*(volatile u32 *)0x8c0000bc))
+#endif
 #define CMD_PIOREAD   16
 #define CMD_DMAREAD   17  /* G1-DMA read (SHIM_GD_DMA); KOS CD_CMD_DMAREAD */
 #define CMD_INIT      24  /* drive re-init (KOS cdrom_reinit path) */
@@ -33,6 +41,19 @@ typedef int (*gdc_t)(u32, u32, u32, u32);
 #define GD_FAILED    -1
 
 void shim_die(u32, u32, u32);
+
+/* SHIM_GD_DIAG (diagnostic builds): live GD-syscall state on screen, one
+ * TV photo classifies the failure. Row 120: [send result | last CHECK
+ * status]; row 134: [poll heartbeat (climbing = polling, frozen = wedged
+ * inside a syscall) | absolute fad]. White on blue; paints run on the
+ * caller stack, outside gdc_call. */
+#if SHIM_GD_DIAG
+void hex_paint_c(unsigned int, unsigned int, unsigned int,
+                 unsigned short, unsigned short);
+#define GD_DIAG(x, y, v) hex_paint_c((x), (y), (v), 0xffff, 0x001f)
+#else
+#define GD_DIAG(x, y, v) ((void)0)
+#endif
 
 /* Raw CHECK status word of the last hard failure -- painted by cart.c's death
  * screen so the TV shows the BIOS's actual verdict, not our -2. .data nonzero
@@ -84,11 +105,14 @@ int gd_read_sectors(void *dst, u32 fad, u32 n) {
         if (attempt) { gd_sys_reinit(); gd_init_drive(); }  /* rebuild state, then drive */
         u32 param[4], stat[4], guard = 0;
         param[0] = fad; param[1] = n; param[2] = (u32)dst; param[3] = 0;
+        GD_DIAG(120, 134, fad);
         int req = GDC((u32)CMD_PIOREAD, (u32)param, 0, GD_SEND);
+        GD_DIAG(20, 120, (u32)req);
         if (req <= 0) { gd_last_err = 0xcafe0002u; continue; }  /* send refused: recover+retry */
         for (;;) {
             GDC(0, 0, 0, GD_EXEC);           /* pump the drive state machine */
             int s = GDC((u32)req, (u32)stat, 0, GD_CHECK);
+            if ((guard & 0xffffu) == 0) { GD_DIAG(120, 120, (u32)s); GD_DIAG(20, 134, guard); }
             if (s == GD_COMPLETED) return 0;
             if (s <= GD_FAILED) { gd_last_err = stat[0]; break; } /* hard error: retry */
             if (s == GD_NOT_FOUND && guard > 1000000u) { gd_last_err = 0xcafe0001; break; }
@@ -138,11 +162,14 @@ int gd_read_sectors_dma(u32 phys, u32 fad, u32 n) {
         dcache_inval(phys, n * 2048u);
         u32 param[4], stat[4], guard = 0;
         param[0] = fad; param[1] = n; param[2] = phys; param[3] = 0;
+        GD_DIAG(120, 134, fad);
         int req = GDC((u32)CMD_DMAREAD, (u32)param, 0, GD_SEND);
+        GD_DIAG(20, 120, (u32)req);
         if (req <= 0) { gd_last_err = 0xcafe0002u; continue; }
         for (;;) {
             GDC(0, 0, 0, GD_EXEC);          /* pump the drive + DMA state machine */
             int s = GDC((u32)req, (u32)stat, 0, GD_CHECK);
+            if ((guard & 0xffffu) == 0) { GD_DIAG(120, 120, (u32)s); GD_DIAG(20, 134, guard); }
             if (s == GD_COMPLETED) {
                 *(volatile u32 *)0xa05f6900 = (1u << 14);   /* ack the GD-DMA status */
                 return 0;

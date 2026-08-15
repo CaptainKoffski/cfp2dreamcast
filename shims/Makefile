@@ -11,7 +11,7 @@ DATA_SRCS = $(B)/eeprom_img.c $(B)/mie_sub01.c $(B)/mie_sub13.c $(B)/mie_sub17.c
             $(B)/mie_sub27.c $(B)/mie_sub31.c $(B)/mie_subff.c \
             $(B)/mie_jvsf1.c $(B)/mie_jvs10.c $(B)/mie_jvs11.c \
             $(B)/mie_jvs12.c $(B)/mie_jvs13.c $(B)/mie_jvs14.c
-SRCS = src/main.c src/scif.c src/util.c src/gd.c src/cart.c src/maple.c src/jvs.c $(DATA_SRCS)
+SRCS = src/main.c src/scif.c src/util.c src/gd.c src/gdstack.S src/cart.c src/maple.c src/jvs.c $(DATA_SRCS)
 
 .PHONY: all test clean
 all: $(B)/shim.bin $(B)/shim.map

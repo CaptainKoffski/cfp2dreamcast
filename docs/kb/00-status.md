@@ -1,6 +1,8 @@
 # Project status
 
-**Updated:** 2026-08-02 (Phase 5: GAME FULLY PLAYABLE ON REAL HARDWARE —
+**Updated:** 2026-08-15 (DreamShell serial-SD boot investigation live — see
+the Phase-5 entry; GDEMU path unaffected. Phase 5: GAME FULLY PLAYABLE ON
+REAL HARDWARE —
 1P and 2P at full speed, both pads responsive; 2P-slowdown case closed in
 round 18; composite/AV 15 kHz output fixed (patch #34) and HW-verified on
 both cable types. Boot-time reduction (HW-verified): patch #35 trimmed a ~2 s
@@ -477,6 +479,60 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    417–428, nothing at 200–211. `make test` green. **HW verdict
    (2026-08-02): PASS — user sees the bar on both composite and VGA, game
    plays fine. Composite-loadbar case CLOSED.**
+
+   **DreamShell serial-SD boot — OPEN (2026-08-15, round 2 deployed):**
+   testers without an ODE run the GDI via DreamShell isoldr + a serial-port
+   SD dongle — a boot path this port had never targeted (official target:
+   GDEMU-class ODE). Round 1: with the old serial-debug builds the tester
+   got a solid red screen — the dongle's data link IS the SCIF pins, so our
+   debug TX corrupted SD reads mid-boot; the serial kill-switch (0e490ed)
+   cured that class. Current symptom: Naomi splash + bar outline appear
+   (= loader phase + handoff + game init all fine), then the bar never
+   fills = the FIRST post-handoff cart stream never completes. Identical at
+   isoldr Memory 0x8cfe8000 (high preset) and 0x8cf80000 (custom, in the
+   gap above the game's 15.5 MB write watermark), async off, DMA/CDDA off,
+   several-minute waits — so NOT a loader-placement trample.
+   Evidence (primary source: `sega-dreamcast/dreamshell` master,
+   `firmware/isoldr/loader/`, cloned+read 2026-08-15):
+   - isoldr redirects GD syscall vectors 0x8c0000bc/c0 to `gdc_redir`
+     inside its own image (`gdc_syscall.s`) and serves reads from FAT/SD
+     over SCIF SPI (`dev/sd/spi.c`, bit-bang under irq_disable);
+     CMD_DMAREAD is emulated incl. dcache_purge of the dest
+     (`syscalls.c` data_transfer) — command support + cache coherency are
+     NOT the problem; SD builds are -DNO_SD_INIT (no TMU-dependent init on
+     the read path).
+   - isoldr's server lock is a byte hardcoded at **0x8c00002d**
+     (`gdc_syscall.s` gdc_lock — the real BIOS's own GD lock location).
+     Both lock-wedge variants DISPROVEN by a new instrumented-Flycast RAM
+     watch (fork `addrspace.cpp` LOWRAMWR, first 0x100 bytes of RAM;
+     `capture-lowram.log`, DC-mode interpreter run, 200+ streams): the
+     game NEVER writes the first 0x100 bytes (every writer pc is BIOS
+     code 0x8c000xxx–0x8c00bxxx), and the lock is balanced and =0 at
+     handoff.
+   - **Leading hypothesis — caller-stack depth:** isoldr runs its whole
+     emu (FatFs + SPI + the gdcExitToGame coroutine, which parks/resumes
+     continuation frames) on the CALLER's stack. Loader phase = KOS's big
+     stack → works (splash, 1 MB image, patches all fine). Game phase =
+     the Naomi stack, floor 0x8c00e6e8, ~2 KB observed (boot-binary §3),
+     with game ISRs nesting on the live SP between the irq_disabled SPI
+     bursts. The real BIOS GD driver is shallow enough to fit (18 green
+     GDEMU rounds); isoldr's is not — the dive below the game stack lands
+     in live game data, and a wedged ISR/frame mid-read = zero bar ticks,
+     frozen screen, placement-independent. Exactly the observed symptom.
+   Deployed (round 2, `make test` green, Flycast attract
+   screenshot-verified): **SHIM_GD_STACK=1 (default)** — `gdstack.S`
+   trampoline runs every GD syscall on a private 16 KB shim stack at
+   SHIM_BASE+0x14000..+0x18000 (region asserts extended; harmless on a
+   real BIOS, which doesn't care what SP it borrows — fix candidate for
+   the whole caller-stack class). **SHIM_GD_DIAG (default 0)** — gd.c
+   paints live GD state at rows y=120/134: [send result | last CHECK
+   status] and [poll heartbeat | fad]; one TV photo classifies
+   send-refused vs stuck-processing vs syscall-never-returned. Tester
+   round 2: same DreamShell settings (Memory 0x8cfe8000, async/DMA/CDDA
+   off) with the new disc; if still hung, rebuild with
+   `make -C shims clean && make DEFS='-DSHIM_GD_DIAG=1'` and photograph
+   the two rows. Expectation note: serial SD moves ~150 KB/s — a healthy
+   boot preload (11.4 MiB) fills the bar over ~1.5–2 minutes.
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —

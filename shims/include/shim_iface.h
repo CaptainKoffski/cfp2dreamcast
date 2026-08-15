@@ -33,6 +33,15 @@
 #define MAPLE_MIRROR         (SHIM_BASE + 0x13000)
 #define MAPLE_MIRROR_LEN     0x100
 
+/* Private stack for BIOS-GD syscalls (SHIM_GD_STACK, gdstack.S): DreamShell
+ * isoldr's syscall emu runs FatFs + SPI + its coroutine on the CALLER's
+ * stack; the game's Naomi stack is ~2 KB and the real BIOS barely fits it --
+ * isoldr doesn't. 16 KB, grows down from GD_STACK_TOP. Above MAPLE_MIRROR
+ * (ends +0x13100), below isoldr's high placement 0x8cfe8000 and the KOS
+ * loader stack bottom 0x8cff0000. */
+#define GD_STACK_BOTTOM      (SHIM_BASE + 0x14000)
+#define GD_STACK_TOP         (SHIM_BASE + 0x18000)
+
 #define STAGING_ADDR    0x8cd00000
 #define GAME_LOAD_ADDR  0x8c020000
 #define GAME_LEN        0x00100000
@@ -76,6 +85,23 @@
  * and DMA, so it can neither exercise nor confirm this path. */
 #ifndef SHIM_GD_DMA
 #define SHIM_GD_DMA 1
+#endif
+
+/* Run every GD syscall on the private shim stack (gdstack.S) instead of the
+ * caller's. Fix candidate for the DreamShell serial-SD first-stream hang
+ * (isoldr emu depth on the ~2 KB game stack); harmless on a real BIOS.
+ * 0 = old direct-vector calls on the caller stack. */
+#ifndef SHIM_GD_STACK
+#define SHIM_GD_STACK 1
+#endif
+
+/* On-screen GD-syscall diagnostics (diagnostic builds only): paints send
+ * result / last CHECK status / a poll heartbeat per read attempt, so a TV
+ * photo distinguishes send-refused vs stuck-processing vs never-returned.
+ * Unlike SHIM_LOADBAR there is no boot-window cutoff -- stage streams during
+ * play paint over live frames. Never ship 1. */
+#ifndef SHIM_GD_DIAG
+#define SHIM_GD_DIAG 0
 #endif
 
 #endif

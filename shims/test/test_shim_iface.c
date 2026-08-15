@@ -29,7 +29,10 @@ int main(void) {
     assert(SHIM_BOUNCE + 2048 <= BIOS_DATA_60000);                    /* bounce | BIOS slice A */
     assert(BIOS_DATA_60000 + BIOS_DATA_60000_LEN <= BIOS_DATA_1FFD00);/* slice A | slice B */
     assert(BIOS_DATA_1FFD00 + BIOS_DATA_1FFD00_LEN <= MAPLE_MIRROR);  /* slice B | maple mirror */
-    assert(MAPLE_MIRROR + MAPLE_MIRROR_LEN <= 0x8cff0000u);           /* map top | KOS stack bottom */
+    assert(MAPLE_MIRROR + MAPLE_MIRROR_LEN <= GD_STACK_BOTTOM);       /* maple mirror | GD stack */
+    assert(GD_STACK_BOTTOM + 0x1000 <= GD_STACK_TOP);                 /* >= 4 KB of stack */
+    assert(GD_STACK_TOP <= 0x8cfe8000u);      /* below isoldr high placement (serial-SD boots) */
+    assert(GD_STACK_TOP <= 0x8cff0000u);                              /* map top | KOS stack bottom */
     printf("shim_iface host self-test: OK (incl. region map)\n");
     return 0;
 }
