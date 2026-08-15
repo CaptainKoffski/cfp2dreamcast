@@ -1,5 +1,6 @@
 #include "shim_iface.h"
 typedef unsigned int u32;
+typedef unsigned short u16;
 typedef unsigned char u8;
 void shim_die(u32, u32, u32);
 void *xmemcpy(void *, const void *, u32);
@@ -496,6 +497,51 @@ int shim_maple_steady(void) {
                 hb = 0xbad10000u | (sb >> 16);
         }
         hex_paint(120, 96, hb);
+    }
+    /* DreamShell round 10: transfer-queue autopsy. Round 9 proved the ARM
+     * driver ALIVE (heartbeat counting) while the main thread spins in
+     * FUN_8c033c50 waiting for its queued command to leave the 3x32-slot
+     * DMA-request rings (head 0x8c0fb8e0; allocator FUN_8c032e00, pump
+     * FUN_8c033400, transport FUN_8c033160). Slots are freed ONLY by the
+     * DMA-end interrupt callback (0x8c0473c0, registered in FUN_8c0400e0
+     * for Holly events; five consecutive IDs 0x15-0x19 get bits
+     * 0x10,8,4,2,1 = ISTNRM bits 15-19 AICA/Ext1/Ext2/Dev/ch2-DMA;
+     * 0x11=PVR-DMA), and only when arrived-mask (slot+0x1e) covers
+     * expected-mask (slot+0x1c). Engines used: SH4 DMAC ch2 DDT
+     * (SAR2/DMATCR2/CHCR2=0x12c1/DMAOR=0x8201) + Holly ch2-DMA
+     * (SB_C2DSTAT/LEN/ST) and PVR-DMA (SB_PD*, SB_PDAPRO=0x6702007f).
+     * Rows (below the GD diag):
+     *   y162: ISTNRM | DMAOR<<16 . C2DST<<8 . PDST<<4 . ADST
+     *   y176: DMATCR2 | CHCR2
+     *   y190: in-flight slot ptr | expected<<16|arrived
+     *         (no slot: 0 | 0xC0.c0.c1.c2 ring counts) */
+    {
+        u32 istnrm = *(volatile u32 *)0xa05f6900;
+        u32 dmaor  = *(volatile u32 *)0xffa00040;
+        u32 c2dst  = *(volatile u32 *)0xa05f6808;
+        u32 pdst   = *(volatile u32 *)0xa05f7c18;
+        u32 adst   = *(volatile u32 *)0xa05f7818;
+        hex_paint(20, 162, istnrm);
+        hex_paint(120, 162, (dmaor << 16) | ((c2dst & 0xfu) << 8)
+                          | ((pdst & 0xfu) << 4) | (adst & 0xfu));
+        hex_paint(20, 176, *(volatile u32 *)0xffa00028);   /* DMATCR2 */
+        hex_paint(120, 176, *(volatile u32 *)0xffa0002c);  /* CHCR2 */
+        /* P1 reads: ring is game-written through the cache, same CPU. */
+        u32 h = 0x8c0fb8e0u;
+        u32 s = *(volatile u32 *)(h + 0x20);
+        if (!s) s = *(volatile u32 *)(h + 0x24);
+        if (!s) s = *(volatile u32 *)(h + 0x28);
+        hex_paint(20, 190, s);
+        u32 r;
+        if (s && (s & 0x1f000000u) == 0x0c000000u)
+            r = ((u32)*(volatile u16 *)(s + 0x1c) << 16)
+              | *(volatile u16 *)(s + 0x1e);
+        else
+            r = 0xc0000000u
+              | ((*(volatile u16 *)(h + 0x30) & 0x3fu) << 16)
+              | ((*(volatile u16 *)(h + 0x36) & 0x3fu) << 8)
+              |  (*(volatile u16 *)(h + 0x3c) & 0x3fu);
+        hex_paint(120, 190, r);
     }
 #endif /* SHIM_PROBES */
     if ((++steady_beat & 63u) == 0) {              /* forensic heartbeats, ~1 Hz at 60 fps */

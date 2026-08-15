@@ -698,6 +698,43 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    few seconds apart — CHANGING value = ARM driver alive → fix targets
    the SH4-side sound pump; FROZEN value = driver died post-handshake →
    fix targets ARM/ARAM state.
+   **Round 9 tester result: ARM DRIVER ALIVE.** Heartbeat 0x5B20 →
+   0x6AF9 across two photos seconds apart (~1 kHz count); spin PC samples
+   8C033C5A/5E; rest identical to rounds 6/8. The wall is SH4-side.
+   **RE of the SH4 side (Ghidra, boot.bin):** the "sound-command rings"
+   are the SDK's generic DMA-TRANSFER-REQUEST queue — head 0x8c0fb8e0,
+   3 priorities × 32 slots × 0x40 B (ring offsets +0x40/+0x840/+0x1040;
+   per-ring write idx/read idx/count at +0x2c..+0x3c; slot: +0 seq,
+   +4 flags (bit3 = channel B), +8 mode 0-7, +0xc len, +0x10 src,
+   +0x14 dst, +0x1c expected-event mask, +0x1e arrived-event mask,
+   +0x28 state, +0x30 chunk count, +0x34/+0x38 chunk strides).
+   Spin site FUN_8c033c50 polls FUN_8c032fe0(last-seq [0x8c0faaa4])
+   until the seq leaves all rings (0x101 = gone, 0x100 = queued).
+   Allocator FUN_8c032e00; pump FUN_8c033400 (one in-flight per ring at
+   +0x20/+0x24/+0x28, channel slots +0x18/+0x1c); transport FUN_8c033160
+   programs, per slot mode: SH4 DMAC ch2 in DDT (SAR2 0xffa00020,
+   DMATCR2=len>>5, CHCR2=0x12c1, DMAOR=0x8201) + Holly ch2-DMA
+   (SB_C2DSTAT 0x5f6800/LEN/ST) or PVR-DMA (SB_PDSTAP 0x5f7c00 block,
+   SB_PDAPRO unlock 0x6702007f; init also sets SB_LMMODE0=0,
+   SB_LMMODE1=1). Slots are freed ONLY by the DMA-end interrupt
+   callback 0x8c0473c0 (registered via FUN_8c03e5a0 in FUN_8c0400e0 for
+   event IDs 0x11-0x13,0x15-0x19 + 0x1b/0x1c→0x8c047668): each event
+   ORs its bit into arrived (+0x1e); five consecutive IDs 0x15-0x19 get
+   bits 0x10,8,4,2,1 = ISTNRM bits 15-19 (AICA/Ext1/Ext2/Dev/ch2-DMA
+   end), 0x11=PVR-DMA end (bit 11); slot completes when
+   arrived ⊇ expected (+0x1c); mode-4 multi-chunk slots reprogram the
+   DMA inside the ISR. So ONE undelivered DMA-end interrupt (or one
+   wedged/blocked DMA) under DreamShell pins the rings full forever
+   while vblank + ARM keep running — exactly the observed state.
+   **Round 10 (deployed): DMA/interrupt autopsy rows** below the GD
+   diag: y162 ISTNRM | DMAOR<<16.C2DST<<8.PDST<<4.ADST; y176 DMATCR2 |
+   CHCR2; y190 in-flight slot ptr | expected<<16|arrived (no slot: 0 |
+   0xC0.c0.c1.c2 ring counts). Same build command + settings. Decode:
+   ISTNRM DMA-end bit pending forever + engines idle → interrupt
+   delivery broken (mask/hook); C2DST or PDST stuck 1 / DMATCR2 > 0 →
+   engine wedged (suspects: DMAOR AE/NMIF, SB_PDAPRO/G2APRO protection
+   under DreamShell); all idle + arrived≠expected → completion event
+   consumed/lost before the game's dispatcher saw it.
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
