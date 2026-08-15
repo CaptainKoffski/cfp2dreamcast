@@ -799,6 +799,62 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    TA-side; y218 CCR | TA_ALLOC_CTRL. Same build command + settings;
    photo of all five rows at the pin.
 
+   **Round 12 HW result (2026-08-16):** ISTNRM 00000010 (vblank latch only) |
+   slot 8C0FB960; mode/flags/chunks 0009AAC0 | expected/arrived **8002 8001**
+   (same pin); src **8CB80000** | dst 10000000 (TA FIFO); **PCW@src P1
+   00000000 | P2 00000000** — cache and RAM agree, both zero → **stale-cache
+   writeback theory DEAD** (no dirty-line divergence); CCR 00000105 =
+   ICE|CB|OCE normal; TA_ALLOC_CTRL 00121213.
+
+   **Round 12 reinterpretation — the real anatomy (emulator capture
+   `baseline12.log`, fork instrumentation C2D/TAEND/TAREG/PVRW):**
+   - The 4-list "healthy choreography" frames (opaque 3460 / modifier 40
+     `w0=81000000` / translucent 720 / transmod 40) are the **load screen
+     itself** rendering (~550 frames), not gameplay. Last STARTRENDER at the
+     bar-full moment; then a long render-silent load stretch (bar frozen at
+     100% — exactly what the tester sees); then the **load→title transition**:
+     SOFTRESET pulse ×2 + TA_ALLOC_CTRL=00121213 (PT list now enabled —
+     also appears in healthy runs, NOT a divergence) + LIST_INIT ×2, then two
+     zero-content closer DMAs: `0c0cf240` len 0x20 and **`0cb80000` len 0x40 —
+     the exact pinned slot src** (P1 form 8CB80000).
+   - The pinned transfer is the **title arena's modifier-list closer**, shape
+     [global][EOL] = 0x40. Queued typed as modifier (expected 8002) but its
+     **content was never built** — a zero first word decodes as EOL ListType=0
+     → TA raises OPAQUE end (arrived 8001) → pin. Slot len bookkeeping says
+     0x40, so the emitter's write-pointer advanced while the stores are
+     missing ⇒ init-vs-submit divergence, not a partial write.
+   - **Flycast reproduces the hang** (`baseline12.log`: zero
+     TAEND/C2D/STARTRENDER for ~6 min after the transition, maple polls only)
+     — never noticed because the emulator health metric ("off=418 streams ≥
+     130") sits upstream of the transition. **And it is nondeterministic**: an
+     identical re-run (`confirm13.log`, same binary+disc) PASSED — `0cb80000`
+     carried a proper modifier global `w0=818c0002`, TAREG/TAEND cl=1..4 clean,
+     title runs (25k STARTRENDERs). Title frame anatomy in the passing run:
+     opaque global via PIO + zero-EOL closer `0c0cf240` 0x20; modifier
+     `0cb80000` [818c0002][EOL] 0x40; translucent `0cc80000` 0xa40; transmod
+     `0ce80000` 0x40; PT `0cf80000` [848c0002][EOL] 0x40 — **single-buffered**
+     (same srcs every frame) ⇒ the globals come from a **one-shot title-arena
+     init** that failing runs never execute before (or after) first submission.
+   - **Unified theory:** the transition outcome depends on load-phase
+     duration/alignment — GDEMU (fast) always lands good, DreamShell serial SD
+     (~10× slower) always lands bad, Flycast (realistic 1.8 MB/s model) flips
+     run-to-run. Matches every observation across all three environments.
+
+   **Round 13 (in flight, emulator-only — no HW round needed):** fork
+   instrumentation added (commit pending): `CLOSERWR` (every CPU store into
+   `0c0cf240`/`0cb80000` closer buffers, PC+PR), `CTRLWR` (capped control
+   watch on load-screen modifier closer `0cb54540` to fingerprint the healthy
+   emitter), `SQWR` (same ranges in `WriteMemBlock_nommu_sq` — SQ flushes
+   bypass addrspace::writet), slot-write ring history (last 96 writes to ring
+   slots `0c0fb920-0c0fb9a0`, dumped from `DMAC_Ch2St` when the transition C2D
+   fires → submit-path PCs), `\n` fixes on C2D/TAEND/TAREG/PVRW lines, and
+   **`FLYCAST_GDSLOW=<N>`** (divides the modeled GD rate in
+   `getGDROMTicks`; N=12 ≈ 150 KB/s ≈ serial dongle) to make the hang
+   deterministic on demand. Runs A (normal) + B (GDSLOW=12) in flight; next:
+   identify the arena-init writer PC from a passing run's CLOSERWR, decompile
+   its gate in Ghidra, then design the real fix (likely shim/loader-side:
+   ensure the init ordering the game gets on fast loads).
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication
