@@ -735,6 +735,41 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    engine wedged (suspects: DMAOR AE/NMIF, SB_PDAPRO/G2APRO protection
    under DreamShell); all idle + arrived≠expected → completion event
    consumed/lost before the game's dispatcher saw it.
+   **Round 10 tester result = ROOT CAUSE.** ISTNRM=0x10 (transient
+   vblank only), DMAOR=0x8201 healthy, C2DST/PDST/ADST all 0,
+   DMATCR2=0, CHCR2=0x12C0 (DE/TE cleared by the game's own ID-0x12
+   ack) → the DMA hardware COMPLETED. In-flight slot 0x8C0FB960
+   (prio 0) pinned with **expected=0x8002, arrived=0x8001**. Decoding
+   via the SDK's event-ack table (0x8c0cefb8, found through dispatcher
+   0x8c0402a0; each ID 0x10-0x1f → [reg, RW1C ack value]): ID 0x12 =
+   ISTNRM bit 19 ch2-DMA end + CHCR2 &= ~3 (matches the observed
+   0x12C0); ID 0x13 = bit 6 TA/YUV transfer end (cb bit 0x8000);
+   **ID 0x18 = bit 8 End-of-Transfer OPAQUE-MODIFIER list (cb bit
+   0x2); ID 0x19 = bit 7 End-of-Transfer OPAQUE list (cb bit 0x1)**
+   (bit names: flycast holly_intc.h:21-23). So the pinned transfer is
+   the game's first TILE-ACCELERATOR display-list DMA — NOT sound (the
+   'sound-command ring' label from rounds 6-9 is retracted; the queue
+   is the SDK's generic transfer manager, and the sound path was
+   exonerated by the ticking ARM heartbeat). The game submitted an
+   opaque-MODIFIER list and waited for bit 8; the TA raised bit 7
+   (OPAQUE) instead. Mechanism (flycast ta_vtx.cpp startList):
+   `if (CurrentList != ListType_None) return true` — **a TA list left
+   OPEN makes the TA ignore the new list-start and finish the STALE
+   list type**. DreamShell renders its UI with the TA and isoldr never
+   resets it; the GDEMU path goes through the BIOS boot which does.
+   The game (written for BIOS-fresh Naomi hardware) inherits an open
+   opaque list → wrong end-of-list event → transfer queue pins full →
+   the 100%-bar hang. Every symptom back to round 1 fits.
+   **Round 11 (deployed): THE FIX** — loader handoff (after
+   irq_disable, next to the MMUCR clear) pulses PVR SOFTRESET
+   0x005f8008 = 3 → 0 (TA bit0 + render pipeline bit1; SDRAM bit2
+   untouched; flycast pvr_regs.cpp:146 `data & 1 → ta_vtx_SoftReset()`)
+   and clears stale latched Holly events (ISTNRM/ISTERR = RW1C,
+   0xffffffff). Loader never uses the TA (framebuffer splash only).
+   Probes kept ON for the confirmation run. Tester round 11: same
+   build command + settings. Expected: full boot → title WITH sound →
+   attract/game. If it still pins: photograph the same probe rows
+   (y162/y176/y190) — the expected/arrived pair will say what changed.
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —

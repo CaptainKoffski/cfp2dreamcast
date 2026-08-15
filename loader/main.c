@@ -259,6 +259,28 @@ int main(void) {
      * in Flycast (no MMU emulation on this path). */
     *(volatile uint32 *)0xff000010 = 0;            /* MMUCR: AT=0, TLB invalid */
 
+    /* TA/PVR to BIOS-fresh state (DreamShell round 11). Booted via isoldr,
+     * nobody has reset the TA since DreamShell rendered its UI with it; the
+     * GDEMU path goes through the BIOS boot, which does. The TA keeps a
+     * sticky current-list registration: a list left OPEN makes it IGNORE the
+     * game's list-start and raise the stale type's end-of-list interrupt
+     * (flycast ta_vtx.cpp startList: "if (CurrentList != ListType_None)
+     * return true"). HW round 10 caught exactly that at the 100%-bar pin:
+     * first TA transfer stuck with expected=8002 (opaque-MODIFIER end,
+     * ISTNRM bit 8) vs arrived=8001 (OPAQUE end, bit 7) -- the SDK transfer
+     * queue waits forever. SOFTRESET 0x005f8008 (flycast pvr_regs.h:17,
+     * pvr_regs.cpp:146 "data & 1 -> ta_vtx_SoftReset()"): pulse TA (bit0) +
+     * render pipeline (bit1); bit2 = SDRAM i/f stays untouched. Then drop
+     * stale latched Holly events (ISTNRM/ISTERR are RW1C) so the game's
+     * freshly-enabled handlers don't fire on DreamShell leftovers. The
+     * loader itself never uses the TA (framebuffer splash only) and irqs
+     * are already off -- nothing here depends on the cleared state. */
+    *(volatile uint32 *)0xa05f8008 = 3;
+    (void)*(volatile uint32 *)0xa05f8008;          /* posted-write flush */
+    *(volatile uint32 *)0xa05f8008 = 0;
+    *(volatile uint32 *)0xa05f6900 = 0xffffffff;   /* ISTNRM: clear latches */
+    *(volatile uint32 *)0xa05f690c = 0xffffffff;   /* ISTERR: clear latches */
+
     void (*ho)(uint32, uint32, uint32, uint32) =
         (void *)P2ADDR(HANDOFF_SCRATCH);           /* run the stub uncached */
     ho(P2ADDR(STAGING_ADDR), P2ADDR(GAME_LOAD_ADDR), GAME_LEN, GAME_ENTRY);
