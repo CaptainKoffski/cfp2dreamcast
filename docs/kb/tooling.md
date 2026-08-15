@@ -98,6 +98,14 @@ input, and serial pokes. Distinct from the release Flycast above.
     *next* launch that silently blocks boot (process alive at ~0% CPU, guest
     never runs, zero cartlog). This was the mysterious "post-sleep launch fails"
     blocker; a reboot does **not** fix it — this key does.
+  - **`-config` flags must come BEFORE the disc path** — everything after the
+    first non-flag argument is silently dropped (only a one-line
+    `W[COMMON]: Rest of command line ignored` in stdout;
+    `core/cfg/cl.cpp:213`). A trailing `-config config:Dynarec.Enabled=no`
+    leaves the DYNAREC on — cost round 13 a fake "nondeterministic hang"
+    detour: interpreter runs hang at the load→title transition, dynarec runs
+    sail through, and the mode difference masqueraded as run-to-run flakiness.
+    Verify every headless run by grepping its stdout for `ignored`.
 - **Phase 3 interpreter-mode capture:** to log every guest PC/SP (required for
   `CARTDMAPC`/`MAPLEPC`/`BIOSEXEC` lines), the dynarec must be off:
   add `Dynarec.Enabled=no` under `[config]` in `emu.cfg` (or set it in the

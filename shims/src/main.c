@@ -417,9 +417,8 @@ int shim_maple_steady(void) {
 #if SHIM_PROBES
     /* DreamShell round 6: probes revived for the serial-SD wedge hunt.
      * Painter switched shim_hex -> hex_paint (shim_hex is SHIM_HUD-gated and
-     * the HUD stays off); y68-right now paints EXPEVT instead of MMUCR (the
-     * loader clear + per-tick clear below make MMUCR a known 0; EXPEVT
-     * classifies a fault-restart pin: 0x040/0x060 TLB miss r/w, 0x0e0/0x100
+     * the HUD stays off); y68-right paints EXPEVT (classifies a
+     * fault-restart pin: 0x040/0x060 TLB miss r/w, 0x0e0/0x100
      * address error r/w).   y68: SPC | EXPEVT     y82: TEA | VBR */
     void hex_paint(unsigned int, unsigned int, unsigned int);
     u32 spc; __asm__ volatile ("stc spc,%0" : "=r"(spc));
@@ -459,17 +458,22 @@ int shim_maple_steady(void) {
      * logs the confession: EXPEVT (0xff000024) = last exception cause,
      * TEA (0xff00000c) = last faulting data address.
      *   y68: SPC | EXPEVT     y82: TEA | SGR  */
-    /* HW round 8: EXPEVT=0x040 (TLB MISS read), TEA=0x58c1fc94. A TLB miss is
-     * impossible with MMUCR.AT=0 -- and a Naomi game assumes AT=0 forever (it
-     * has no TLB handlers; the settings code freely uses P0-mirror pointers
-     * 0x0c01f100/30). Something on the real DC has the MMU ENABLED. Probe:
-     * paint MMUCR before treatment. Medicine: force MMUCR=0 every tick -- if
-     * AT was the disease, the pinned load's eternal retry SUCCEEDS the moment
-     * translation is off and the thread walks free. Also paint VBR (whose
-     * exception table is live).   y68: SPC | MMUCR    y82: TEA | VBR  */
+    /* HW round 8 saw EXPEVT=0x040 (TLB MISS read) and prescribed "force
+     * MMUCR=0 every tick". Round 13 retracts that medicine: THIS GAME RUNS
+     * MMU-ON BY DESIGN -- it maps RAM through the store-queue window via
+     * UTLB entries (SQ-mapper 0x8c0311a4, gated on MMUCR.AT; enable write
+     * 0x40005 at 0x8c03b1c0). Forcing AT=0 has two failure masks, both
+     * observed on HW: if the clear lands before the game's SQ-mapper runs,
+     * the mapper SKIPS loading its TLB entries and the later SQ PREF
+     * fault-restarts forever (round 8's eternal TLB-miss pin); if AT stays
+     * cleared past the enable, SQ writes silently fall back to QACR area 0
+     * and vanish -- the load->title closer buffers stay zero and the DMA
+     * queue pins on the never-raised modifier-list-end event (rounds 9-12).
+     * MMUCR is now owned by the game; gdc_call save/clears/restores it
+     * around each isoldr syscall (gdstack.S). Read-only observation kept for
+     * the serial log.  y68: SPC | EXPEVT  y82: TEA | VBR */
     u32 mmucr = *(volatile u32 *)0xff000010;
     hex_paint(120, 68, *(volatile u32 *)0xff000024);   /* EXPEVT */
-    *(volatile u32 *)0xff000010 = 0;               /* MMU off. TLB flushed (TI=0 fine). */
     u32 vbr; __asm__ volatile ("stc vbr,%0" : "=r"(vbr));
     u32 sgr; __asm__ volatile ("stc sgr,%0" : "=r"(sgr));
     hex_paint(20, 82, *(volatile u32 *)0xff00000c);

@@ -823,37 +823,77 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
      → TA raises OPAQUE end (arrived 8001) → pin. Slot len bookkeeping says
      0x40, so the emitter's write-pointer advanced while the stores are
      missing ⇒ init-vs-submit divergence, not a partial write.
-   - **Flycast reproduces the hang** (`baseline12.log`: zero
-     TAEND/C2D/STARTRENDER for ~6 min after the transition, maple polls only)
-     — never noticed because the emulator health metric ("off=418 streams ≥
-     130") sits upstream of the transition. **And it is nondeterministic**: an
-     identical re-run (`confirm13.log`, same binary+disc) PASSED — `0cb80000`
-     carried a proper modifier global `w0=818c0002`, TAREG/TAEND cl=1..4 clean,
-     title runs (25k STARTRENDERs). Title frame anatomy in the passing run:
-     opaque global via PIO + zero-EOL closer `0c0cf240` 0x20; modifier
-     `0cb80000` [818c0002][EOL] 0x40; translucent `0cc80000` 0xa40; transmod
-     `0ce80000` 0x40; PT `0cf80000` [848c0002][EOL] 0x40 — **single-buffered**
-     (same srcs every frame) ⇒ the globals come from a **one-shot title-arena
-     init** that failing runs never execute before (or after) first submission.
-   - **Unified theory:** the transition outcome depends on load-phase
-     duration/alignment — GDEMU (fast) always lands good, DreamShell serial SD
-     (~10× slower) always lands bad, Flycast (realistic 1.8 MB/s model) flips
-     run-to-run. Matches every observation across all three environments.
+   - **Flycast reproduces the hang deterministically in interpreter mode**
+     (`baseline12.log`, re-confirmed `v4-unfixed.log`: transition C2D
+     `src=0cb80000 len=40 w0=00000000`, then zero TAEND/STARTRENDER forever,
+     maple polls only) — never noticed before because the emulator health
+     metric ("off=418 streams ≥ 130") sits upstream of the transition.
+     Mid-investigation "nondeterminism" was two launch artifacts, both now in
+     `tooling.md`: `-config` flags AFTER the disc path are silently dropped
+     (runs were dynarec, which sails through), and the
+     `build/[GDI] .../disc.gdi` release-set copy was a stale Aug-11 build
+     (plain `make` refreshes only `build/disc.gdi` + tracks) — every
+     "passing identical re-run" was actually the old disc.
+   - Title frame anatomy in a passing run: opaque global via PIO + zero-EOL
+     closer `0c0cf240` 0x20; modifier `0cb80000` [818c0002][EOL] 0x40;
+     translucent `0cc80000` 0xa40; transmod `0ce80000` 0x40; PT `0cf80000`
+     [848c0002][EOL] 0x40 — single-buffered (same srcs every frame), content
+     written by **store-queue bursts immediately before each frame's
+     submission** (SQWR lines ~20 log entries before the C2D; CLOSERWR=0 —
+     never plain stores).
 
-   **Round 13 (in flight, emulator-only — no HW round needed):** fork
-   instrumentation added (commit pending): `CLOSERWR` (every CPU store into
-   `0c0cf240`/`0cb80000` closer buffers, PC+PR), `CTRLWR` (capped control
-   watch on load-screen modifier closer `0cb54540` to fingerprint the healthy
-   emitter), `SQWR` (same ranges in `WriteMemBlock_nommu_sq` — SQ flushes
-   bypass addrspace::writet), slot-write ring history (last 96 writes to ring
-   slots `0c0fb920-0c0fb9a0`, dumped from `DMAC_Ch2St` when the transition C2D
-   fires → submit-path PCs), `\n` fixes on C2D/TAEND/TAREG/PVRW lines, and
-   **`FLYCAST_GDSLOW=<N>`** (divides the modeled GD rate in
-   `getGDROMTicks`; N=12 ≈ 150 KB/s ≈ serial dongle) to make the hang
-   deterministic on demand. Runs A (normal) + B (GDSLOW=12) in flight; next:
-   identify the arena-init writer PC from a passing run's CLOSERWR, decompile
-   its gate in Ghidra, then design the real fix (likely shim/loader-side:
-   ensure the init ordering the game gets on fast loads).
+   **Round 13 — ROOT CAUSE FOUND AND FIXED (2026-08-16, emulator-only).**
+   Fork instrumentation (fork commits `2a22e6681`, `8bccf2b49`): `CLOSERWR`
+   (CPU stores into `0c0cf240`/`0cb80000`), `CTRLWR` (control watch on
+   load-screen closer `0cb54540`), `SQWR` (same ranges in
+   `WriteMemBlock_nommu_sq` — SQ flushes bypass addrspace::writet), slot-write
+   ring dump at the transition C2D, `MMUCRWR` (MMUCR write timeline), and
+   `FLYCAST_GDSLOW=<N>` (GD rate divider; N=12 ≈ 150 KB/s ≈ serial dongle).
+
+   **Evidence chain:** SQWR lines print area-3 destinations, which in
+   Flycast's SQ model is only reachable via `sqWrite<true>` — **the
+   MMU-translated path** (flycast `core/hw/sh4/storeq.cpp`: nommu area-3
+   goes through fast paths that bypass `WriteMemBlock_nommu_sq`) ⇒ **the
+   game runs MMU-on and maps RAM through the SQ window via UTLB entries**.
+   Game-side confirmation in boot.bin: SQ-mapper `0x8c0311a4` reads MMUCR,
+   tests AT, and **skips the whole mapping when AT=0**; loops TLB page
+   loader `0x8c03b1c8` over 0xE0000000-based 1 MB pages onto RAM (pools at
+   file 0x11298/0x1b2bc: 0xff000010, page masks). MMUCR write timeline
+   (MMUCRWR): BIOS clears ×2 → our loader handoff clear (`pc=8c0103d6`) →
+   **the game's enable `val=00040005` (AT|TI|URB) at `pc=8c03b1c0`**, right
+   at its TLB loader.
+
+   **Root cause — our own shim forced AT=0, two writers:**
+   1. `shims/src/gdstack.S` — permanent post-syscall `MMUCR=0` ("games
+      assume AT=0 forever" — wrong for this game).
+   2. `shims/src/main.c` probe block — the round-8 "medicine": a per-tick
+      `MMUCR=0` from ISR context (diag builds; `MMUCRWR pc=8cfc05ba`).
+   With AT forced 0 past the game's enable, the SQ bursts fall back to QACR
+   mapping (area 0 — writes vanish, no fault): the closer buffer stays
+   zero, the TA raises opaque-end instead of modifier-end (a zero EOL PCW →
+   ListType 0), the slot pins on expected 8002 / arrived 8001. Round-12's
+   P1==P2==0 autopsy = the bytes never reached RAM from either view. And
+   the round-8 signature was the SAME root cause's other mask: an AT=0
+   window while the SQ-mapper ran → no TLB entries → later SQ PREF with
+   AT=1 fault-restarts forever (EXPEVT=0x040 eternal TLB-miss pin).
+   GDEMU worked because the verified build was MAIN branch (no sanitizer,
+   no probes).
+
+   **Fix (repo commits `11b4c79` + probe-clear removal):** (a) gdc_call now
+   SAVES the game's MMUCR on entry, holds it 0 for the duration of the
+   isoldr call (the rounds-2-5 requirement — now also covering the FIRST
+   call, which the old clear-after never protected), and RESTORES it on
+   exit; the 0-store keeps TI=0 so the game's UTLB entries survive (SH7091:
+   MMUCR.TI=1 is the only TLB-invalidate trigger; flycast ccn.cpp
+   `CCN_MMUCR_write` models the same). (b) The per-tick clear is deleted —
+   MMUCR is owned by the game. `make test` green.
+
+   **Ablation (interpreter, fresh discs, `build/disc.gdi`):**
+   | build | transition buffer | result |
+   |---|---|---|
+   | unfixed round-12 (`v4-unfixed.log`) | `w0=00000000` | PIN (STARTRENDER frozen at 541) |
+   | gdstack fix only (`v3-fixed.log`) | `w0=00000000` | PIN — per-tick clear alone is fatal |
+   | both fixes (`v5-bothfixes.log`) | — | verification run, see below |
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
