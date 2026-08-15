@@ -515,33 +515,68 @@ int shim_maple_steady(void) {
      *   y176: DMATCR2 | CHCR2
      *   y190: in-flight slot ptr | expected<<16|arrived
      *         (no slot: 0 | 0xC0.c0.c1.c2 ring counts) */
+    /* DreamShell round 12: pinned-slot AUTOPSY. Round 10/11 proved: DMA
+     * engines idle+drained, ch2-DMA-end arrived (0x8000), but the TA closed
+     * an OPAQUE list (arrived 0x1 = ISTNRM bit 7) where the slot expected
+     * OPAQUE-MODIFIER end (0x2 = bit 8) -- and a handoff TA SOFTRESET
+     * changed nothing (round 11). The TA picks the end interrupt from the
+     * list type REGISTERED by the first global param's PCW (flycast ta.cpp
+     * ta_handle_cmd: cl==7 -> cl=pcw.ListType; EOL -> int[cl]) -- so either
+     * the game BUILT an opaque-typed list while wiring a modifier
+     * descriptor, or the DMA source was recycled/clobbered before flight.
+     * Read the actual bytes: PCW bits 31:29 = para type (4=global poly/
+     * modvol), bits 26:24 = list type (0=OP, 1=OP-MOD).
+     *   y162: ISTNRM | slot ptr
+     *   y176: mode<<24|flags<<16|chunks | expected<<16|arrived
+     *   y190: src | dst          y204: PCW@src | PCW@(src+len-0x20)
+     *   y218: len | TA_ALLOC_CTRL */
     {
-        u32 istnrm = *(volatile u32 *)0xa05f6900;
-        u32 dmaor  = *(volatile u32 *)0xffa00040;
-        u32 c2dst  = *(volatile u32 *)0xa05f6808;
-        u32 pdst   = *(volatile u32 *)0xa05f7c18;
-        u32 adst   = *(volatile u32 *)0xa05f7818;
-        hex_paint(20, 162, istnrm);
-        hex_paint(120, 162, (dmaor << 16) | ((c2dst & 0xfu) << 8)
-                          | ((pdst & 0xfu) << 4) | (adst & 0xfu));
-        hex_paint(20, 176, *(volatile u32 *)0xffa00028);   /* DMATCR2 */
-        hex_paint(120, 176, *(volatile u32 *)0xffa0002c);  /* CHCR2 */
-        /* P1 reads: ring is game-written through the cache, same CPU. */
-        u32 h = 0x8c0fb8e0u;
+        u32 h = 0x8c0fb8e0u;                       /* P1: game writes cached, same CPU */
         u32 s = *(volatile u32 *)(h + 0x20);
         if (!s) s = *(volatile u32 *)(h + 0x24);
         if (!s) s = *(volatile u32 *)(h + 0x28);
-        hex_paint(20, 190, s);
-        u32 r;
-        if (s && (s & 0x1f000000u) == 0x0c000000u)
-            r = ((u32)*(volatile u16 *)(s + 0x1c) << 16)
-              | *(volatile u16 *)(s + 0x1e);
-        else
-            r = 0xc0000000u
-              | ((*(volatile u16 *)(h + 0x30) & 0x3fu) << 16)
-              | ((*(volatile u16 *)(h + 0x36) & 0x3fu) << 8)
-              |  (*(volatile u16 *)(h + 0x3c) & 0x3fu);
-        hex_paint(120, 190, r);
+        hex_paint(20, 162, *(volatile u32 *)0xa05f6900);   /* ISTNRM */
+        hex_paint(120, 162, s);
+        if (s && (s & 0x1f000000u) == 0x0c000000u) {
+            u32 mode  = *(volatile u32 *)(s + 8);
+            u32 flags = *(volatile u32 *)(s + 4);
+            u32 chnk  = *(volatile u32 *)(s + 0x30);
+            u32 len   = *(volatile u32 *)(s + 0xc);
+            u32 src   = *(volatile u32 *)(s + 0x10);
+            u32 dst   = *(volatile u32 *)(s + 0x14);
+            hex_paint(20, 176, ((mode & 0xffu) << 24) | ((flags & 0xffu) << 16)
+                             | (chnk & 0xffffu));
+            hex_paint(120, 176, ((u32)*(volatile u16 *)(s + 0x1c) << 16)
+                              | *(volatile u16 *)(s + 0x1e));
+            hex_paint(20, 190, src);
+            hex_paint(120, 190, dst);
+            /* Flycast healthy baseline (round 12): frame = SOFTRESET+
+             * LIST_INIT + C2D opaque(w0=80000000,len 3460) + modifier
+             * (w0=81000000, len 0x40!) + translucent + transmod. The 0x40 B
+             * modifier buffer is CPU-written right before queueing: if its
+             * two cache lines never reach RAM, the DMA feeds the TA stale
+             * bytes -- a stale ZERO word is an End_Of_List with ListType=0
+             * = OPAQUE end (flycast ta.cpp EOL: cl==7 -> cl=pcw.ListType)
+             * = the observed arrived=8001. Cached-vs-uncached readback of
+             * the source word proves/disproves it live:
+             *   y204: PCW@src via P1 (cache) | via P2 (RAM truth)
+             *   y218: CCR | TA_ALLOC_CTRL */
+            u32 pcw_c = 0xbad0bad0u, pcw_r = 0xbad0bad0u;
+            if ((src & 0x1f000000u) == 0x0c000000u) {
+                u32 pa = src & 0x1fffffffu;
+                pcw_c = *(volatile u32 *)(pa | 0x80000000u);   /* P1 */
+                pcw_r = *(volatile u32 *)(pa | 0xa0000000u);   /* P2 */
+            }
+            hex_paint(20, 204, pcw_c);
+            hex_paint(120, 204, pcw_r);
+            hex_paint(20, 218, *(volatile u32 *)0xff00001cu);  /* CCR */
+        } else {
+            hex_paint(20, 176, 0xc0000000u
+                | ((*(volatile u16 *)(h + 0x30) & 0x3fu) << 16)
+                | ((*(volatile u16 *)(h + 0x36) & 0x3fu) << 8)
+                |  (*(volatile u16 *)(h + 0x3c) & 0x3fu));
+        }
+        hex_paint(120, 218, *(volatile u32 *)0xa05f8140);  /* TA_ALLOC_CTRL */
     }
 #endif /* SHIM_PROBES */
     if ((++steady_beat & 63u) == 0) {              /* forensic heartbeats, ~1 Hz at 60 fps */

@@ -770,6 +770,34 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    build command + settings. Expected: full boot → title WITH sound →
    attract/game. If it still pins: photograph the same probe rows
    (y162/y176/y190) — the expected/arrived pair will say what changed.
+   **Round 11 tester result: NO CHANGE** — identical readings
+   (expected=8002/arrived=8001). Theory falsified; Flycast baseline
+   (fork logging: C2D DMA w/ first source word, TAREG/TAEND, PVR reg
+   writes) explains why: **the game pulses SOFTRESET=1→0 +
+   TA_LIST_INIT ITSELF every frame** — the handoff reset was
+   redundant. Healthy per-frame choreography: C2D opaque
+   (w0=80000000, ~0x3460 B) → STARTRENDER → modifier (w0=81000000,
+   **len 0x40** = one global + one EOL) → translucent (82000000,
+   ~0x720) → transmod (83000000, 0x40); the two 0x40-byte modifier
+   lists are CPU-written moments before queueing. **Leading
+   hypothesis: stale bytes delivered to the TA** — a stale ZERO first
+   word decodes as End-Of-List with ListType=0, which makes the TA
+   raise OPAQUE end (flycast ta.cpp: EOL with cl==7 →
+   cl=pcw.ListType) = exactly arrived 8001, twice-opaque, no
+   modifier-end, first frame only. Cache-policy audit: KOS
+   CCR_DEFAULT (tools/kos dc/cache.h:42) includes **CCR_CB = P1
+   copy-back**, and the game's boot stub (0x8c0210f4, mask 0x89af |
+   0x800) READ-MODIFY-WRITES CCR — it inherits the boot
+   environment's cache policy wholesale. BUT our KOS loader runs on
+   both paths (arch_main → cache_write_ccr(CCR_DEFAULT)), so CCR
+   should be path-identical — needs the live HW reading to close.
+   **Round 12 (deployed): pinned-slot autopsy** — y162 ISTNRM | slot
+   ptr; y176 mode<<24|flags<<16|chunks | expected<<16|arrived; y190
+   src | dst; **y204 PCW@src read via P1 (cache) | via P2 (RAM
+   truth)** — divergent cells = dirty-line/writeback proof, both
+   zero = the game never built the list, both 81000000 = data fine →
+   TA-side; y218 CCR | TA_ALLOC_CTRL. Same build command + settings;
+   photo of all five rows at the pin.
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
