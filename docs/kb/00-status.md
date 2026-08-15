@@ -644,6 +644,31 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    If it freezes at the bar again: per-syscall clear insufficient → next
    build gates a per-tick clear behind a DreamShell detect. If it freezes
    post-bar silently: AICA theory needs the SPC probes back.
+   **Round 7 verdict: REGRESSION — spu_disable() froze the game's EARLIEST
+   init** (bar 0%, and with probes on NOT ONE cyan row painted = the vblank
+   engine never started; gdc_call never ran, so the loader's spu_disable is
+   the only live change). RE decode of the game's sound boot (Ghidra;
+   FUN_8c02a4f4): a full SEGA-SDK **"SDRV"** driver boot — validates the
+   blob magic 0x56524453 "SDRV" (version window 2.50–2.xx) from the 1 MB
+   image, then ARM halt (FUN_8c038948, RMW 0xa0702c00|1) → ARAM ops →
+   blob copy → ARM run (FUN_8c0389b8, &~1) → **three blocking waits**: the
+   heartbeat word (ARAM addr = [[0x8c0e6898]+0x98]+0x18, reader
+   FUN_8c03a3a4) must leave magic "DMPD" (0x44504d44), then count past 10,
+   then a state field must read "EXEC" (0x43455845). This boot provably
+   TOLERATES a foreign driver running at entry (round 6 booted through with
+   DreamShell's driver live) but NOT our long-pre-held ARM +
+   spu_reset_chans state — mechanism unresolved; spu_disable REVERTED
+   empirically. The round-6 post-preload allocator pin therefore happened
+   with a driver that HAD passed its boot handshake — whether the ARM died
+   later or the SH4-side pump stopped is exactly what round 8 measures.
+   **Round 8 (deployed, make test green, mainline attract re-verified, diag
+   build boots 132 streams in Flycast): spu_disable reverted + new
+   SHIM_PROBES liveness cell** — y96: [0x8c0e6898] sound ctx | ARM driver
+   heartbeat (ticking = alive; frozen = dead; 0xBADxxxxx = handshake chain
+   not valid yet). Tester round 8:
+   `make -C shims clean && make DEFS='-DSHIM_GD_DIAG=1 -DSHIM_PROBES=1'`,
+   same DreamShell settings. Expected: round-6-like boot (bar fills) →
+   post-preload pin → photo of y96 decides ARM-dead vs pump-dead.
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —

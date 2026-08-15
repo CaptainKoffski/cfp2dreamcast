@@ -473,6 +473,26 @@ int shim_maple_steady(void) {
     u32 sgr; __asm__ volatile ("stc sgr,%0" : "=r"(sgr));
     hex_paint(20, 82, *(volatile u32 *)0xff00000c);
     hex_paint(120, 82, vbr);
+    /* DreamShell round 8: SDK sound-driver liveness. The game's SDRV boot
+     * (FUN_8c02a4f4) keeps [0x8c0e6894]=init flag (1 = up) and
+     * [0x8c0e6898]=sound ctx; the driver heartbeat word sits in ARAM at
+     * ([ctx+0x98])+0x18 (reader FUN_8c03a3a4: waits for it to leave "DMPD"
+     * then count past 10). y96: ctx | heartbeat -- a TICKING right cell =
+     * ARM driver alive; frozen = dead; 0xBADxxxxx = chain not valid yet. */
+    {
+        u32 sfl = *(volatile u32 *)0xac0e6894;
+        u32 sct = *(volatile u32 *)0xac0e6898;
+        hex_paint(20, 96, sct);
+        u32 hb = 0xbad00000u | (sfl & 0xffffu);
+        if (sfl == 1 && (sct & 0x1f000000u) == 0x0c000000u) {
+            u32 sb = *(volatile u32 *)(0xa0000000u | ((sct & 0x1fffffffu) + 0x98u));
+            if ((sb & 0x1fe00000u) == 0x00800000u)          /* ARAM bus addr */
+                hb = *(volatile u32 *)(0xa0000000u | (sb + 0x18u));
+            else
+                hb = 0xbad10000u | (sb >> 16);
+        }
+        hex_paint(120, 96, hb);
+    }
 #endif /* SHIM_PROBES */
     if ((++steady_beat & 63u) == 0) {              /* forensic heartbeats, ~1 Hz at 60 fps */
         u32 ph = steady_beat & 64u;
