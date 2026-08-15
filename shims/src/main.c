@@ -414,8 +414,15 @@ int shim_maple_steady(void) {
                          * solved (MMU). Flip to 1 only for a new HW stall hunt. */
 #endif
 #if SHIM_PROBES
+    /* DreamShell round 6: probes revived for the serial-SD wedge hunt.
+     * Painter switched shim_hex -> hex_paint (shim_hex is SHIM_HUD-gated and
+     * the HUD stays off); y68-right now paints EXPEVT instead of MMUCR (the
+     * loader clear + per-tick clear below make MMUCR a known 0; EXPEVT
+     * classifies a fault-restart pin: 0x040/0x060 TLB miss r/w, 0x0e0/0x100
+     * address error r/w).   y68: SPC | EXPEVT     y82: TEA | VBR */
+    void hex_paint(unsigned int, unsigned int, unsigned int);
     u32 spc; __asm__ volatile ("stc spc,%0" : "=r"(spc));
-    shim_hex(20, 68, spc);
+    hex_paint(20, 68, spc);
     /* HW round 4 (ra came back 8c02ed8c = the NORMAL service call site, both
      * worlds). Call graph (Ghidra): pump site lives in service FUN_8c02ec08,
      * whose ONLY caller is per-frame callback FUN_8c02e7d8 (vblank-registered
@@ -460,12 +467,12 @@ int shim_maple_steady(void) {
      * translation is off and the thread walks free. Also paint VBR (whose
      * exception table is live).   y68: SPC | MMUCR    y82: TEA | VBR  */
     u32 mmucr = *(volatile u32 *)0xff000010;
-    shim_hex(120, 68, mmucr);
+    hex_paint(120, 68, *(volatile u32 *)0xff000024);   /* EXPEVT */
     *(volatile u32 *)0xff000010 = 0;               /* MMU off. TLB flushed (TI=0 fine). */
     u32 vbr; __asm__ volatile ("stc vbr,%0" : "=r"(vbr));
     u32 sgr; __asm__ volatile ("stc sgr,%0" : "=r"(sgr));
-    shim_hex(20, 82, *(volatile u32 *)0xff00000c);
-    shim_hex(120, 82, vbr);
+    hex_paint(20, 82, *(volatile u32 *)0xff00000c);
+    hex_paint(120, 82, vbr);
 #endif /* SHIM_PROBES */
     if ((++steady_beat & 63u) == 0) {              /* forensic heartbeats, ~1 Hz at 60 fps */
         u32 ph = steady_beat & 64u;

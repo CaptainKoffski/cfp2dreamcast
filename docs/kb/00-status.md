@@ -591,6 +591,28 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    boots: ship (diag off). If it freezes with the same signature: both
    surfaces exonerated, next dig is the isoldr coroutine/park mechanics
    under our call pattern.
+   **Round 5 verdict: STILL FROZEN, identical numbers, with image AND heap
+   in the measured-clean band** — every placement/trample surface is now
+   conclusively exonerated (image, heap, lock byte, vector, data, caller
+   stack, FPU). Round 6 (deployed): stop inferring, read the wedged
+   instruction directly — the vblank ISR provably survives these wedges
+   (screen stays lit), so the **SHIM_PROBES SPC sampler from the MMU saga
+   is revived** (main.c; painter switched to the unconditional hex_paint —
+   shim_hex is SHIM_HUD-gated — and y68-right upgraded MMUCR→EXPEVT:
+   0x040/0x060 = TLB miss r/w, 0x0e0/0x100 = address error r/w). Rows:
+   y68 = SPC (the wedged thread's PC) | EXPEVT, y82 = TEA | VBR. gd.c grew
+   a syscall-phase tracer (row y148): left = syscall IN FLIGHT
+   (0xAAAA000n), right = last RETURNED (0xAAAA800n); n: 1=read SEND,
+   2=EXEC, 3=CHECK, 4=init SEND, 5=init poll, 6=sysinit — recovery ladder
+   now instrumented too. Address decode with Memory=0x8cf80000: SPC in
+   0x8cf8xxxx = inside isoldr (offset = position in the isoldr loader
+   binary), 0x8c0010xx-0x8c00bxxx = BIOS syscall RAM, 0x8c020000-0x8c120000
+   = game image, ≥0x8c120000 = game streamed/decompressed code, 0x8cfc0xxx
+   = shim. Tester build: `make -C shims clean &&
+   make DEFS='-DSHIM_GD_DIAG=1 -DSHIM_PROBES=1'` (probe paints kill
+   Flycast's present — round-12 — so this build is verified boots+streams
+   via cartlog, not screenshots; HW-only diagnostics as in probe rounds
+   4-11). Same DreamShell settings (Memory 0x8cf80000, Heap 0x8cf90000).
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —

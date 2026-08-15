@@ -51,8 +51,18 @@ void shim_die(u32, u32, u32);
 void hex_paint_c(unsigned int, unsigned int, unsigned int,
                  unsigned short, unsigned short);
 #define GD_DIAG(x, y, v) hex_paint_c((x), (y), (v), 0xffff, 0x001f)
+/* Syscall-phase tracer (row y=148): left cell = syscall IN FLIGHT
+ * (0xAAAA000n), right cell = last syscall that RETURNED (0xAAAA800n).
+ * n: 1=read SEND, 2=EXEC, 3=CHECK, 4=init SEND, 5=init poll, 6=sysinit.
+ * A frozen photo reads directly: left has a code the right lacks -> the
+ * wedge is INSIDE that syscall; both matching -> wedge is in shim/game
+ * code between syscalls. */
+#define GD_PHASE(n) GD_DIAG(20, 148, 0xAAAA0000u | (n))
+#define GD_RET(n)   GD_DIAG(120, 148, 0xAAAA8000u | (n))
 #else
 #define GD_DIAG(x, y, v) ((void)0)
+#define GD_PHASE(n) ((void)0)
+#define GD_RET(n)   ((void)0)
 #endif
 
 /* Raw CHECK status word of the last hard failure -- painted by cart.c's death
@@ -69,11 +79,15 @@ u32 gd_last_err = 0xcafe0000;
  * drive for the rest of the session. */
 static void gd_init_drive(void) {
     u32 stat[4], guard = 0;
+    GD_PHASE(4);
     int req = GDC((u32)CMD_INIT, 0, 0, GD_SEND);
+    GD_RET(4);
     if (req <= 0) return;
     for (;;) {
+        GD_PHASE(5);
         GDC(0, 0, 0, GD_EXEC);
         int s = GDC((u32)req, (u32)stat, 0, GD_CHECK);
+        GD_RET(5);
         if (s == GD_COMPLETED || s <= GD_FAILED) return;
         if (s == GD_NOT_FOUND && guard > 1000000u) return;
         if (++guard > 100000000u) shim_die(5, 0xdead1217, 0);
@@ -89,7 +103,7 @@ static void gd_init_drive(void) {
  * (KOS syscalls.c FUNC_GDROM_INIT) rebuilds that state from scratch; callable
  * even with the queue wedged (it's a direct entry, not a queued command). */
 #define GD_SYSINIT 3
-static void gd_sys_reinit(void) { GDC(0, 0, 0, GD_SYSINIT); }
+static void gd_sys_reinit(void) { GD_PHASE(6); GDC(0, 0, 0, GD_SYSINIT); GD_RET(6); }
 
 int gd_read_sectors(void *dst, u32 fad, u32 n) {
     /* Real-HW round 9: first in-game stream died red with an instant error.
@@ -106,12 +120,18 @@ int gd_read_sectors(void *dst, u32 fad, u32 n) {
         u32 param[4], stat[4], guard = 0;
         param[0] = fad; param[1] = n; param[2] = (u32)dst; param[3] = 0;
         GD_DIAG(120, 134, fad);
+        GD_PHASE(1);
         int req = GDC((u32)CMD_PIOREAD, (u32)param, 0, GD_SEND);
+        GD_RET(1);
         GD_DIAG(20, 120, (u32)req);
         if (req <= 0) { gd_last_err = 0xcafe0002u; continue; }  /* send refused: recover+retry */
         for (;;) {
+            GD_PHASE(2);
             GDC(0, 0, 0, GD_EXEC);           /* pump the drive state machine */
+            GD_RET(2);
+            GD_PHASE(3);
             int s = GDC((u32)req, (u32)stat, 0, GD_CHECK);
+            GD_RET(3);
             if ((guard & 0xffffu) == 0) { GD_DIAG(120, 120, (u32)s); GD_DIAG(20, 134, guard); }
             if (s == GD_COMPLETED) return 0;
             if (s <= GD_FAILED) { gd_last_err = stat[0]; break; } /* hard error: retry */
@@ -163,12 +183,18 @@ int gd_read_sectors_dma(u32 phys, u32 fad, u32 n) {
         u32 param[4], stat[4], guard = 0;
         param[0] = fad; param[1] = n; param[2] = phys; param[3] = 0;
         GD_DIAG(120, 134, fad);
+        GD_PHASE(1);
         int req = GDC((u32)CMD_DMAREAD, (u32)param, 0, GD_SEND);
+        GD_RET(1);
         GD_DIAG(20, 120, (u32)req);
         if (req <= 0) { gd_last_err = 0xcafe0002u; continue; }
         for (;;) {
+            GD_PHASE(2);
             GDC(0, 0, 0, GD_EXEC);          /* pump the drive + DMA state machine */
+            GD_RET(2);
+            GD_PHASE(3);
             int s = GDC((u32)req, (u32)stat, 0, GD_CHECK);
+            GD_RET(3);
             if ((guard & 0xffffu) == 0) { GD_DIAG(120, 120, (u32)s); GD_DIAG(20, 134, guard); }
             if (s == GD_COMPLETED) {
                 *(volatile u32 *)0xa05f6900 = (1u << 14);   /* ack the GD-DMA status */
