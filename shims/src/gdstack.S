@@ -75,20 +75,33 @@ _gdc_call:
     fmov.s  fr15, @-r15
     frchg                       /* back to bank 0 for the call */
 
+    /* MMU off DURING the syscall, game's MMUCR restored after (round 13).
+     * The old permanent clear ("games assume AT=0 forever") was wrong for
+     * this game: it runs AT=1 and maps RAM through the store-queue window
+     * via UTLB entries (SQ-mapper 0x8c0311a4 -- gated on MMUCR.AT).  The
+     * permanent clear left AT=0 after the last load syscall, so the
+     * load->title transition's SQ-emitted display-list closers fell back to
+     * QACR mapping (area 0 -- writes vanish, no fault): buffer stayed zero,
+     * the transfer queue pinned waiting for the modifier-list-end event =
+     * the 18-round "hang at bar 100%".  Clearing only AROUND the call keeps
+     * isoldr in the AT=0 world it needs (rounds 2-5) while the game's
+     * SQ translation survives; a plain 0-store leaves TI=0 so the game's
+     * UTLB entries are NOT invalidated and AT restore fully revives them. */
+    mov.l   .Lmmucr_k, r1
+    mov.l   @r1, r2             /* game's MMUCR (AT=1: SQ-via-TLB) */
+    mov.l   .Lmmucr_save_k, r3
+    mov.l   r2, @r3
+    mov     #0, r2
+    mov.l   r2, @r1
+
     mov.l   .Lvec_k, r0
     mov.l   @r0, r0             /* live syscall vector */
     jsr     @r0
     nop
 
-    /* MMU off after every syscall. The DreamShell environment runs with the
-     * MMU enabled (DreamShell OS uses it; the SD isoldr never disables it);
-     * the loader clears MMUCR at handoff, but the rounds-2-5 first-stream
-     * wedge vanished under the probe build whose per-tick MMUCR clear was
-     * the only semantic delta -- so keep translation provably off on the
-     * only path that talks to the emu. Games assume AT=0 forever (unpopulated
-     * VBR miss vectors); a single 0-store, free vs a serial read. */
+    mov.l   .Lmmucr_save_k, r3  /* restore the game's MMUCR (r0 = result) */
+    mov.l   @r3, r2
     mov.l   .Lmmucr_k, r1
-    mov     #0, r2
     mov.l   r2, @r1
 
     mov.l   .Lfpscr_kos_k, r1   /* known move width/bank for the restore */
@@ -141,9 +154,11 @@ _gdc_call:
 .Lstack_top_k:  .long GD_STACK_TOP
 .Lvec_k:        .long 0x8c0000bc
 .Lmmucr_k:      .long 0xff000010
+.Lmmucr_save_k: .long _gdc_saved_mmucr
 .Lfpscr_kos_k:  .long 0x00040001    /* KOS default: DN=1, RM=chop, SZ=PR=FR=0 */
 
     .section .data
     .globl  _gdc_saved_sp
     .align  2
 _gdc_saved_sp:  .long 0
+_gdc_saved_mmucr: .long 0
