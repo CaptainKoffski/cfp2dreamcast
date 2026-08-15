@@ -566,6 +566,31 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    settings — full boot = FPU case closed (ship with SHIM_GD_DIAG=0);
    still frozen = photo gives phase + on-screen vs expected checksum,
    separating wire corruption from a game-internal stall.
+   **Round 4 verdict (tester diag photo): DATA IS BYTE-PERFECT, the wedge
+   is a GD SEND that never returns.** Screen: ck=0x5AB35E19 = stream #1's
+   exact expected checksum (wire corruption disproven; FPU quarantine kept
+   as hardening), phase=0xA0000002 (stream #2 requested, never delivered),
+   req still 7 with fad already stream #2's — so stream #2's gdcReqCmd (a
+   loop-free function) never came back: execution lost inside isoldr, one
+   read after it worked. Round-4.5 write-truth measurements (fork watch
+   GAMEWR/BANDWR, DC-mode interpreter, unsaturated through 231 streams):
+   the game's init runs a top-of-RAM stack 0x8cffd000–0x8d000000 (floor
+   0x8cffdf54) and clears 0x8c00c100+, but **never writes
+   0x8cf80000–0x8cfc0000 nor 0x8cfd8000–0x8cffd000 once running** (the
+   heavy pre-handoff writes there are the real-BIOS boot UI/bootstrap,
+   absent under DreamShell). isoldr facts (source): image budget 32 KB +
+   1 KB params (isoldr.h:26); **HEAP_MODE_AUTO — the UI default — puts the
+   heap at 0x8c001100 for any placement above APP_BIN_ADDR**
+   (malloc.c internal_malloc_init_auto) — i.e. in the low BIOS work RAM
+   whose game-phase trample is HW-proven (round 11 wedged the real BIOS GD
+   state exactly there). Prime suspect for high-placement failures with an
+   intact image: isoldr's heap-resident FS state dying in low RAM between
+   stream #1 and #2. **Round 5 prescription (no rebuild — settings only):
+   ISO Loader Memory = 0x8cf80000 AND Heap = 0x8cf90000** — image and heap
+   both inside the measured game-clean 256 KB band below the shim. If it
+   boots: ship (diag off). If it freezes with the same signature: both
+   surfaces exonerated, next dig is the isoldr coroutine/park mechanics
+   under our call pattern.
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
