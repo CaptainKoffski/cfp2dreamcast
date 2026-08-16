@@ -1106,6 +1106,16 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    second frame (stall upstream, in the scene loop's frame pacing);
    ist_seen bit2 set ⇒ completion FIRED but the state machine missed it
    (software race — look at the callback registration).
+   **Green-world reference (flycast r17 black-phase capture,
+   `r17-post32.png`):** active ctx=`8C0EA578` (static bss — should be
+   identical on HW), pending=`0`, state=`8` (resting; 5 only transient),
+   ist_seen=`00009038` (bits 3/4/5/12/15 — note: even green never
+   catches bit 2/list-ends in the accumulator; acked sub-tick, so a
+   missing bit 2 on HW is NOT evidence against completion). Bonus:
+   `SPG_CONTROL=0x150` in the green world too — interlaced NTSC is the
+   game's own chosen output mode; the tester's soft/flickery VGA picture
+   is cosmetic (possible later polish: force a progressive mode), not
+   part of the black-screen defect.
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
