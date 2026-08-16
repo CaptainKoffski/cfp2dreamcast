@@ -1132,6 +1132,11 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    PVR CORE receives STARTRENDER and never raises render-done — either
    its inputs (region array / object lists the TA built in VRAM) are
    garbage under DreamShell, or a CORE-input config register diverges.
+   **Supplement (2026-08-16):** tester sat ~2 min on the black screen —
+   zero visible changes/flashes ever; the deadline-retry loop never
+   yields even one presented frame (CORE completes nothing, not
+   "sometimes"). ist_seen retyped as `B038` end-state (bit 3 vblank-in
+   latched too); render-done bits 0/1/2 still never set either way.
 
    **Round 18 instrument (deployed): TA-output ground truth.** Video
    rows y176-218 repurposed (director rows kept):
