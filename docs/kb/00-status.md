@@ -1074,6 +1074,39 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    never completes); `IML6NRM=0` or a KOS-looking value ⇒ isoldr mask
    clobber confirmed ⇒ ship the gdc_call mask save/restore.
 
+   **Round 16 HW result (2026-08-16): mask theory DEAD, and the verdict
+   sharpened.** Tester (VGA cable throughout the serial saga):
+   `IML2NRM=00000000, IML4NRM=0007B000, IML6NRM=00280FEC,
+   ISTNRM=00000010` (ISTNRM active during load, settles at 0x10 when the
+   bar completes). IML4/IML6 match the green world EXACTLY — render-done
+   + list-end enables armed on HW. IML2=0 vs green 0x1008 is
+   BIOS-internal (flycast reios' own vblank/maple level-2 hooks; absent
+   under isoldr by design — isoldr is driven synchronously via
+   gdc_call). The decisive datum: **render-done (bit 2) and every
+   list-end bit NEVER LATCH in ISTNRM** — the interrupt plumbing is fine
+   and idle; the PVR CORE is never completing (almost certainly never
+   receiving) a render after the first one. Combined with round 15
+   (`FB_W_SOF1` parked at `0x4b2000` after one write, scanout static):
+   the frame director issues at most one render and its completion path
+   never advances.
+
+   **Round 17 instrument (deployed): frame-director state probe.** The
+   sole caller of the STARTRENDER fn is FUN_8c036220 (the frame
+   director): on issue it sets `[0x8c0eb72c]`=active render ctx,
+   `[0x8c0eb728]`=1 (render pending), `ctx+0x14`=5 ("rendering"), and a
+   +10-frame deadline `[actx+0x24]` (pools file 0x16550/0x16554; guard
+   FUN_8c048300 is a ctx-validity walk over the registry `0x8c0faaa8`
+   stride 0x8c, NOT a busy-wait). Mask rows y232/y246 replaced:
+   y232 `active ctx | render-pending`, y246 `ctx->state(+0x14) |
+   ISTNRM-OR-accumulator since boot` (bit2/7-10/21 catches transient
+   latches; ffffffff state = no valid ctx). Reading guide:
+   pending=1 + state=5 frozen ⇒ a render WAS issued and never completed
+   (PVR CORE level — suspect render inputs/region array under
+   DreamShell); pending=0 + ctx=0 ⇒ the director was never invoked for a
+   second frame (stall upstream, in the scene loop's frame pacing);
+   ist_seen bit2 set ⇒ completion FIRED but the state machine missed it
+   (software race — look at the callback registration).
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication

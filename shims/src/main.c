@@ -561,19 +561,31 @@ int shim_maple_steady(void) {
     hex_paint(120, 204, *(volatile u32 *)0xa05f80d0);
     hex_paint(20, 218, *(volatile u32 *)0xa05f810c);
     hex_paint(120, 218, *(volatile u32 *)0xa05f808c);
-    /* Round 15b: the flycast SOFWR trace shows the healthy flip = the game
-     * alternating FB_W_SOF1 0xb2000<->0x4b2000 per frame (pr=8c041d7a); on
-     * HW that alternation is parked and no rendered pixels ever reach the
-     * buffers (probe text survives = nothing overdraws it). The flip/render
-     * chain advances on Holly interrupts -- if the render-done bits are
-     * masked out of the IML registers in the isoldr world (DreamShell
-     * leaves its own mask state; cf. the armed-bit-14 lesson in gd.c), the
-     * game waits forever. Paint the three masks + the live latch:
-     *   y232: IML2NRM | IML4NRM      y246: IML6NRM | ISTNRM */
-    hex_paint(20, 232, *(volatile u32 *)0xa05f6910);
-    hex_paint(120, 232, *(volatile u32 *)0xa05f6920);
-    hex_paint(20, 246, *(volatile u32 *)0xa05f6930);
-    hex_paint(120, 246, *(volatile u32 *)0xa05f6900);
+    /* Round 16 HW verdict: Holly masks HEALTHY (IML4/6 match the green
+     * world exactly, incl. render-done + list-end on level 6; IML2=0 is
+     * BIOS-internal, absent under isoldr by design) and ISTNRM settles at
+     * 0x10 -- render-done NEVER LATCHES. So the chip-side switchboard is
+     * fine; the failure is in the render issue/complete state machine.
+     * Round 17: paint the frame director's own state (FUN_8c036220 sets
+     * [0x8c0eb72c]=active render ctx, [0x8c0eb728]=1 render-pending,
+     * ctx+0x14=5 "rendering" -- the render-done path must clear/advance
+     * these; pools resolved from file 0x16550/0x16554).
+     *   y232: active render ctx | render-pending flag
+     *   y246: ctx->state (+0x14; ffffffff = no valid ctx) | ISTNRM
+     *         OR-accumulator since boot (catches transiently latched bits;
+     *         render-done=bit2, list-ends=bits 7-10,21) */
+    {
+        static u32 ist_seen = 0;
+        ist_seen |= *(volatile u32 *)0xa05f6900;
+        u32 rctx = *(volatile u32 *)0x8c0eb72c;
+        hex_paint(20, 232, rctx);
+        hex_paint(120, 232, *(volatile u32 *)0x8c0eb728);
+        u32 rstate = 0xffffffffu;
+        if ((rctx & 0x1f000000u) == 0x0c000000u)
+            rstate = *(volatile u32 *)(rctx + 0x14);
+        hex_paint(20, 246, rstate);
+        hex_paint(120, 246, ist_seen);
+    }
 #endif /* SHIM_PROBES */
     if ((++steady_beat & 63u) == 0) {              /* forensic heartbeats, ~1 Hz at 60 fps */
         u32 ph = steady_beat & 64u;
