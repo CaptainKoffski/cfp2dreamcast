@@ -561,6 +561,19 @@ int shim_maple_steady(void) {
     hex_paint(120, 204, *(volatile u32 *)0xa05f80d0);
     hex_paint(20, 218, *(volatile u32 *)0xa05f810c);
     hex_paint(120, 218, *(volatile u32 *)0xa05f808c);
+    /* Round 15b: the flycast SOFWR trace shows the healthy flip = the game
+     * alternating FB_W_SOF1 0xb2000<->0x4b2000 per frame (pr=8c041d7a); on
+     * HW that alternation is parked and no rendered pixels ever reach the
+     * buffers (probe text survives = nothing overdraws it). The flip/render
+     * chain advances on Holly interrupts -- if the render-done bits are
+     * masked out of the IML registers in the isoldr world (DreamShell
+     * leaves its own mask state; cf. the armed-bit-14 lesson in gd.c), the
+     * game waits forever. Paint the three masks + the live latch:
+     *   y232: IML2NRM | IML4NRM      y246: IML6NRM | ISTNRM */
+    hex_paint(20, 232, *(volatile u32 *)0xa05f6910);
+    hex_paint(120, 232, *(volatile u32 *)0xa05f6920);
+    hex_paint(20, 246, *(volatile u32 *)0xa05f6930);
+    hex_paint(120, 246, *(volatile u32 *)0xa05f6900);
 #endif /* SHIM_PROBES */
     if ((++steady_beat & 63u) == 0) {              /* forensic heartbeats, ~1 Hz at 60 fps */
         u32 ph = steady_beat & 64u;

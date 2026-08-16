@@ -1023,6 +1023,57 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    report), `FB_R_CTRL` bit0 = fb enable, `ISP_BACKGND_T` = background
    plane tag (garbage here = black tiles despite geometry).
 
+   **Round 15 HW result (2026-08-16): the video registers confessed —
+   scanout and render never meet.** Photo (game otherwise healthy: SPC
+   `8c0239da` in the pump range, EXPEVT stale, sound heartbeat ticking,
+   streams flowing at FAD `0x7916a`): `FB_R_SOF1/2 = 000b2000/000b2500`
+   (one buffer, interlaced fields, STATIC) vs `FB_W_SOF1 = 004b2000`,
+   `FB_W_SOF2 = 00600000` (loader leftover); `FB_R_CTRL=1`,
+   `FB_W_CTRL=b`, `VO_CONTROL=00160000` (not blanked),
+   `SPG_CONTROL=00000150` (interlace NTSC — the flicker/softness),
+   `SPG_STATUS=3c17`, `ISP_BACKGND_T=01160590`. No sound audible despite
+   the ARM heartbeat — consistent with the attract never presenting its
+   first frame.
+
+   **Flycast dynamic cross-section (fork watches `SOFWR` + `IMLWR`,
+   commit bd29ce0b7):**
+   - Healthy flip: the game's per-frame STARTRENDER fn `0x8c041ce0`
+     (disasm-verified: programs REGION/PARAM base, ISP_BACKGND, FB_W_CTRL,
+     FB_W_SOF1 [gated on `[0x8c0e84e4]==0`], then `STARTRENDER=1`; guard
+     `jsr 0x8c048300`/arg test early-outs `0xEEEE` when the previous
+     render is unacknowledged) alternates `FB_W_SOF1`
+     `0xb2000↔0x4b2000` every frame (`pc=8c03df06 pr=8c041d7a`). The HW
+     photo = that alternation parked after one render into `0x4b2000`
+     with scanout pinned on never-rendered `0xb2000` — and the probe
+     text surviving in the scan buffer proves no rendered pixels ever
+     land there. The early-out guard + parked flip = the render-complete
+     acknowledgment never arrives on HW.
+   - Green-world Holly masks (title era): `IML2NRM=00001008` (vblank-in
+     + maple-DMA-end), `IML4NRM=0007b000` (DMA-end bits, after the
+     shim's documented bit-14 clear at `pc=8cfc14cc`),
+     `IML6NRM=00280fec` — **render-done + all five list-end bits live on
+     level 6**, built bit-by-bit by the game's own Holly registrar
+     (`pr=8c0404xx` = the FUN_8c0400e0 family) via helpers
+     `8c02aad4/8c02aac2`.
+   - Flycast's HLE BIOS *zeroes and restores* the IML masks around
+     syscalls (`pc=8c00c9xx` reios). Prime suspect for the HW black:
+     **isoldr's syscall emulation does the same but restores KOS-world
+     masks (or zeros) instead of the game's** — every streaming read
+     would wipe `IML6`, the render-done IRQ never reaches the game's
+     handler, the busy flag never clears, every later frame early-outs
+     `0xEEEE`, flip parked, screen black. Same disease shape as the
+     round-13 MMUCR clobber. If confirmed, the fix is the same shape
+     too: save/restore the three IML masks in `gdc_call` around each
+     isoldr syscall (or re-arm per tick).
+
+   **Round 16 instrument (deployed): Holly-mask probe rows** appended
+   below the video rows: y232 `IML2NRM | IML4NRM`, y246 `IML6NRM |
+   ISTNRM`. Expected photo readings: masks matching the green values
+   above ⇒ theory dead, look at ISTNRM latches instead (render-done bit
+   2 stuck set = handler starved at the SH4 level; never set = render
+   never completes); `IML6NRM=0` or a KOS-looking value ⇒ isoldr mask
+   clobber confirmed ⇒ ship the gdc_call mask save/restore.
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication
