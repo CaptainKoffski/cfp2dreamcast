@@ -307,8 +307,22 @@ hook(0x8C080484, 0x7FFC, sym("shim_ee_idx_read"),
 # dynamically: game init pr=8c0262ac/8c026274 -> FUN_8c026xxx (mode stored
 # @0x8c0e6298, pc=8c02636e) -> pool[0x8c026570] -> FUN_8c034020 ->
 # handler[mode&3] -> SPG writes (pc=8c03df06 accessor, CLEO-SPG capture).
-ptr(0x8C026570, 0x8C034020, sym("shim_vid_init"),
-    "TV-cable 15 kHz: display-init call -> shim_vid_init (mode class 1->0)")
+# Patch #34 DELETED (2026-08-16, VGA-blur regression root cause found): the
+# old hook here never fired and was mis-modeled -- the game does NOT hardcode
+# 0x31. Its own chooser FUN_8c04b2cc keys the mode on the monitor globals
+# (getter FUN_8c025886: [0x8c0c4518]==1 ? [0x8c0c4524] : -1; monitor 0 ->
+# mode 0x31 = 31 kHz, 1 -> 0x80000038 = NTSC 480i, invalid -> hardcoded
+# 0x80000038 at 0x8c04ae98). Their native writer FUN_8c0257f4 keys on field
+# +0x0c of the settings record selected by the INDEX that patch #36 stubs to
+# 0 -- whose record reads 15 kHz -> interlace on every cable (r26 flycast-VGA
+# trace: native write monitor=1 at pc 8c025826 precedes the mode choice at
+# 8c02636e; late settings-flow writes lose the race). Main-GDEMU was sharp
+# because the un-stubbed EEPROM-lib read yielded a +0x0c != 0 record. Had the
+# old hook ever fired on the 0x31 path, mode&=~3 would have failed the game's
+# class-vs-monitor validation (monitor 0 requires class 1) into the same
+# hardcoded interlace. Patch #37 below replaces the native writer instead.
+hook(0x8C0257F4, 0xD235, sym("shim_monitor_set"),
+     "monitor globals writer -> cable-keyed (0x31 sharp on VGA / NTSC 480i on TV)")
 
 # NOTE (Task 14b history, RESOLVED by Task 14f above): FUN_8c03c2c6 is reached via
 # BOTH pool[0x8c02ed6c] (Mode A) and pool[0x8c02ee88] (Mode B, DC takes this); Task

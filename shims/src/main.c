@@ -928,6 +928,33 @@ int shim_ee_write_skip(void) {
  *   slot13 yellow = any of the post-kicker trio reached */
 int shim_ee_lib_decode(void);
 int shim_ee_lib_decode(void) { shim_mark(12, 0x07e0); return 0; }
+
+/* VGA-blur regression fix (2026-08-16, patch #37 -- replaces the deleted,
+ * never-firing patch #34). The game's video mode is chosen by ITS OWN chain:
+ * boot scene FUN_8c04b2cc -> monitor getter FUN_8c025886 ([0x8c0c4518]==1 ?
+ * [0x8c0c4524] : -1); monitor 0 -> mode 0x31 (31 kHz, sharp), 1 ->
+ * 0x80000038 (NTSC 480i), invalid -> hardcoded 0x80000038 at 0x8c04ae98.
+ * The globals' native writer FUN_8c0257f4 keys them on field +0x0c of the
+ * settings record served by FUN_8c081432 -- selected by the settings INDEX
+ * that patch #36 deterministically stubs to 0, whose record has +0x0c == 0
+ * = 15 kHz -> interlace on every cable (r26 trace: native writer sets
+ * monitor=1 at pc 8c025826 BEFORE the choice; our late settings-flow writes
+ * can't win the race). Main-GDEMU was sharp because the un-stubbed lib read
+ * yielded a record with +0x0c != 0. Fix: replace the native writer, mirror
+ * its exact store set keyed on the real DC cable, and let the game's own
+ * chooser + class-vs-monitor validation do the rest.
+ *   31 kHz (VGA):   451c=0, 4524=0, 4520=0, 4518=1  (native r3!=0 arm)
+ *   15 kHz (TV):    451c=2, 4524=1, 4520=0, 4518=1  (native r3==0 arm)
+ * Return 0 = the native "wrote it" path (-1 = already-valid early-out). */
+int shim_monitor_set(void);
+int shim_monitor_set(void) {
+    unsigned int vga = shim_cable_is_vga() ? 1u : 0u;
+    *(volatile u32 *)0x8c0c451c = vga ? 0u : 2u;
+    *(volatile u32 *)0x8c0c4524 = vga ? 0u : 1u;
+    *(volatile u32 *)0x8c0c4520 = 0;
+    *(volatile u32 *)0x8c0c4518 = 1;
+    return 0;
+}
 int shim_ee_lib_post(void);
 int shim_ee_lib_post(void)   { shim_mark(13, 0xffe0); return 0; }
 

@@ -1290,6 +1290,49 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    warn: never place isoldr at `0x8cf80000–0x8cf80040` (game
    staging) nor `0x8cfc0000–0x8cfd8000` (shim home).
 
+   **VGA-blur regression (2026-08-16): "480i is game-normal" was
+   WRONG — root-caused and fixed (patch #37, patch #34 deleted).**
+   Tester: blurry on VGA on BOTH serial and GDEMU with this branch;
+   main-GDEMU was sharp ("saw all pixels"); plus a no-signal blip at
+   the transition and no visible progress bar on GDEMU. Investigation
+   (all emulator, no HW rounds burned): (1) the fork's emu.cfg had
+   `Dreamcast.Cable = 3` (composite) all along — every green-world
+   video observation, incl. the r15 "SPG_CONTROL=0x150 is the game's
+   own choice", was watching the TV path; flycast's PDTRA read
+   (bsc.cpp:63) returns `config::Cable << 8` unconditionally. With
+   Cable=0 (VGA) the blur REPRODUCED in flycast (r22, game-era
+   vclk_div=0 + SPG 0x150). (2) Bisect: deleting the patch-34 hook
+   changed nothing (r23) — it NEVER fired; the game does not pass
+   mode 0x31. (3) VIDFLG write-trace (fork, addrspace.cpp): the mode
+   word is 0x38, stored at pc 8c02636e, argument from the boot
+   scene's chooser. Full chain decoded: **FUN_8c04b2cc → monitor
+   getter FUN_8c025886 (`[0x8c0c4518]==1 ? [0x8c0c4524] : -1`);
+   monitor 0 → mode 0x31 = 31 kHz sharp; 1 → 0x80000038 = NTSC 480i;
+   invalid → hardcoded 0x80000038 at 0x8c04ae98.** The globals'
+   native writer FUN_8c0257f4 keys on field +0x0c of the settings
+   record served by FUN_8c081432 — **selected by the settings index
+   patch #36 stubs to 0, whose record reads "15 kHz"** (r26 trace:
+   native write monitor=1 at pc 8c025826 precedes the mode choice;
+   the shim's settings-flow writes at 8cfc0aa0 came after — race
+   lost). Main-GDEMU was sharp because the un-stubbed EEPROM-lib
+   read yielded a +0x0c≠0 record. The r14 "index 0 = green-world
+   equivalent" claim was correct for BOOT but wrong for VIDEO.
+   **Fix: patch #37 hooks FUN_8c0257f4 (`shim_monitor_set`,
+   first-op 0xD235) — mirrors the native store set keyed on the
+   real DC cable (KOS vid_check_cable idiom): VGA → 451c=0/4524=0
+   (31 kHz), TV → 451c=2/4524=1 (NTSC 480i); 4520=0, 4518=1. The
+   game's own chooser + class-vs-monitor validation (monitor 0
+   requires class 1 — the deleted #34's mode&=~3 would have FAILED
+   it into the hardcoded interlace) do the rest.** Verified r27
+   (Cable=0): game era vclk_div=1, zero 0x150 writes, title+attract
+   green; r28 (Cable=3): vclk_div=0, SPG 0x150 — TV path preserved
+   (the composite/RT4K fix now rides the native path; the DIP
+   monitor-freq keying in the sub-0x31 reply stays). 36 patches.
+   The transition no-signal blip on VGA (31k→mongrel-interlace mode
+   switch) and the GDEMU hidden-bar (monitor resync eating the fast
+   load) should both disappear — tester to confirm. emu.cfg restored
+   to Cable=3 (historical green refs); use Cable=0 for VGA work.
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication
