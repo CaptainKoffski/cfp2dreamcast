@@ -95,19 +95,21 @@ void hex_paint(unsigned int x, unsigned int y, unsigned int val) {
  * First paint blacks out the whole stale-splash FB (provably just splash
  * residue: it is what the screen was showing) -> clean splash -> black + bar
  * transition. fill is the lit width in px; cost irrelevant during load. */
-int shim_cable_is_vga(void);               /* defined below */
 void loadbar_paint(unsigned int fill) {
     static unsigned int pb_virgin = 1;     /* .data non-zero init (house style) */
     if (fill > 320u) fill = 320u;
     unsigned int base = *(volatile unsigned int *)0xa05f8050 & 0x00fffffcu;
     volatile unsigned short *fb = (volatile unsigned short *)(0xa5000000u + base);
-    /* Bar row, per cable. The game's TV-cable (class-0) mode scans only FB
-     * lines 0..236 -- FB_R_SIZE ysize=236, modulus=1, SOF1==SOF2, i.e. a
-     * 240-line arcade picture (Flycast CLEO-SPG A/B, Cable=3 vs 0,
-     * 2026-08-02); VGA scans lines 0..477. y=417 sat in the never-scanned
-     * half on TV cables -> HW showed solid black. 200..211 keeps ~10%
-     * bottom margin inside the 237-line field (NTSC safe area). */
-    unsigned int yb = shim_cable_is_vga() ? 417u : 200u;
+    /* Bar row, all cables. The old per-cable row (200 on TV) modeled the
+     * deleted patch-#34 path's 240-line scan (ysize=236, modulus=1,
+     * SOF1==SOF2, measured 2026-08-02) and put the bar mid-screen on the
+     * game's REAL NTSC mode (HW composite 2026-08-17). That mode scans the
+     * FB as a full 480-line frame -- FB_R_SIZE=1413b53f: ysize=237,
+     * modulus=321 (skip-one-line interlace), SOF2=SOF1+0x500 (Flycast
+     * CLEO-SPG/SOFWR r30, Cable=3, 2026-08-17) -- so linear row N shows at
+     * screen line N on every cable. 417..428 = same ~10% bottom margin
+     * inside NTSC overscan that the old TV row aimed for. */
+    unsigned int yb = 417u;
     if (pb_virgin) {                       /* blackout WHILE STILL BLANKED, then
                                             * unblank below -- unblank-first showed
                                             * the stale splash for the 1-2 frames

@@ -1333,6 +1333,29 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    load) should both disappear — tester to confirm. emu.cfg restored
    to Cable=3 (historical green refs); use Cable=0 for VGA work.
 
+   **Post-#37 HW result (2026-08-17): video fix CONFIRMED on hardware.**
+   Tester: "Everything works fine" — VGA sharp, bar at the bottom on
+   VGA. One cosmetic regression: on composite the load bar rendered
+   mid-screen. Root cause: OUR bar. `loadbar_paint` (shims/src/util.c)
+   used a per-cable row `vga ? 417 : 200` — the 200 was calibrated
+   2026-08-02 against the deleted patch-#34 path's TV scan (ysize=236,
+   modulus=1, SOF1==SOF2: a 240-line picture where row 417 never
+   scanned). Post-#37 the TV path is the game's REAL NTSC mode, which
+   scans the FB as a full 480-line frame (load era, Flycast r30
+   Cable=3 + rend.EmulateFramebuffer: FB_R_SIZE=1413b53f = ysize 237 /
+   modulus 321 skip-one-line, SOF2=SOF1+0x500 — one linear image,
+   row N shows at screen line N), so row 200 = mid-screen. The FB-emu
+   captures matched the code exactly (composite bar bbox y=201, VGA
+   y=418; same x=158/width 325 — the bar is CPU-drawn, invisible to
+   flycast's TA renderer, which is why no emulator capture ever showed
+   it before). Fix: single row `yb=417` for all cables (deletion of
+   the branch). Verified Flycast FB-emu r33 Cable=3: bar at y=419,
+   bottom, progressing. Same ~10% NTSC-overscan margin as before.
+   Fork gained a one-shot load-engine RAM dump on the load-era
+   FB_R_SIZE write (pvr_regs.cpp) — built while suspecting the game's
+   engine; kept as tooling. Release set synced
+   (md5 ba6d9402ee58ca3d2a483b08667c4c5f).
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication
