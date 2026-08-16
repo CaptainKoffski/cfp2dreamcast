@@ -1272,6 +1272,24 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    is settings-only. **Prescription: Memory=`0x8cfe8000`,
    Heap=`0x8cff4000`, same round-19 disc.**
 
+   **Round 20 HW result (2026-08-16): FIXED — the game BOOTS AND
+   RUNS on serial-SD isoldr.** Tester verified three configs, all
+   working: (1) Memory=`0x8cfe8000` + Heap=`0x8cff4000` (the
+   measured prescription), (2) Memory=`0x8cfe8000` + Heap=auto
+   (consistent with round 5's exoneration of the auto-heap), (3)
+   **all-default isoldr settings**. Decode: the only poisonous
+   placement was `0x8cf80000` — the round-5 custom choice itself —
+   because the game's per-frame PT-list closer lives there; the
+   early-round failures at default/high placements were the since-
+   fixed MMU (r13) and EEPROM-lib (r14) bugs, not placement.
+   Remaining tester observations, all known/cosmetic: 480i-on-VGA
+   softness (game-normal, r15), pre-bar black gap (boot sequence,
+   r14), probe text overlay (diagnostic build — clean build next).
+   Recommended shipping config: the measured prescription (1);
+   default also works but its home is only spot-tested. README must
+   warn: never place isoldr at `0x8cf80000–0x8cf80040` (game
+   staging) nor `0x8cfc0000–0x8cfd8000` (shim home).
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication
