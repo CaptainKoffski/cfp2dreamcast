@@ -1117,6 +1117,33 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    is cosmetic (possible later polish: force a progressive mode), not
    part of the black-screen defect.
 
+   **Round 17 HW result (2026-08-16): the director is ALIVE and the CORE
+   never finishes — issued-render starvation confirmed.** Tester: during
+   load ctx=0/state=ffffffff/pending=0 (dormant, correct); the instant
+   the bar completes: **pending=1, state frozen at 5 ("rendering"),
+   active ctx ALTERNATING between `8C0EA578` and `8C0EA7A8`** — registry
+   entries 0 and 4 (stride 0x8C from base entry `8C0EA578`), i.e. the
+   +10-frame deadline path keeps re-issuing renders for the double
+   buffer's two contexts and **no render ever completes** (ISTNRM bit 2
+   never latches, r16). ist_seen=`B030/B038` (bits 4,5,12,13,15 ±3 —
+   maple bits real on HW: shim GetCondition uses real registers; an
+   OR-accumulator cannot lose bits so the B038→B030 read is a
+   transcription slip, immaterial). The failure is now pinned to: the
+   PVR CORE receives STARTRENDER and never raises render-done — either
+   its inputs (region array / object lists the TA built in VRAM) are
+   garbage under DreamShell, or a CORE-input config register diverges.
+
+   **Round 18 instrument (deployed): TA-output ground truth.** Video
+   rows y176-218 repurposed (director rows kept):
+   y176 `PARAM_BASE | REGION_BASE`, y190 `VRAM[REGION_BASE+0] | +4`
+   (region-array entry 0 read back via the 32-bit path), y204
+   `TA_ITP_CURRENT | TA_ISP_BASE` (geometry-store cursor vs base), y218
+   `TA_NEXT_OPB | TA_OL_BASE` (OPB alloc cursor vs base). Reading guide:
+   region-array words zero/garbage ⇒ TA output corrupted (VRAM
+   path/banking divergence class — SB_LMMODE etc.); sane region array +
+   cursors advancing ⇒ TA fine, CORE-config divergence; cursors pinned
+   at base ⇒ TA stores nothing despite closing lists.
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication

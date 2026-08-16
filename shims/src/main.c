@@ -551,16 +551,32 @@ int shim_maple_steady(void) {
      *   y218: SPG_STATUS | ISP_BACKGND_T (field/sync | background plane tag)
      * The round-12 transfer-queue autopsy rows this replaces are preserved
      * in git history (proven healthy in the round-13/14 photos). */
+    /* Round 18: TA-output ground truth. Round 17 proved renders are ISSUED
+     * repeatedly (director retry loop, pending=1/state=5, ctx alternating
+     * registry entries 0/4) and NEVER complete -- the CORE hangs walking
+     * its inputs, or gets no inputs. Read back what the TA actually built:
+     *   y162: FB_R_SOF1 | FB_W_SOF1        (issue/flip activity, kept)
+     *   y176: PARAM_BASE | REGION_BASE     (CORE input pointers, 5F8020/2C)
+     *   y190: VRAM[REGION_BASE+0] | +4     (region-array entry 0 via the
+     *         32-bit path -- sane = tile control word + list pointer;
+     *         zeros/garbage = the CORE walks junk)
+     *   y204: TA_ITP_CURRENT | TA_ISP_BASE (5F8138/5F8128: cursor past
+     *         base = the TA stored geometry this frame)
+     *   y218: TA_NEXT_OPB | TA_OL_BASE     (5F8134/5F8124: OPB alloc
+     *         cursor vs base -- same test for object-pointer blocks) */
     hex_paint(20, 162, *(volatile u32 *)0xa05f8050);
     hex_paint(120, 162, *(volatile u32 *)0xa05f8060);
-    hex_paint(20, 176, *(volatile u32 *)0xa05f8054);
-    hex_paint(120, 176, *(volatile u32 *)0xa05f8064);
-    hex_paint(20, 190, *(volatile u32 *)0xa05f8044);
-    hex_paint(120, 190, *(volatile u32 *)0xa05f8048);
-    hex_paint(20, 204, *(volatile u32 *)0xa05f80e8);
-    hex_paint(120, 204, *(volatile u32 *)0xa05f80d0);
-    hex_paint(20, 218, *(volatile u32 *)0xa05f810c);
-    hex_paint(120, 218, *(volatile u32 *)0xa05f808c);
+    hex_paint(20, 176, *(volatile u32 *)0xa05f8020);
+    hex_paint(120, 176, *(volatile u32 *)0xa05f802c);
+    {
+        u32 rb = *(volatile u32 *)0xa05f802c & 0x007ffffcu;
+        hex_paint(20, 190, *(volatile u32 *)(0xa5000000u + rb));
+        hex_paint(120, 190, *(volatile u32 *)(0xa5000000u + rb + 4));
+    }
+    hex_paint(20, 204, *(volatile u32 *)0xa05f8138);
+    hex_paint(120, 204, *(volatile u32 *)0xa05f8128);
+    hex_paint(20, 218, *(volatile u32 *)0xa05f8134);
+    hex_paint(120, 218, *(volatile u32 *)0xa05f8124);
     /* Round 16 HW verdict: Holly masks HEALTHY (IML4/6 match the green
      * world exactly, incl. render-done + list-end on level 6; IML2=0 is
      * BIOS-internal, absent under isoldr by design) and ISTNRM settles at
