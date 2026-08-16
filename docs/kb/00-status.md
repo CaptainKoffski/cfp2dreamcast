@@ -968,6 +968,61 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    SH=1; the game's `MMUCR.URB=1` confines ldtlb replacement to entries
    0-1, so wired entries are safe by construction).**
 
+   **Round 14 HW result (2026-08-16): THE 14-ROUND BOOT PIN IS DEAD — the
+   bar fills, the transition happens, the game RUNS. Remaining defect:
+   post-transition display is black.** Photo decode: SPC cycling in
+   `8c02xxxx` (caught `8c023b12` = the documented healthy scene-pump
+   range), EXPEVT=`020` stale reset (ZERO exceptions, TEA=0), sound ctx
+   `8c0f3b80` with the ARM heartbeat counting (first time ever on
+   serial), GD req# climbing with CHECK=2 COMPLETED at FAD `0x7916a`,
+   cart-stream counter in the thousands with the A→B→E phase marker
+   cycling (checksums varying = real data), TA_ALLOC_CTRL=`00121213` =
+   title-phase, transfer rings drained, no slot pinned. Tester observed:
+   monitor lost sync ~1 s (the transition's SPG mode switch — CLEO-SPG
+   `FB_R_CTRL`/`VO_CONTROL` writes in the flycast log), then black with
+   the probe text **flickering at flip rate** (= frames ARE being
+   presented; their content is black) and possibly interlace-soft.
+
+   **Emulator cross-section (r14 shot run + r14b no-stub control with a
+   `SETWR` fork watch on `0x0c1c9764-88`/`0x0c1c94c0-d0`):**
+   - The same stub build shows the REAL TITLE (PRESS START / FREEPLAY)
+     ~10 s after the transition (`r14-post10.png`) — then the flycast
+     DISPLAY goes black too (`r14-post30/60/90.png` = pixel-identical to
+     the tester's photo) **while the TA logs keep carrying rich geometry**
+     (translucent lens a40/3240/3060 to end-of-run). The flycast black is
+     the KNOWN probes-kill-present artifact (per-tick paints put flycast
+     into raw-FB present; round-12 bisect) — flycast's display channel is
+     unusable as evidence in probe builds; its TA/C2D log is the truth
+     channel, and it says the game draws the attract fine.
+   - `SETWR` findings that correct round 14's residue story: flycast's
+     HLE BIOS leaves memtest garbage (NOT zeros), and **the game itself
+     memclears the settings region at boot (`pc=8c021192`)** — residue is
+     irrelevant in every world. The EE lib context is installed at
+     `0x8c018000` (`[0x8c1c9764]=ac018000`, set at `pc=8c0803b2`), and
+     slot+40 **does write the index: 1 byte `0x28`** (`pc=0c0183ae` — the
+     lib runs from its RAM home via P0). So the tester's wild index was
+     WRITTEN by the lib — its EEPROM bit-bang against a real DC's G1 regs
+     produces session-dependent noise (`0x2119xxxx` r13, `0x3330xxxx` r8)
+     — not leftover memory. The stub's deterministic 0 and the lib's 0x28
+     both title-green in flycast (0x28 itself indexes past the 32-B table
+     into mapped stack — the "green" worlds were never reading the table
+     either). Stub stays at 0; revisit only if a settings-semantics
+     divergence ever surfaces.
+
+   **Round 15 instrument (deployed): video-output register autopsy.**
+   The round-12 transfer-queue probe rows (proven healthy) are replaced
+   with PVR output state — one photo decides where the black comes from:
+   y162 `FB_R_SOF1 | FB_W_SOF1`, y176 `FB_R_SOF2 | FB_W_SOF2`, y190
+   `FB_R_CTRL | FB_W_CTRL`, y204 `VO_CONTROL | SPG_CONTROL`, y218
+   `SPG_STATUS | ISP_BACKGND_T`. Reading guide: R_SOF pair = what scanout
+   shows, W_SOF = where renders land — if the pairs never intersect, the
+   game presents buffers it never renders (video-init divergence:
+   isoldr-left BIOS work-RAM video/cable flags vs BIOS-fresh values is
+   the prime suspect class); `VO_CONTROL` bit3 = blank (probes visible ⇒
+   not blanked), `SPG_CONTROL` bit4 = interlace (the "unfocused/flicker"
+   report), `FB_R_CTRL` bit0 = fb enable, `ISP_BACKGND_T` = background
+   plane tag (garbage here = black tiles despite geometry).
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication
