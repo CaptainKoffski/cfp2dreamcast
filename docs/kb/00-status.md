@@ -1217,6 +1217,61 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    bare — see the r18 retraction). Title regression GREEN
    (`r19-post10.png` full title art).
 
+   **Round 19 HW result (2026-08-16): transport IDLE AND DRAINED —
+   and the ROOT COLLISION found.** Tester column vs green: y162
+   `00000010 | 82010000` (DMAOR=8201 intact ✓, no ch2/PVR DMA in
+   flight; ADST 0 vs green's transient 3 — timing), y176
+   `00000000 | 000012C0` (DMATCR2 drained, CHCR2 in the cleaned idle
+   state — IDENTICAL to green idle), y190 `00000000 | C0000000` (no
+   in-flight slot, all three rings empty), y204 `8CF80040 |
+   10000000`, y218 `0000006C | 00000000` (TA cursor still frozen),
+   y232/246 director loop unchanged (ctx alternating, pending 1,
+   state 5, ist_seen B038). Verdict: **nothing is wedged and nothing
+   is queued — the engine simply never submits geometry after its
+   first tiny transfer.** The y204 left value is the key: green-log
+   analysis (`r19.log`) shows the game's title-era engine ch2-DMAs a
+   fixed 64-byte TA command block (PT-list global header,
+   `w0=848c0002`) from **phys `0cf80000` = P1 `0x8cf80000` once per
+   frame, 1594×** — and flycast's dmac.cpp does not advance SAR2
+   during emulated transfers while real silicon does, so green rests
+   at the programmed `8CF80000` and HW at `8CF80040` = start+len ⇒
+   **the same transfer ran on HW, sourced from `0x8cf80000` — the
+   exact address isoldr's resident image occupies** (round-5
+   `Memory=0x8cf80000` placement). The game stages that block via
+   store-queue bursts (invisible to the BANDWR CPU-store watch —
+   zero BANDWR hits at 0cf800xx all run; SQ writes route through
+   flycast storeq.cpp, bypassing addrspace). **The round-4.5 "clean
+   band" measurement was load-era only; the title-era engine uses
+   the top of RAM.** This also retro-explains the round-10/12
+   "first TA transfer's source clobbered/mismatched" mystery — same
+   address, isoldr sitting in it. Era split confirmed: all 76k
+   BANDWR hits in the two watched bands are pre-transition
+   (BIOS/bootstrap, last at log line 95778 vs transition at
+   105081); zero CPU stores in either band during title.
+
+   **Round 20 (prescription pending SQ map): MOVE ISOLDR.** Fix is
+   settings-only, same round-19 disc. Candidate: Memory=`0x8cfe8000`
+   (the isoldr "high preset", image 32K+1K params → ends
+   `0x8cff0400`) + explicit Heap=`0x8cff4000` (36 KB before the
+   game's stack floor `0x8cffd000`), both inside the second
+   round-4.5 band `0x8cfd8000–0x8cffd000` — load-era clean AND
+   title-era CPU-store clean. The early-round failures at high
+   presets were HEAP_MODE_AUTO placing the heap at `0x8c001100`
+   (game-trampled low RAM), not the image placement — explicit Heap
+   avoids that. **SQ map verified (2026-08-16, `r20.log`, fork
+   `11479101d`): the game's SQ writes in the whole top 512 KB touch
+   exactly two 32-byte lines — `0cf80000`/`0cf80020`, the staging
+   block (pcs 8c0345bc/8c0359ae, first touch at the transition) —
+   and nothing else through title + attract.** The block is the
+   game's per-frame PUNCH-THROUGH list closer (sibling of the known
+   round-13 OP-MOD closer at `0cb80000`, w0=818c0002 there vs
+   848c0002 here — list types 1 and 4). Candidate band
+   `0x8cfd8000–0x8cffd000` clean across all three channels (CPU
+   stores/BANDWR, SQ bursts/SQWR, DMA sources/C2D). No shim/loader
+   code references the old isoldr address (grep clean) — the move
+   is settings-only. **Prescription: Memory=`0x8cfe8000`,
+   Heap=`0x8cff4000`, same round-19 disc.**
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication
