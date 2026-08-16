@@ -903,6 +903,71 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    the game booting into the title. If it still pins, photograph the same
    five cyan probe rows.**
 
+   **Round 13 HW result (2026-08-16): NEW earlier pin — bar 0%, and it
+   decoded the entire rounds-1..13 saga.** Photo: y68 `SPC=8c081224 |
+   EXPEVT=00000040`, y82 `TEA=10667424 | VBR=8c00f400`, y96 `0 | BAD00000`
+   (sound driver not up — early boot), y162 `ISTNRM=10 | slot=00000000`,
+   y176-left `C0000000` (ring counts 0/0/0), y218-right
+   `TA_ALLOC_CTRL=202` (load-phase alloc); rows y190/y204/CCR correctly
+   slot-gated off; no white-on-blue (GD-diag rows overdrawn/pre-stream).
+   The round-8 eternal TLB-miss pin is back at the same insn — but with the
+   MMU model complete, TEA finally identified the disease:
+
+   **Round 14 — the bar-0% pin was NEVER an EE-library spin; it is a wild
+   TABLE INDEX read (fixed, patch #36).** Chain, each link
+   disassembly-verified: parser `FUN_8c0811f2` copies a static 32-byte
+   table (`0x8c0c0c84`) to its frame and reads `SP + arg2*4` at
+   `0x8c081224` (`mov.l @r6,r1`) — arg2 is its third argument.
+   Orchestrator `FUN_8c081aee` passes arg2 = `[0x8c1c9770]` when gate
+   `[0x8c1c9768]` != 0; the gate is set by `FUN_8c081438` = a **Naomi-BIOS
+   fingerprint check** (112 bytes at `0xa01ffd00` vs index-obfuscated
+   table `0x8c0d7ed9`) — which patch #15 makes PASS in every environment
+   (required: task-13 proved gate=0 dead-ends boot). Wrapper
+   `FUN_8c081bf0` fills `[0x8c1c9770]` via READ thunk `FUN_8c080484`
+   (fn-table `[[0x8c1c9764]]` slot +40 — the un-stubbed sixth sibling of
+   the five round-2/3 write-path stubs) immediately before the parse. On
+   the tester's DC that lib read returns without writing; the word keeps
+   **DreamShell boot residue** (round 13: `0x10667424`-yielding junk;
+   round 8: `0x58c1fc94` — different DS sessions, different residue), and
+   the parse reads a wild unmapped address. Two masks, now unified:
+   AT=1 (game's design) → eternal TLB-miss restart, no handler at
+   VBR+0x400 (rounds 1-8, 13, bar 0%); forced AT=0 (rounds 9-12
+   "medicine") → wild read returns junk harmlessly but the transition's
+   SQ world dies later (bar 100%). Flycast and GDEMU were green the whole
+   time because THEIR residue at `0x8c1c9770` is zero (flycast zeroes RAM
+   at boot; the DC BIOS boot leaves the word benign) — i.e. the
+   proven-green worlds already run this path with **index 0**.
+
+   **Second discovery burying the "MMU enabled only at transition" model:
+   on real hardware the game runs MMU-ON from EARLY BOOT.** Call graph
+   (Ghidra): boot scene loop `FUN_8c04ae50` → `FUN_8c04ab70` →
+   `FUN_8c0258ec` → `FUN_8c030ff0` (MMUCR clear `FUN_8c03b1c0` → TLB
+   loader/enable `FUN_8c03b1c8` → SQ-mapper `FUN_8c0311a0`, which
+   re-invokes the loader 3×) — runs before the settings flow. The HW
+   photo proves it live: EXPEVT=0x040 requires AT=1, and the
+   orchestrator's own P0 write to `0x0c01f100` (insn `8c081b3a`,
+   *before* the parse call) retired — the game's wired UTLB entries were
+   in place. Flycast's HLE boot never enters this scene path (its enable
+   appears only at the transition, `v5-bothfixes.log` line 95595) — the
+   emulator is structurally blind to the early real-HW MMU phase; only
+   TEA on a TV could catch this one.
+
+   **Fix (deployed):** `shim_ee_idx_read` (`shims/src/main.c`) — stub
+   `FUN_8c080484` in the exact idiom of its five stubbed siblings:
+   `*(u32*)r4 = 0; return 0` (deterministic index 0 = the flycast/GDEMU
+   proven-green value; r0 ignored at the `8c081c04` call site). Patch #36
+   `hook(0x8C080484, 0x7FFC, shim_ee_idx_read)` — 12-byte entry thunk
+   fits the 14-byte body, next fn `0x8c080492` untouched. Round-13's two
+   MMUCR fixes stay (gdstack save/clear/restore around syscalls; no
+   per-tick writers): they are what makes the early AT=1 world—and the
+   transition—survive. `make test` green; HUD slot 14 cyan = the read
+   thunk was reached (breadcrumb for the next photo). **If round 14 still
+   pins with EXPEVT=0x040 at a NEW SPC/TEA: same residue class, next
+   un-stubbed lib output — the prepared escalation is a shim-resident
+   identity-mapping TLB-miss handler at VBR+0x400 (1 MB pages, C=0, D=1,
+   SH=1; the game's `MMUCR.URB=1` confines ldtlb replacement to entries
+   0-1, so wired entries are safe by construction).**
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication

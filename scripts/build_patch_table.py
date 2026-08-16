@@ -276,6 +276,19 @@ hook(0x8C080446, 0x7FFC, sym("shim_ee_write_skip"),
 hook(0x8C080418, 0x7FFC, sym("shim_ee_lib_post"), "EE-lib post-kicker thunk A -> return-0 stub")
 hook(0x8C080426, 0xD22A, sym("shim_ee_lib_post"), "EE-lib post-kicker thunk B -> return-0 stub")
 hook(0x8C080456, 0x7FFC, sym("shim_ee_lib_post"), "EE-lib post-kicker thunk C -> return-0 stub")
+# DreamShell round 14 (2026-08-16): the rounds-1..13 bar-0% pin decoded at last.
+# FUN_8c081bf0 calls READ thunk FUN_8c080484 (fn-table slot +40, the un-stubbed
+# sixth sibling) to fill [0x8c1c9770], then FUN_8c081aee passes that word to
+# parser FUN_8c0811f2 as a stack-table INDEX (gate: the patch-#15 Naomi
+# fingerprint pass at [0x8c1c9768] selects this trust-the-lib path). On the
+# tester's DC the lib read returns without writing -> DreamShell boot residue as
+# index -> wild address at 0x8c081224 (round-13 TEA 0x10667424, round-8 TEA
+# 0x58c1fc94) -> with the game's early MMU-on state preserved, eternal TLB-miss
+# restart. Flycast/GDEMU run this same path with residue ZERO -> index 0 is the
+# proven-green behavior; the stub makes it deterministic. Thunk body is 14 bytes
+# (0x8c080484..0x8c080491); hook() emits 12 -> next fn 0x8c080492 untouched.
+hook(0x8C080484, 0x7FFC, sym("shim_ee_idx_read"),
+     "EE-lib slot+40 settings-index read -> out=0 stub (bar-0% pin, SPC 8c081224)")
 # Round 7 (2026-07-21): tried hook(0x8C081AEE) = skip the whole orchestrator.
 # REVERTED -- it breaks Flycast too (14 cart reads, no input polls): the game
 # later waits on state the orchestrator's completion writes provide. The pin is

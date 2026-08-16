@@ -876,6 +876,32 @@ int shim_ee_lib_decode(void) { shim_mark(12, 0x07e0); return 0; }
 int shim_ee_lib_post(void);
 int shim_ee_lib_post(void)   { shim_mark(13, 0xffe0); return 0; }
 
+/* DreamShell round 14: the rounds-1..13 bar-0% pin was NEVER a spin inside the
+ * EE library -- it is the wild read at 0x8c081224. Chain: patch #15 makes the
+ * game's Naomi-BIOS fingerprint check pass (FUN_8c081438, 112 B @0xa01ffd00 vs
+ * obfuscated table 0x8c0d7ed9 -> gate [0x8c1c9768]=1; REQUIRED, task-13: gate=0
+ * dead-ends boot) -> orchestrator FUN_8c081aee trusts the lib-read path -> its
+ * wrapper FUN_8c081bf0 calls READ thunk FUN_8c080484 (fn-table [[0x8c1c9764]]
+ * slot +40 -- the un-stubbed sixth sibling of the five write-path stubs above)
+ * to fill [0x8c1c9770], then passes that word to parser FUN_8c0811f2 as an
+ * INDEX into a 32-byte stack table (r6 = SP + idx*4 at 0x8c081224). On the
+ * tester's DC the lib read returns without writing, the word keeps DreamShell
+ * boot residue (round 13 TEA 0x10667424, round 8 TEA 0x58c1fc94 = SP + 4*junk),
+ * and -- with the game's designed early MMU-on state now preserved (gdstack.S
+ * round 13) -- the wild address is unmapped: eternal TLB-miss restart, no
+ * handler at VBR+0x400. Flycast/GDEMU are green because THEIR residue at
+ * 0x8c1c9770 is zero (Flycast zeroes RAM; BIOS boot leaves it benign), i.e.
+ * the proven-green worlds already run with index 0. Stub = deterministic
+ * index 0 + return 0 (r0 ignored at the 8c081c04 call site).
+ *   slot14 cyan = the read thunk was reached (HW breadcrumb) */
+int shim_ee_idx_read(volatile u32 *out);
+int shim_ee_idx_read(volatile u32 *out) {
+    *out = 0;                /* ponytail: index 0 = flycast/GDEMU-residue behavior;
+                              * revisit only if a settings variant needs 1-7 */
+    shim_mark(14, 0x07ff);
+    return 0;
+}
+
 /* HW round 7: skip the ENTIRE settings orchestrator FUN_8c081aee (entry hook).
  * The main thread is proven pinned (fault-restart) on an intact instruction
  * inside its decode helper -- mechanism still under investigation via
