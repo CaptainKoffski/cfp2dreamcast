@@ -564,19 +564,54 @@ int shim_maple_steady(void) {
      *         base = the TA stored geometry this frame)
      *   y218: TA_NEXT_OPB | TA_OL_BASE     (5F8134/5F8124: OPB alloc
      *         cursor vs base -- same test for object-pointer blocks) */
-    hex_paint(20, 162, *(volatile u32 *)0xa05f8050);
-    hex_paint(120, 162, *(volatile u32 *)0xa05f8060);
-    hex_paint(20, 176, *(volatile u32 *)0xa05f8020);
-    hex_paint(120, 176, *(volatile u32 *)0xa05f802c);
+    /* Round 18 HW verdict: CORE inputs SANE (PARAM_BASE=0=TA_ISP_BASE,
+     * REGION_BASE=B03C8 under the FB, region-array entry 0 = 10000000 |
+     * 80000000 = valid control word + EMPTY opaque pointer) -- but
+     * TA_ITP_CURRENT frozen at 0x6C (108 bytes of geometry EVER) and
+     * ist_seen=B038: no TA list-end, no ch2-DMA-end, ever. The CORE
+     * renders an empty/unterminated scene every frame; the geometry
+     * stream to the TA is what's dead. Round 19: resurrect the round-10
+     * transfer-queue autopsy (proven rows, git 0c5f0a4) to split "ch2
+     * DMA wedged in flight" from "game never submits":
+     *   y162: ISTNRM | DMAOR<<16 . C2DST<<8 . PDST<<4 . ADST
+     *   y176: DMATCR2 | CHCR2              (SH4 DMAC ch2: count left, cfg)
+     *   y190: in-flight slot ptr | expected<<16|arrived
+     *         (no slot: 0 | 0xC0.c0.c1.c2 ring counts)
+     *   y204: SAR2 | SB_C2DSTAT            (source / Holly dest cursors --
+     *         how far the wedged transfer got)
+     *   y218: TA_ITP_CURRENT | SB_C2DLEN   (TA store cursor kept | len reg) */
     {
-        u32 rb = *(volatile u32 *)0xa05f802c & 0x007ffffcu;
-        hex_paint(20, 190, *(volatile u32 *)(0xa5000000u + rb));
-        hex_paint(120, 190, *(volatile u32 *)(0xa5000000u + rb + 4));
+        u32 istnrm = *(volatile u32 *)0xa05f6900;
+        u32 dmaor  = *(volatile u32 *)0xffa00040;
+        u32 c2dst  = *(volatile u32 *)0xa05f6808;
+        u32 pdst   = *(volatile u32 *)0xa05f7c18;
+        u32 adst   = *(volatile u32 *)0xa05f7818;
+        hex_paint(20, 162, istnrm);
+        hex_paint(120, 162, (dmaor << 16) | ((c2dst & 0xfu) << 8)
+                          | ((pdst & 0xfu) << 4) | (adst & 0xfu));
+        hex_paint(20, 176, *(volatile u32 *)0xffa00028);   /* DMATCR2 */
+        hex_paint(120, 176, *(volatile u32 *)0xffa0002c);  /* CHCR2 */
+        /* P1 reads: ring is game-written through the cache, same CPU. */
+        u32 h = 0x8c0fb8e0u;
+        u32 s = *(volatile u32 *)(h + 0x20);
+        if (!s) s = *(volatile u32 *)(h + 0x24);
+        if (!s) s = *(volatile u32 *)(h + 0x28);
+        hex_paint(20, 190, s);
+        u32 r;
+        if (s && (s & 0x1f000000u) == 0x0c000000u)
+            r = ((u32)*(volatile u16 *)(s + 0x1c) << 16)
+              | *(volatile u16 *)(s + 0x1e);
+        else
+            r = 0xc0000000u
+              | ((*(volatile u16 *)(h + 0x30) & 0x3fu) << 16)
+              | ((*(volatile u16 *)(h + 0x36) & 0x3fu) << 8)
+              |  (*(volatile u16 *)(h + 0x3c) & 0x3fu);
+        hex_paint(120, 190, r);
+        hex_paint(20, 204, *(volatile u32 *)0xffa00020);   /* SAR2 */
+        hex_paint(120, 204, *(volatile u32 *)0xa05f6800);  /* SB_C2DSTAT */
+        hex_paint(20, 218, *(volatile u32 *)0xa05f8138);   /* TA_ITP_CURRENT */
+        hex_paint(120, 218, *(volatile u32 *)0xa05f6804);  /* SB_C2DLEN */
     }
-    hex_paint(20, 204, *(volatile u32 *)0xa05f8138);
-    hex_paint(120, 204, *(volatile u32 *)0xa05f8128);
-    hex_paint(20, 218, *(volatile u32 *)0xa05f8134);
-    hex_paint(120, 218, *(volatile u32 *)0xa05f8124);
     /* Round 16 HW verdict: Holly masks HEALTHY (IML4/6 match the green
      * world exactly, incl. render-done + list-end on level 6; IML2=0 is
      * BIOS-internal, absent under isoldr by design) and ISTNRM settles at

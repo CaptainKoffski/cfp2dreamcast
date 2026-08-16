@@ -1149,6 +1149,74 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    cursors advancing ⇒ TA fine, CORE-config divergence; cursors pinned
    at base ⇒ TA stores nothing despite closing lists.
 
+   **Round 18 HW result (2026-08-16): CORE inputs SANE, TA starved —
+   the geometry stream is what's dead.** Tester photo, decoded (right
+   column double-read one row through the flicker — the two adjacent
+   identical `80000000`s; decode unambiguous): FB_R/W_SOF1 `00?B2000`
+   both (W flipping 0↔4 = the healthy per-frame flip attempt, as r15);
+   PARAM_BASE=`00000000` = TA_ISP_BASE ✓ self-consistent;
+   REGION_BASE=`000B03C8` (region array tucked right under the FB at
+   B2000 ✓); **VRAM readback of region-array entry 0 = `10000000` |
+   `80000000`** — structurally valid control word + opaque-list pointer
+   with bit 31 = EMPTY-list marker, NOT garbage, NOT zeros ⇒ the CPU's
+   VRAM writes work and the CORE's input config is fine — **both the
+   VRAM-corruption and CORE-config-divergence hypotheses are dead.**
+   The kill shot: **TA_ITP_CURRENT frozen at `0000006C`** — the TA has
+   stored 108 bytes of geometry EVER (cursor 0x6C past base 0, tester
+   reports it not changing) — while TA_NEXT_OPB=`000262C0` vs
+   TA_OL_BASE=`00098B80` (cursor below base = downward OPB growth,
+   TA_ALLOC_CTRL bit 20 set in `00121213` ✓ consistent). ist_seen
+   caveat — **RETRACTED inference**: `B038` lacking ch2-DMA-end/
+   list-end/render-done bits is NOT evidence they never fire. The
+   round-19 green capture (below) shows green ist_seen=`9038` with the
+   SAME absences — those bits are latched and cleared inside the
+   game's ISR within microseconds, invisible to a 60 Hz OR-sampler;
+   HW vs green differ only by bit 13 (Maple vblank-over, cosmetic
+   real-timing artifact). Director rows unchanged (ctx alternating,
+   state 5, pending 1). Verdict: the CORE
+   is handed an empty/unterminated scene every frame and never raises
+   render-done; the actual defect is upstream — **the game's geometry
+   stream to the TA wedged 108 bytes into the very first transfer, or
+   is never kicked at all.** Note the main thread is NOT pinned in the
+   transfer-wait (FUN_8c033c50, the round-9 signature) — SPC pumps
+   healthily — so either no submission ever enters the rings, or the
+   director's deadline path force-recycles slots.
+
+   **Round 19 instrument (deployed): transfer-queue autopsy, round-10
+   apparatus resurrected** (proven rows, git `0c5f0a4` — same ring
+   head 0x8c0fb8e0, slot layout, DMAC/Holly regs; citations in the
+   round-10 entry above). Rows y162-218 repurposed (director rows
+   kept): y162 `ISTNRM | DMAOR<<16.C2DST<<8.PDST<<4.ADST`, y176
+   `DMATCR2 | CHCR2`, y190 `in-flight slot | expected<<16|arrived`
+   (no slot: `0 | 0xC0.c0.c1.c2` ring counts), y204 `SAR2 |
+   SB_C2DSTAT` (source/dest cursors of the wedged transfer), y218
+   `TA_ITP_CURRENT | SB_C2DLEN`. Reading guide: C2DST=1 + DMATCR2>0 +
+   a slot in flight ⇒ ch2 DMA wedged mid-transfer (bus/TA
+   backpressure — dig TA acceptance next); everything idle + rings
+   `C0.00.00.00` + slot 0 ⇒ the game never submits geometry in the
+   title era (engine-level gate — dig the submission path in the
+   scene builder); rings clogged with expected≠arrived ⇒ round-10-
+   style interrupt-delivery divergence under isoldr.
+
+   **Round 19 GREEN reference column (2026-08-16, flycast regression
+   `r19-post32.png` — probe overlay caught on a raw-FB present frame,
+   title-era attract):** y162 `00000010 | 82010003` (ISTNRM sample
+   0x10; DMAOR=8201 ✓ game value, C2DST/PDST idle, ADST=3), y176
+   `00000000 | 000012C0` (DMATCR2 drained; CHCR2=12C0 = the game's
+   12C1 with DE dropped at idle), y190 `00000000 | C0000000` (no
+   in-flight slot, all three rings EMPTY), y204 `8CF80000 | 10000000`
+   (SAR2 = last geometry source END, flush at the game's own RAM-top
+   boundary — matches the round-4.5 write-truth band, no isoldr
+   overlap; C2DSTAT = TA polygon-converter FIFO 0x10000000 ✓ geometry
+   goes ch2→TA FIFO), y218 `04000000 | 00000000` (**flycast
+   TA_ITP_CURRENT readback NOT trustworthy** — 0x04000000 is no VRAM
+   offset; judge the HW value by self-consistency only), y232
+   `8C0EA7A8 | 00000000` (same registry entry as HW, pending=0 —
+   completes immediately), y246 `00000007 | 00009038` (**ctx state
+   green = 7**, the post-complete state vs HW frozen 5; ist_seen
+   bare — see the r18 retraction). Title regression GREEN
+   (`r19-post10.png` full title art).
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication
