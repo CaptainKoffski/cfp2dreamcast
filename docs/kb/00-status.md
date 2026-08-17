@@ -1406,6 +1406,37 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    that are free on HW but structural in flycast) joins the divergence
    list.
 
+   **Gate v2 — isoldr fingerprint replaces the address threshold
+   (2026-08-18, same branch).** User verified gate v1 on all three
+   targets: flycast macOS ✓, GDEMU ✓, DreamShell serial-SD ✓ — but
+   DreamShell only with EXPLICIT Memory/Heap; **defaults now froze**,
+   where round 20 had proven them working. Cause: the ≥ 0x10000
+   RAM-offset threshold assumed isoldr placements start at 0x8c010000 —
+   wrong; the ISO Loader's defaults are LOW (`ISOLDR_DEFAULT_ADDR_LOW
+   0x8c004000` — the address `isoLoader_Run` starts from,
+   `applications/iso_loader/modules/module.c:1018`; presets go down to
+   0x8c000100/0x8c001100, `include/isoldr.h:35-43`; dreamshell master
+   re-cloned 2026-08-18), so default-placed isoldr classified as "BIOS"
+   → no AT=0 window → the rounds-2-5 wedge class returned. No pure
+   address threshold can work: at the 0x8c000100 preset, isoldr's
+   entry can sit BELOW the real BIOS's 0x8c001000. Fix: positive
+   structural fingerprint — isoldr installs BOTH GD vectors and its
+   `gdc_redir_c0` stub is exactly 4 insns = 8 bytes after
+   `gdc_redir_bc` (`firmware/isoldr/loader/gdc_syscall.s`,
+   `_gdc_syscall_enable` + the stub labels), so **[0x8c0000c0] ==
+   [0x8c0000bc] + 8 at any placement**. Ground truth measured (fork
+   MMUCRWR grew a `vecc0` column): real BIOS 0x8c001000/0x8c0010f0
+   (diff 0xf0), reios 0x8c001006/0x8c0010f0 (diff 0xea;
+   reios.cpp:44,651-652) — no collision. The old high-offset test is
+   kept OR'd in as a fallback (any resident loader placed ≥ 0x8c010000
+   gets the window even if a future isoldr's stub layout drifts).
+   README's placement mandate dropped — defaults are supported again
+   (the two forbidden bands stay: game staging 0x8cf80000-40, shim
+   0x8cfc0000-0x8cfd8000). Verified (fork, dynarec): real-BIOS boot =
+   4 MMUCR writes / attract at t=75 s; reios = 2 writes / attract at
+   t=60 s; `make test` green. DreamShell-defaults re-test on real HW:
+   pending user round.
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication

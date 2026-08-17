@@ -96,20 +96,37 @@ _gdc_call:
      * every AT flip (ccn.cpp CCN_MMUCR_write: AT change -> ResetCache) --
      * thousands of full retranslations across the boot preload = the
      * "load bar crawls / never starts / Windows breakpoint" 0.6.0 reports
-     * on vanilla flycast with a real BIOS. Backend probe: isoldr redirects
-     * [0x8c0000bc] into its own resident image (gdc_syscall.s gdc_redir,
-     * Memory placement >= 0x8c010000); the real BIOS and flycast's reios
-     * keep their GD entry inside the 64 KB syscall work RAM below that.
+     * on vanilla flycast with a real BIOS. Backend probe, two signatures
+     * (either -> isoldr-class, apply the window):
+     *  1. gdc_redir PAIR: isoldr installs BOTH GD vectors, and its
+     *     gdc_redir_c0 stub sits exactly 4 insns = 8 bytes after
+     *     gdc_redir_bc (dreamshell firmware/isoldr/loader/gdc_syscall.s,
+     *     _gdc_syscall_enable + the two labels), so [0x8c0000c0] ==
+     *     [0x8c0000bc] + 8 at ANY Memory placement -- including the ISO
+     *     Loader defaults 0x8c004000 / 0x8ce00000 (isoldr.h:35-43,
+     *     iso_loader module.c:1018), which sit below any usable address
+     *     threshold. Real BIOS holds 0x8c001000/0x8c0010f0 (diff 0xf0),
+     *     reios 0x8c001006/0x8c0010f0 (diff 0xea; reios.cpp:651-652) --
+     *     both measured live (MMUCRWR vecbc/vecc0 watch, 2026-08-18).
+     *  2. GD entry RAM offset >= 0x10000: definitionally not the stock
+     *     BIOS/reios (their entries live in the 0x8c0010xx syscall RAM) =
+     *     some resident loader's image -- keeps the window for any future
+     *     isoldr whose stub layout drifts from signature 1, as long as it
+     *     is placed high (the round-20 prescription).
      * Probe per call (cheap), decision latched for the restore side. */
     mov.l   .Lvec_k, r1
-    mov.l   @r1, r1             /* GD entry the vector holds */
-    mov.l   .Lphysmask_k, r2
-    and     r2, r1
-    mov.l   .Lbios_top_k, r2
-    cmp/hs  r2, r1              /* T = RAM offset >= 0x10000 -> isoldr
-                                 * (real BIOS: 0x8c001000, reios: 0x8c001006
-                                 * -- measured, MMUCRWR vecbc watch) */
+    mov.l   @r1, r2             /* [0xbc] = GD entry */
+    mov.l   .Lvec2_k, r1
+    mov.l   @r1, r1             /* [0xc0] = GD2 entry */
+    add     #-8, r1
+    cmp/eq  r2, r1              /* T = gdc_redir pair -> isoldr */
     movt    r3
+    mov.l   .Loffmask_k, r1
+    and     r2, r1              /* GD entry's RAM offset */
+    mov.l   .Lbios_top_k, r2
+    cmp/hs  r2, r1              /* T = above the BIOS syscall RAM */
+    movt    r1
+    or      r1, r3
     mov.l   .Lmmu_gate_k, r2
     mov.l   r3, @r2
     tst     r3, r3
@@ -186,10 +203,11 @@ _gdc_call:
 .Lsp_save_k:    .long _gdc_saved_sp
 .Lstack_top_k:  .long GD_STACK_TOP
 .Lvec_k:        .long 0x8c0000bc
+.Lvec2_k:       .long 0x8c0000c0
 .Lmmucr_k:      .long 0xff000010
 .Lmmucr_save_k: .long _gdc_saved_mmucr
 .Lmmu_gate_k:   .long _gdc_mmu_gate
-.Lphysmask_k:   .long 0x00ffffff    /* RAM offset (16 MB), drops the 0x0c base */
+.Loffmask_k:    .long 0x00ffffff    /* RAM offset (16 MB), drops the 0x0c base */
 .Lbios_top_k:   .long 0x00010000
 .Lfpscr_kos_k:  .long 0x00040001    /* KOS default: DN=1, RM=chop, SZ=PR=FR=0 */
 

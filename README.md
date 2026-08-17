@@ -95,12 +95,11 @@ make deploy     # copy to SD card (CARD=/Volumes/GDEMU/NN) + dot_clean guard
 release zip to GDMENUCardManager (the disc identifies as `T-CFP001M`,
 "CLEOPATRA FORTUNE PLUS").
 
-**DreamShell / serial-SD users (isoldr):** use ISO Loader settings
-Memory = `0x8cfe8000`, Heap = `0x8cff4000`, async/DMA/CDDA off. Never place
-isoldr at `0x8cf80000`–`0x8cf80040` (the game's per-frame TA staging block),
-`0x8cfc0000`–`0x8cfd8000` (the shim's home), or anywhere below `0x8c010000`
-(low BIOS work RAM: the game tramples it, and the shim's isoldr detection
-keys on the GD vector pointing above it). Expect the load bar to take
+**DreamShell / serial-SD users (isoldr):** default ISO Loader settings work
+(HW-verified; the measured-clean alternative is Memory = `0x8cfe8000` with
+Heap = `0x8cff4000`). Keep async/DMA/CDDA off. Never place isoldr at
+`0x8cf80000`–`0x8cf80040` (the game's per-frame TA staging block) or
+`0x8cfc0000`–`0x8cfd8000` (the shim's home). Expect the load bar to take
 1.5–2 minutes at serial speeds.
 
 ## How it works (short version)
