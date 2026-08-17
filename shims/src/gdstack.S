@@ -87,22 +87,55 @@ _gdc_call:
      * isoldr in the AT=0 world it needs (rounds 2-5) while the game's
      * SQ translation survives; a plain 0-store leaves TI=0 so the game's
      * UTLB entries are NOT invalidated and AT restore fully revives them. */
+    /* ...but ONLY for isoldr (2026-08-18 flycast 0.6.0 regression). The
+     * real BIOS driver never needed AT=0 -- 18 GDEMU-green rounds and the
+     * whole 0.5.0 era called it with the game's AT=1 intact -- and on a
+     * BIOS-style boot this game runs MMU-ON from EARLY boot (round 14), so
+     * an unconditional clear/restore toggles MMUCR.AT twice per syscall.
+     * Real silicon shrugs; flycast wipes its entire dynarec block cache on
+     * every AT flip (ccn.cpp CCN_MMUCR_write: AT change -> ResetCache) --
+     * thousands of full retranslations across the boot preload = the
+     * "load bar crawls / never starts / Windows breakpoint" 0.6.0 reports
+     * on vanilla flycast with a real BIOS. Backend probe: isoldr redirects
+     * [0x8c0000bc] into its own resident image (gdc_syscall.s gdc_redir,
+     * Memory placement >= 0x8c010000); the real BIOS and flycast's reios
+     * keep their GD entry inside the 64 KB syscall work RAM below that.
+     * Probe per call (cheap), decision latched for the restore side. */
+    mov.l   .Lvec_k, r1
+    mov.l   @r1, r1             /* GD entry the vector holds */
+    mov.l   .Lphysmask_k, r2
+    and     r2, r1
+    mov.l   .Lbios_top_k, r2
+    cmp/hs  r2, r1              /* T = RAM offset >= 0x10000 -> isoldr
+                                 * (real BIOS: 0x8c001000, reios: 0x8c001006
+                                 * -- measured, MMUCRWR vecbc watch) */
+    movt    r3
+    mov.l   .Lmmu_gate_k, r2
+    mov.l   r3, @r2
+    tst     r3, r3
+    bt      .Lmmu_skip_clear
     mov.l   .Lmmucr_k, r1
     mov.l   @r1, r2             /* game's MMUCR (AT=1: SQ-via-TLB) */
     mov.l   .Lmmucr_save_k, r3
     mov.l   r2, @r3
     mov     #0, r2
     mov.l   r2, @r1
+.Lmmu_skip_clear:
 
     mov.l   .Lvec_k, r0
     mov.l   @r0, r0             /* live syscall vector */
     jsr     @r0
     nop
 
-    mov.l   .Lmmucr_save_k, r3  /* restore the game's MMUCR (r0 = result) */
+    mov.l   .Lmmu_gate_k, r1    /* r0 = result -- keep it */
+    mov.l   @r1, r1
+    tst     r1, r1
+    bt      .Lmmu_skip_restore  /* non-isoldr: MMUCR never touched */
+    mov.l   .Lmmucr_save_k, r3  /* restore the game's MMUCR */
     mov.l   @r3, r2
     mov.l   .Lmmucr_k, r1
     mov.l   r2, @r1
+.Lmmu_skip_restore:
 
     mov.l   .Lfpscr_kos_k, r1   /* known move width/bank for the restore */
     lds     r1, fpscr
@@ -155,6 +188,9 @@ _gdc_call:
 .Lvec_k:        .long 0x8c0000bc
 .Lmmucr_k:      .long 0xff000010
 .Lmmucr_save_k: .long _gdc_saved_mmucr
+.Lmmu_gate_k:   .long _gdc_mmu_gate
+.Lphysmask_k:   .long 0x00ffffff    /* RAM offset (16 MB), drops the 0x0c base */
+.Lbios_top_k:   .long 0x00010000
 .Lfpscr_kos_k:  .long 0x00040001    /* KOS default: DN=1, RM=chop, SZ=PR=FR=0 */
 
     .section .data
@@ -162,3 +198,4 @@ _gdc_call:
     .align  2
 _gdc_saved_sp:  .long 0
 _gdc_saved_mmucr: .long 0
+_gdc_mmu_gate:  .long 0             /* 1 = isoldr backend: AT=0 window applied */

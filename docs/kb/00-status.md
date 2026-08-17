@@ -1,6 +1,8 @@
 # Project status
 
-**Updated:** 2026-08-15 (DreamShell serial-SD boot investigation live — see
+**Updated:** 2026-08-18 (0.6.0 flycast regression root-caused and fixed on
+branch `fix/flycast-mmucr-toggle` — see the Phase-5 entry dated 2026-08-18.
+Previous: DreamShell serial-SD boot investigation — see
 the Phase-5 entry; GDEMU path unaffected. Phase 5: GAME FULLY PLAYABLE ON
 REAL HARDWARE —
 1P and 2P at full speed, both pads responsive; 2P-slowdown case closed in
@@ -1355,6 +1357,54 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    FB_R_SIZE write (pvr_regs.cpp) — built while suspecting the game's
    engine; kept as tooling. Release set synced
    (md5 ba6d9402ee58ca3d2a483b08667c4c5f).
+
+   **0.6.0 emulator regression — root-caused and fixed (2026-08-18,
+   branch `fix/flycast-mmucr-toggle`).** Reports: vanilla flycast
+   (macOS) shows the load bar crawling for minutes and the game never
+   starting; Windows flycast dies with "A breakpoint has been reached";
+   Android flycast doesn't start. Real HW (GDEMU + serial-SD) flawless;
+   0.5.0 was fine everywhere. Root cause: the round-13 MMUCR discipline
+   in `gdstack.S` (save → 0 → restore around every GD syscall) toggles
+   MMUCR.AT twice per call once the game is running MMU-on — and on any
+   BIOS-style boot the game enables the MMU at EARLY boot (round-14 HW
+   finding, now emulator-confirmed: `MMUCRWR val=00040005 pc=8c03b1c0`
+   right after handoff on both real-BIOS and current-reios flycast
+   boots). Each AT flip makes flycast throw away its entire dynarec
+   translation cache (`core/hw/sh4/modules/ccn.cpp` `CCN_MMUCR_write`:
+   `mmu_changed_state` → `emu.getSh4Executor()->ResetCache()`) —
+   measured 1498 clear/restore pairs before the 3000-line log cap,
+   early in the preload's ~150 reads × per-poll EXEC/CHECK calls, i.e.
+   thousands of full retranslations = the crawling bar; the Windows
+   "breakpoint" is flycast's fatal path under the same thrash, and the
+   interpreter is immune (cheap flag) — which is why every round-13+
+   ablation run (interpreter) and every GDEMU/serial HW round (real
+   silicon, MMUCR write ≈ free) stayed green while every vanilla
+   dynarec user broke. 0.5.0 never wrote MMUCR at runtime: one enable,
+   one ResetCache, done. Fix: the AT=0 window exists for exactly one
+   backend — isoldr (rounds 2-5); the real BIOS driver demonstrably
+   never needed it (18 GDEMU-green rounds + all of 0.5.0 ran it with
+   the game's AT=1 intact). `gdc_call` now probes the live vector per
+   call and touches MMUCR only when [0x8c0000bc]'s RAM offset ≥ 0x10000
+   = isoldr resident image (measured ground truth via the fork's new
+   MMUCRWR `vecbc` column: real BIOS holds 0x8c001000, reios 0x8c001006;
+   isoldr = its Memory placement, README now mandates ≥ 0x8c010000 —
+   low placements are game-trampled BIOS work RAM anyway, round 11).
+   First fix attempt masked the vector with 0x1fffffff — keeps the
+   0x0c RAM base, classifies EVERYTHING isoldr (verification caught it:
+   E3/E4 still stormed); correct mask is 0x00ffffff (RAM offset).
+   Verified: real-BIOS flycast boot with the fixed disc makes exactly
+   4 MMUCR writes ever (BIOS ×2, loader handoff, game enable), zero
+   from gdc_call, and reaches full-speed ATTRACT by t=60 s
+   (`e6-t60.png` — PRESS START + FREE PLAY, 12k TA frames), where the
+   0.6.0 disc sat at a black screen with a crawling bar (user
+   screenshot + local repro, bar ~4% at 135 s). reios boot verified
+   equally clean (E7). `make test` green. DreamShell path unchanged by
+   construction (vector inside the isoldr image → gate=1 → identical
+   save/0/restore behavior). Lesson recorded: emulator-vs-HW divergence
+   now cuts BOTH ways — this was the first "works on silicon, breaks in
+   the emulator" defect, and its mechanism (register write side effects
+   that are free on HW but structural in flycast) joins the divergence
+   list.
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
