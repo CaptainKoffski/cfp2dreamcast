@@ -152,10 +152,19 @@ int main(void) {
 
     /* Naomi BIOS splash (arcade boot feel): shown for the whole load. On the
      * real Naomi the BIOS draws this screen, not the game -- our conversion
-     * bypasses that BIOS, so the loader stands in for it. Single memcpy:
-     * blob is prepared as raw RGB565 in framebuffer layout. */
-    if (LOADER_QUIET)
-        memcpy(vram_s, splash_bin, 640 * 480 * 2);
+     * bypasses that BIOS, so the loader stands in for it. Displayed as
+     * RGB0555, the format the GAME scans at takeover (FB_R_CTRL=1, HW
+     * round-15 photo 2026-08-16): matching it here means the splash needs no
+     * VRAM repack inside the takeover blank window -- 307k uncached 16-bit
+     * VRAM reads cost ~1.2 s of solid black there (Flycast CLEO-SPG
+     * timestamps + HW 2026-08-18), vs ~free here reading the cached blob.
+     * KOS picks the cable-correct 640x480 variant (video.c vid_set_mode). */
+    if (LOADER_QUIET) {
+        vid_set_mode(DM_640x480, PM_RGB555);
+        const uint16 *s = (const uint16 *)splash_bin;   /* blob stays RGB565 */
+        for (unsigned i = 0; i < 640u * 480u; i++)
+            vram_s[i] = RGB565_TO_0555(s[i]);
+    }
     tmark("splash");
 
     say("CLEO LOADER M2");

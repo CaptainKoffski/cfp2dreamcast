@@ -1463,6 +1463,45 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    call (outline convergence trick). `make test` + 90 s Flycast attract
    PASS (bar itself invisible in Flycast — FB writes, as always).
 
+   **HW round 2 (2026-08-18): design confirmed ("looks amazing") but ~1 s
+   SOLID BLACK between loader splash and splash+bar.** Root cause chased
+   twice:
+   - First hypothesis (WRONG): the 565→0555 repack loop (307k uncached
+     16-bit VRAM reads in the blanked window). Moved the conversion to
+     the LOADER instead — `loader/main.c` now does
+     `vid_set_mode(DM_640x480, PM_RGB555)` (KOS picks the cable-correct
+     variant, video.c:227) and repacks the 565 blob during the splash
+     copy (cached RAM reads, ~free); the shim repack + 2-slot latch were
+     DELETED (`loadbar_paint` is stateless again, bar pixels only).
+     Right change, but the gap didn't move: Flycast CLEO-SPG timestamps
+     showed the same ~1.24 s from the SDK's last FB write to our unblank
+     with ZERO logged activity between — the game SDK's display init
+     BLANKS video (VO_CONTROL |= 8) at entry and sits ~1.2 s in a settle
+     wait before returning; our unblank (end of shim_vid_init) can only
+     run after. The black was always there — the old black-background
+     bar just hid it; the white splash exposed it.
+   - Real fix: **patch #38 (3× insn16) — kill the game's display-init
+     blank**. All three VO_CONTROL blank writers share the
+     `mov.l @global,r0; or #8,r0; jsr reg-writer(0x8c03df00)` idiom:
+     0x8c042944 (monitor-globals applier, pr=8c04294a), 0x8c041eec
+     (output-setup applier, pr=8c041ef2 — surfaced only after site 1 was
+     patched), 0x8c03e53c (display on/off helper FUN_8c03e520,
+     pr=8c03e558 — surfaced after site 2). `or #8,r0`→`or #0,r0`
+     (0xCB08→0xCB00). Full-image 0xCB08 scan = 11 hits, only these three
+     feed VO_CONTROL (dynamic pr evidence). Each fires only in the
+     takeover second (90 s attract captures); the shim's round-3 unblank
+     already proved the load runs safely unblanked.
+   - Verified (Flycast): takeover window now has ZERO VO_CONTROL
+     changes — video stays live from loader splash through the 1.2 s
+     settle into the bar phase. FB-emu capture (Cable=3,
+     rend.EmulateFramebuffer + FLYCAST_SHOT): license → 0555 splash
+     (loader, colors correct) → same splash + empty bar (takeover), no
+     black frame at 2 s sampling. Post-load the FB-emu display freezes
+     on the last FB frame — known display-channel artifact; the cart
+     log (17k maple polls over 36 s) proves the game reached attract.
+     `make test` green, VMU canary PASS. AWAITING HW round 3 (both
+     cables; composite SPG resync is physical and may still flash).
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication

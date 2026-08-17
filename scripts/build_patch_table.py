@@ -324,6 +324,38 @@ hook(0x8C080484, 0x7FFC, sym("shim_ee_idx_read"),
 hook(0x8C0257F4, 0xD235, sym("shim_monitor_set"),
      "monitor globals writer -> cable-keyed (0x31 sharp on VGA / NTSC 480i on TV)")
 
+# §Patch #38: kill the display-init blank so the Naomi splash shows through the
+# game's video takeover. The SDK's monitor-globals applier (regs 0x5f80c8..f0
+# from RAM globals 0x8c0e84xx, via reg-writer FUN_8c03df00) writes VO_CONTROL as
+# [0x8c0e8488] | 8 -- bit 3 = blank -- at 0x8c042944 (`or #8,r0`; pr=8c04294a in
+# the CLEO-SPG capture), then the init's settle tail holds the blank for ~1.2 s
+# before returning (2026-08-18 log: last FB write 52.615 -> shim unblank 53.851,
+# ZERO activity between = pure wait). Since round 3 the shim unblanks right after
+# the init returns and the whole load runs unblanked (HW-proven safe), so the
+# blank's only remaining effect was this 1.2 s black hole between the loader
+# splash and the loadbar splash -- visible now that both are white. `or #8,r0`
+# (0xCB08) -> `or #0,r0` (0xCB00): the applier writes the global's value
+# unchanged, video never blanks, splash (already scanout-correct 0555 -- loader
+# PM_RGB555) stays up through the SPG reprogram + settle. Boot-only site: one
+# hit in a 90 s attract capture.
+insn16(0x8C042944, 0xCB08, 0xCB00, "patch#38 display-init blank kill: VO_CONTROL |8 -> |0 (splash visible through takeover)")
+# Second (and last) blank site, same `mov.l @global,r0; or #8,r0; jsr reg-writer`
+# idiom in the output-setup applier at 0x8c041e9c (regs 0x44..0x118, VO_CONTROL
+# last; pr=8c041ef2 in the patched-#38 capture: it re-blanked 1 ms after the
+# patched applier unblanked and held the 1.2 s). Full-image scan for the pattern
+# `or #8,r0; jsr @r14; mov r0,r5` (08cb 0b4e 0365) = exactly these two sites.
+insn16(0x8C041EEC, 0xCB08, 0xCB00, "patch#38 display-init blank kill, site 2 (output-setup applier)")
+# Third and last blank site: the generic display on/off helper FUN_8c03e520
+# (arg==1 -> FB_R_CTRL&~1 + VO_CONTROL|8; else unblank path; both converge on
+# the VO_CONTROL write at 8c03e554, pr=8c03e558). With sites 1+2 patched it
+# re-blanked 1 ms after the applier's unblank and held the 1.2 s settle. Fires
+# exactly twice in a 90 s attract capture, both inside the takeover second --
+# the game never blanks during attract; if an unexercised path (test menu)
+# ever calls display-off, the effect is "last frame stays up" -- cosmetic.
+# Full 0xCB08 scan: 11 hits, only these three feed a VO_CONTROL write
+# (dynamic pr set across all captures: 8c04294a / 8c041ef2 / 8c03e558).
+insn16(0x8C03E53C, 0xCB08, 0xCB00, "patch#38 display-init blank kill, site 3 (display on/off helper)")
+
 # NOTE (Task 14b history, RESOLVED by Task 14f above): FUN_8c03c2c6 is reached via
 # BOTH pool[0x8c02ed6c] (Mode A) and pool[0x8c02ee88] (Mode B, DC takes this); Task
 # 14 swapped only the first, and swapping the second to shim_maple_entry regressed
