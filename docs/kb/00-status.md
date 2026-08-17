@@ -1439,6 +1439,30 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    with DEFAULT ISO Loader settings. The 0.6.0 emulator-regression case
    is CLOSED; merged to main (93c4339). Ready to tag 0.6.1.**
 
+   **Loadbar redesign — splash stays + orange fill (2026-08-17, AWAITING
+   HW):** tester mockup = Naomi splash on screen through the whole load,
+   orange fill/black track/dark border. Enabler: the game's scanout
+   format is now KNOWN — RGB0555 (`FB_R_CTRL=1`, depth bits[3:2]=0; HW
+   round-15 register photo 2026-08-16, same value live in the Flycast
+   CLEO-SPG log at takeover) — so the old "different pixel format,
+   B/W only" constraint (HW round 1, washed-out 565 splash) dissolves
+   into a one-shot in-place repack: `loadbar_paint` (shims/src/util.c)
+   now converts each scanout buffer 565→0555 on first sight
+   (`RGB565_TO_0555` in shim_iface.h, host-tested) instead of blacking
+   it out, keeping the loader's splash visible; 2-slot seen-base latch
+   (the game flips two bases during load; a buffer must repack at most
+   once — twice would mangle). Bar per mockup: black 1-px outline,
+   orange fill (0x7984 = #F26522 in 0555), explicit black track,
+   splash-white gap rows between. Geometry unchanged (yb=417, one row
+   for all cables post-#37). Round-2 blink lesson preserved: first
+   repack runs while still blanked. Known 1–2-frame risk: second
+   buffer's repack happens after unblank (its base is unknowable until
+   the game flips to it). HW-testable risk: if flip-buffer #2 holds
+   garbage instead of splash bytes, composite may alternate
+   splash/garbage — fallback plan is an embedded logo repainted every
+   call (outline convergence trick). `make test` + 90 s Flycast attract
+   PASS (bar itself invisible in Flycast — FB writes, as always).
+
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
    see below). **Pre-publication

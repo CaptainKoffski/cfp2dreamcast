@@ -77,6 +77,13 @@
 #define SHIM_LOADBAR 1
 #endif
 
+/* RGB565 -> RGB0555 in-place repack for the loadbar splash keep-alive: the game
+ * scans the FB as 0555 (FB_R_CTRL=1, depth bits[3:2]=0 -- HW round-15 register
+ * photo 2026-08-16) while the loader's splash bytes are RGB565. R and the top
+ * 5 bits of G shift down one; B stays; bit 15 (K) lands 0 and is ignored on
+ * scanout. Pure math, host-tested. */
+#define RGB565_TO_0555(p) ((unsigned short)((((p) & 0xffc0u) >> 1) | ((p) & 0x1fu)))
+
 /* GD-ROM cart streaming via G1-DMA (CD_CMD_DMAREAD) instead of polled PIO -- the
  * deferred I1 "GD-DMA upgrade". Whole-sector, 32-byte-aligned body reads go by
  * DMA (the bulk); partial head/tail and any unaligned body stay PIO. 1 = DMA

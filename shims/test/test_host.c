@@ -69,6 +69,15 @@ int main(void) {
         assert(jvs_checksum(f2) == (unsigned char)(0x22 + 0x80));     /* checksum picks up P2 byte */
     }
 
-    printf("PASS test_host cart_split + dc_to_jvs + jvs_checksum + p2\n");
+    /* RGB565 -> RGB0555 loadbar repack: extremes survive, channels land in the
+       0555 slots (R 14:10, G 9:5 = top 5 of the 6, B 4:0), K bit 15 = 0. */
+    assert(RGB565_TO_0555(0x0000u) == 0x0000u);                      /* black */
+    assert(RGB565_TO_0555(0xffffu) == 0x7fffu);                      /* white */
+    assert(RGB565_TO_0555(0xf800u) == 0x7c00u);                      /* red   */
+    assert(RGB565_TO_0555(0x07e0u) == 0x03e0u);                      /* green */
+    assert(RGB565_TO_0555(0x001fu) == 0x001fu);                      /* blue  */
+    assert(RGB565_TO_0555(0x39e7u) == 0x1ce7u);                      /* the round-1 olive gray */
+
+    printf("PASS test_host cart_split + dc_to_jvs + jvs_checksum + p2 + rgb repack\n");
     return 0;
 }

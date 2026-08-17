@@ -85,18 +85,24 @@ void hex_paint(unsigned int x, unsigned int y, unsigned int val) {
 }
 
 #if SHIM_LOADBAR
-/* Boot-preload progress bar: 320x6 px fill in a 1-px outline, centered, low on
- * screen (below the death-screen/LOADSTAT hex rows; row is cable-dependent --
- * see yb). Same live-scanout idiom as hex_paint_c (unblank + FB_R_SOF1 base).
- * BLACK/WHITE ONLY: the game scans the FB in a different pixel format than the
- * loader's RGB565 splash bytes (HW photo 2026-08-01: splash washed out, the
- * 0x39e7 dark-gray track showed light olive) -- 0x0000/0xffff are the only
- * colors identical in every format, so the bar needs no format detection.
- * First paint blacks out the whole stale-splash FB (provably just splash
- * residue: it is what the screen was showing) -> clean splash -> black + bar
- * transition. fill is the lit width in px; cost irrelevant during load. */
+/* Boot-preload progress bar over the loader's Naomi splash: 320x6 px orange
+ * fill + black track in a black 1-px outline, centered, low on screen. Same
+ * live-scanout idiom as hex_paint_c (unblank + FB_R_SOF1 base).
+ * COLOR: the game scans the FB as RGB0555 (FB_R_CTRL=1 -- HW round-15
+ * register photo 2026-08-16) while the loader's splash bytes are RGB565 (HW
+ * photo 2026-08-01: splash washed out, the 0x39e7 dark-gray track showed
+ * light olive). First sight of each scanout base repacks that whole buffer
+ * 565->0555 in place (RGB565_TO_0555) instead of the old blackout, so the
+ * splash stays up behind the bar; the first repack runs while video is still
+ * blanked (unblank-first showed the stale splash for the 1-2 frames the pass
+ * takes -- HW round 2 blink). Bar colors are 0555 literals; black/white are
+ * format-invariant. fill is the lit width in px; cost irrelevant during load. */
 void loadbar_paint(unsigned int fill) {
-    static unsigned int pb_virgin = 1;     /* .data non-zero init (house style) */
+    /* Two slots: the game flips between two bases during load (see the outline
+     * comment below); a base must repack at most ONCE (a second 565->555 pass
+     * over already-555 bytes would mangle it). 1 = empty: real bases are &~3.
+     * .data non-zero init (house style). */
+    static unsigned int pb_seen[2] = {1u, 1u};
     if (fill > 320u) fill = 320u;
     unsigned int base = *(volatile unsigned int *)0xa05f8050 & 0x00fffffcu;
     volatile unsigned short *fb = (volatile unsigned short *)(0xa5000000u + base);
@@ -110,26 +116,29 @@ void loadbar_paint(unsigned int fill) {
      * screen line N on every cable. 417..428 = same ~10% bottom margin
      * inside NTSC overscan that the old TV row aimed for. */
     unsigned int yb = 417u;
-    if (pb_virgin) {                       /* blackout WHILE STILL BLANKED, then
-                                            * unblank below -- unblank-first showed
-                                            * the stale splash for the 1-2 frames
-                                            * the clear takes (HW: splash blink) */
-        pb_virgin = 0;
-        volatile unsigned int *fb32 = (volatile unsigned int *)fb;
-        for (unsigned int i = 0; i < 640u * 480u / 2u; i++) fb32[i] = 0;
+    if (base != pb_seen[0] && base != pb_seen[1]) {
+        unsigned int slot = pb_seen[0] == 1u ? 0u : pb_seen[1] == 1u ? 1u : 2u;
+        if (slot < 2u) {   /* a 3rd base ever: leave it washed out, never
+                            * risk a double repack */
+            pb_seen[slot] = base;
+            for (unsigned int i = 0; i < 640u * 480u; i++)
+                fb[i] = RGB565_TO_0555(fb[i]);
+        }
     }
-    /* Outline every paint, not one-shot: the game flips the scanout base
-     * between two buffers each vblank even during load (CLEO-SPG: SOF1
+    /* Outline + track every paint, not one-shot: the game flips the scanout
+     * base between two buffers each vblank even during load (CLEO-SPG: SOF1
      * 0xfd000<->0x4fd000 on TV cable), so a once-painted outline lives in
      * one flip buffer and vanishes every other frame. Repainting converges
-     * both buffers; cost irrelevant during load. */
+     * both buffers; cost irrelevant during load. Black outline + track and
+     * orange fill (0x7984 = #F26522 in 0555) per the tester mockup; the
+     * splash-white rows between outline and track are left as the gap. */
     for (unsigned int x = 158u; x < 483u; x++)              /* outline: top/bottom */
-        fb[yb * 640u + x] = fb[(yb + 11u) * 640u + x] = 0xffffu;
+        fb[yb * 640u + x] = fb[(yb + 11u) * 640u + x] = 0x0000u;
     for (unsigned int y = yb + 1u; y < yb + 11u; y++)       /* outline: sides */
-        fb[y * 640u + 158u] = fb[y * 640u + 482u] = 0xffffu;
+        fb[y * 640u + 158u] = fb[y * 640u + 482u] = 0x0000u;
     for (unsigned int y = yb + 3u; y < yb + 9u; y++)
-        for (unsigned int x = 0; x < fill; x++)
-            fb[y * 640u + 160u + x] = 0xffffu;
+        for (unsigned int x = 0; x < 320u; x++)             /* fill + black track */
+            fb[y * 640u + 160u + x] = x < fill ? 0x7984u : 0x0000u;
     *(volatile unsigned int *)0xa05f80e8 &= ~8u;            /* unblank video */
 }
 #endif
@@ -177,7 +186,7 @@ int shim_vid_init(unsigned int mode, unsigned int b, unsigned int c, unsigned in
     /* Empty bar right at video takeover (the SDK init above just programmed
      * the FB regs this paint reads), not at the first cart stream ~1 s later
      * -- kills the splash->bar solid-black gap (HW round 3). Re-entry safe:
-     * the one-shot blackout is loadbar_paint's own virgin latch. */
+     * the one-shot 565->555 repack is loadbar_paint's own seen-base latch. */
     loadbar_paint(0);
 #endif
     return r;
