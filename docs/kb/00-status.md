@@ -3,8 +3,9 @@
 **Updated:** 2026-08-18 (loadbar redesign live on branch
 `loading-bar-naomi-splash` (rebased onto the 0.6.0 fix): Naomi splash stays
 on screen through the whole load — orange-fill bar, patch #38 kills the SDK
-display-init blank; HW round 2 confirmed the design, AWAITING HW round 3 —
-see the loadbar Phase-5 entries. The 0.6.0 flycast dynarec regression
+display-init blank; HW round 3 green on both cables except two takeover
+blinks — root-caused to the init's FB_R_CTRL/FB_R_SIZE off ritual, patch
+#39 planned — see the loadbar Phase-5 entries. The 0.6.0 flycast dynarec regression
 (MMUCR toggling in `gdc_call`) is CLOSED: fixed + verified on flycast macOS,
 GDEMU, and DreamShell serial-SD with default ISO Loader settings, merged to
 main, ready to tag 0.6.1. Phase 5: GAME FULLY PLAYABLE ON
@@ -1521,6 +1522,32 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    interact: no shared files (gdstack.S vs loader/util/patch table), no
    patch-number overlap, and the gate probes GD vectors the loadbar work
    never touches. HW round 3 still pending.
+
+   **HW round 3 (2026-08-18): GREEN on flycast, HW VGA, and HW composite —
+   except TWO BLINKS between the splash (no bar) and splash+bar.** Root
+   cause already in `capture-rebase-verify.log` stdout: patch #38 holds
+   (zero VO_CONTROL writes after the loader's final unblank), but the SDK
+   display-init's off ritual has a second half #38 never touched —
+   FB_R_CTRL bit 0 (scanout enable) cleared + FB_R_SIZE zeroed, then
+   restored, in exactly two clusters: (A) monitor-globals applier
+   disables (pr=8c042ece, FB_R_SIZE=0 at 8c042ed4), restored 13 ms later
+   by the output-setup applier (8c041eba) + helper on-path (8c03e560);
+   (B+C) helper off-path (pr=8c03e538) and second applier site
+   (pr=8c04287a, FB_R_SIZE=0 at 8c042880) 20 ms apart — fused to one
+   blink by eye. Two clusters = the two reported blinks. Sub-frame in
+   flycast (0.5–13 ms) = invisible there; on HW the init's settle waits
+   stretch each window across real frames — the reverse-direction twin
+   of the 0.6.0 divergence lesson. NOT the composite SPG resync warned
+   about earlier: no SPG_CONTROL/SPG_LOAD change at takeover (post-#37
+   the game re-programs the loader's own timings), which is also why VGA
+   blinks too. Planned fix: **patch #39**, same playbook as #38 —
+   neutralize the FB_R_CTRL-clear at both applier sites + helper
+   off-path and the two FB_R_SIZE zeroings (~4-6 insn16; exact opcodes
+   need a Ghidra pass). Low risk: window A then scans the splash with
+   the loader's FB geometry (differs from the game's by one y-size bit),
+   and a no-op'd helper off-path is the same "last frame stays up"
+   tradeoff #38 already accepted. Verification is HW-only (flycast is
+   blind to sub-frame scanout drops; FB-emu freezes post-load).
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
