@@ -1,9 +1,13 @@
 # Project status
 
-**Updated:** 2026-08-18 (0.6.0 flycast regression root-caused and fixed on
-branch `fix/flycast-mmucr-toggle` — see the Phase-5 entry dated 2026-08-18.
-Previous: DreamShell serial-SD boot investigation — see
-the Phase-5 entry; GDEMU path unaffected. Phase 5: GAME FULLY PLAYABLE ON
+**Updated:** 2026-08-18 (loadbar redesign live on branch
+`loading-bar-naomi-splash` (rebased onto the 0.6.0 fix): Naomi splash stays
+on screen through the whole load — orange-fill bar, patch #38 kills the SDK
+display-init blank; HW round 2 confirmed the design, AWAITING HW round 3 —
+see the loadbar Phase-5 entries. The 0.6.0 flycast dynarec regression
+(MMUCR toggling in `gdc_call`) is CLOSED: fixed + verified on flycast macOS,
+GDEMU, and DreamShell serial-SD with default ISO Loader settings, merged to
+main, ready to tag 0.6.1. Phase 5: GAME FULLY PLAYABLE ON
 REAL HARDWARE —
 1P and 2P at full speed, both pads responsive; 2P-slowdown case closed in
 round 18; composite/AV 15 kHz output fixed (patch #34) and HW-verified on
@@ -1440,7 +1444,9 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    is CLOSED; merged to main (93c4339). Ready to tag 0.6.1.**
 
    **Loadbar redesign — splash stays + orange fill (2026-08-17, AWAITING
-   HW):** tester mockup = Naomi splash on screen through the whole load,
+   HW; parallel thread to the 0.6.0 regression above, developed on branch
+   `loading-bar-naomi-splash` and rebased onto the fix 2026-08-18):**
+   tester mockup = Naomi splash on screen through the whole load,
    orange fill/black track/dark border. Enabler: the game's scanout
    format is now KNOWN — RGB0555 (`FB_R_CTRL=1`, depth bits[3:2]=0; HW
    round-15 register photo 2026-08-16, same value live in the Flycast
@@ -1501,6 +1507,20 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
      log (17k maple polls over 36 s) proves the game reached attract.
      `make test` green, VMU canary PASS. AWAITING HW round 3 (both
      cables; composite SPG resync is physical and may still flash).
+
+   **Post-rebase combined verification (2026-08-18):** branch rebased onto
+   the 0.6.0 fix — first disc carrying the MMUCR isoldr gate + patch #38 +
+   PM_RGB555 loader together. Flycast (fork, dynarec, real-BIOS boot,
+   `capture-rebase-verify.log`): MMUCRWR = exactly 4 total (BIOS ×2,
+   loader handoff, game enable; zero from `gdc_call`), and VO_CONTROL
+   untouched from the pre-handoff unblank through the whole takeover —
+   the three patched blank-site prs (8c04294a/8c041ef2/8c03e558) never
+   appear; site 3's residual FB_R_CTRL enable toggle is sub-ms =
+   sub-frame, invisible. Attract reached (how-to-play demo + FREE PLAY
+   by t≈65 s, live TA frames). `make test` green. The two threads don't
+   interact: no shared files (gdstack.S vs loader/util/patch table), no
+   patch-number overlap, and the gate probes GD vectors the loadbar work
+   never touches. HW round 3 still pending.
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
