@@ -1434,8 +1434,10 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    (the two forbidden bands stay: game staging 0x8cf80000-40, shim
    0x8cfc0000-0x8cfd8000). Verified (fork, dynarec): real-BIOS boot =
    4 MMUCR writes / attract at t=75 s; reios = 2 writes / attract at
-   t=60 s; `make test` green. DreamShell-defaults re-test on real HW:
-   pending user round.
+   t=60 s; `make test` green. **HW verdict (2026-08-18): user tested
+   everything GREEN — flycast macOS, GDEMU, and DreamShell serial-SD
+   with DEFAULT ISO Loader settings. The 0.6.0 emulator-regression case
+   is CLOSED; merged to main (93c4339). Ready to tag 0.6.1.**
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
