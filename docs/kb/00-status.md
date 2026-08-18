@@ -3,11 +3,11 @@
 **Updated:** 2026-08-18 (loadbar redesign live on branch
 `loading-bar-naomi-splash` (rebased onto the 0.6.0 fix): Naomi splash stays
 on screen through the whole load — orange-fill bar, patch #38 kills the SDK
-display-init blank; HW round 3 green on both cables except two takeover
-blinks — root-caused to the init's FB_R_CTRL/FB_R_SIZE off ritual, patch
-#39 BUILT (7× insn16, whole ritual family neutralized, flycast-verified
-register trail clean) — AWAITING HW round 4 — see the loadbar Phase-5
-entries. The 0.6.0 flycast dynarec regression
+display-init blank; the two takeover blinks (HW round 3) are FIXED by
+patch #39 (7× insn16, the init's whole FB_R_CTRL/FB_R_SIZE off ritual
+neutralized) — HW round 4 GREEN, confirmed by the user and an
+independent tester; loadbar thread CLOSED and merged to main — see the
+loadbar Phase-5 entries. The 0.6.0 flycast dynarec regression
 (MMUCR toggling in `gdc_call`) is CLOSED: fixed + verified on flycast macOS,
 GDEMU, and DreamShell serial-SD with default ISO Loader settings, merged to
 main, ready to tag 0.6.1. Phase 5: GAME FULLY PLAYABLE ON
@@ -1585,6 +1585,12 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    splash geometry during the now-scanned-through windows + display
    still correct after test-menu entry/exit if exercised (helper
    on/off paths now never drop scanout).
+
+   **HW round 4 (2026-08-18): GREEN — patch #39 CLOSED.** User reports
+   it works perfectly; an independent tester also confirms OK. The
+   splash now holds uninterrupted from loader through load to game —
+   the whole loadbar thread (splash + orange bar + #38 blank kill +
+   #39 scanout-off kill) is DONE and merged to main.
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —
