@@ -6,7 +6,7 @@ tools/
 bios/
 .venv/
 games/
-/capture-*.log
+/capture-*.log*
 flycast-*.txt
 __pycache__/
 build/
