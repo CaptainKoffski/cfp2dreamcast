@@ -5,7 +5,9 @@
 on screen through the whole load — orange-fill bar, patch #38 kills the SDK
 display-init blank; HW round 3 green on both cables except two takeover
 blinks — root-caused to the init's FB_R_CTRL/FB_R_SIZE off ritual, patch
-#39 planned — see the loadbar Phase-5 entries. The 0.6.0 flycast dynarec regression
+#39 BUILT (7× insn16, whole ritual family neutralized, flycast-verified
+register trail clean) — AWAITING HW round 4 — see the loadbar Phase-5
+entries. The 0.6.0 flycast dynarec regression
 (MMUCR toggling in `gdc_call`) is CLOSED: fixed + verified on flycast macOS,
 GDEMU, and DreamShell serial-SD with default ISO Loader settings, merged to
 main, ready to tag 0.6.1. Phase 5: GAME FULLY PLAYABLE ON
@@ -1548,6 +1550,41 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    and a no-op'd helper off-path is the same "last frame stays up"
    tradeoff #38 already accepted. Verification is HW-only (flycast is
    blind to sub-frame scanout drops; FB-emu freezes post-load).
+
+   **Patch #39 BUILT (2026-08-18): 7× insn16, AWAITING HW round 4.**
+   Opcode pass done with `sh-elf-objdump -b binary -m sh4 --adjust-vma`
+   over tools/boot.bin (no Ghidra needed); all writes kept alive (the
+   reg-writer 0x8c03df00 may shadow r5 — #38 philosophy), only the values
+   neutralized: (1) both applier disables use `mov.l =0x800000,r5; and
+   r0,r5` (keep vclk_div, drop bit 0) after reading FB_R_CTRL —
+   `and r0,r5`→`mov r0,r5` (0x2509→0x6503 at 0x8c042ec8/0x8c042874)
+   rewrites the just-read value; (2) the FB_R_SIZE=0 `jsr`s→`nop`
+   (0x4E0B→0x0009 at 0x8c042ed0/0x8c04287c) — each delay slot
+   (`mov #92,r4`) still executes, register state at the continuation
+   bit-identical; (3) the display on/off helper clears bit 0 on BOTH
+   paths via `mov #-2,r3; and r3,r5` before writing FB_R_CTRL —
+   `and r3,r5`→`nop` (0x2539→0x0009 at 0x8c03e532 off / 0x8c03e548 on,
+   the optional window D). First patched capture then surfaced a 7TH
+   site — the #38 lesson repeating: with cluster A no longer zeroing the
+   register, the output-setup applier's own `and r3,r5` disable at
+   0x8c041ee0 (pr=8c041ee6, right before #38's site-2 VO_CONTROL write)
+   became a fresh 1→0 drop, previously masked as a 0→0 no-change write.
+   Same fix (0x2539→0x0009). Static full-image scan CLOSES the family
+   (dynamic captures surface sites one at a time): `and r3,r5|and
+   r0,r5; jsr reg-writer; mov #68,r4` = exactly 5 hits, `mov #0,r5;
+   jsr; mov #92,r4` = exactly 2 — all 7 patched, no other code feeds
+   the off ritual. Flycast verify (80 s attract, `capture-p39-verify`):
+   after the loader's final unblank the ONLY SDK video-reg change in
+   the whole run is the benign FB_R_SIZE geometry switch
+   1413bd3f→1413b53f (pr=8c041eba) — zero FB_R_CTRL drops, zero
+   FB_R_SIZE zeroings, zero VO_CONTROL writes; MMUCRWR = same 4-write
+   signature (gate v2 intact); 17.5k TA frames = attract reached, which
+   also proves the init's settle waits don't poll for scanout-off (no
+   hang with bit 0 held high). `make test` green, VMU canary PASS.
+   HW round 4 checks: blinks gone on both cables, and (new-risk watch)
+   splash geometry during the now-scanned-through windows + display
+   still correct after test-menu entry/exit if exercised (helper
+   on/off paths now never drop scanout).
 
    **Phase-5 closing items:** graphics/stage-load spot-checks
    during normal play (user reports none so far; sound-RAM fit CLOSED —

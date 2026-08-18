@@ -356,6 +356,41 @@ insn16(0x8C041EEC, 0xCB08, 0xCB00, "patch#38 display-init blank kill, site 2 (ou
 # (dynamic pr set across all captures: 8c04294a / 8c041ef2 / 8c03e558).
 insn16(0x8C03E53C, 0xCB08, 0xCB00, "patch#38 display-init blank kill, site 3 (display on/off helper)")
 
+# --- patch#39: kill the display-init's scanout-off ritual (HW round 3: two ---
+# blinks between splash and splash+bar). #38 killed the VO_CONTROL blank; the
+# same init ALSO clears FB_R_CTRL bit 0 (scanout enable) and zeroes FB_R_SIZE,
+# then restores -- in two clusters = the two blinks (sub-frame in flycast,
+# stretched across real frames by the settle waits on HW; KB "HW round 3").
+# Both applier sites share one idiom: reg-reader(0x8c03df0a) -> r0, then
+# `mov.l =0x800000,r5; and r0,r5` (keep vclk_div only) -> reg-writer(FB_R_CTRL),
+# then `mov #0,r5; jsr; mov #92,r4` -> FB_R_SIZE=0. Neutralize by keeping every
+# WRITE alive (reg-writer may shadow r5 -- same philosophy as #38), just with
+# harmless values: `and r0,r5`->`mov r0,r5` rewrites FB_R_CTRL with its own
+# just-read value; the FB_R_SIZE=0 `jsr`->`nop` keeps its delay slot
+# (mov #92,r4) so register state at the continuation is bit-identical.
+# Window risk accepted per KB: splash scans on with the loader's geometry,
+# which differs from the game's by one y-size bit (1413bd3f vs 1413b53f).
+insn16(0x8C042EC8, 0x2509, 0x6503, "patch#39 scanout-off kill: monitor-globals applier FB_R_CTRL and->mov (pr=8c042ece)")
+insn16(0x8C042ED0, 0x4E0B, 0x0009, "patch#39 scanout-off kill: monitor-globals applier FB_R_SIZE=0 jsr->nop (pr=8c042ed4)")
+insn16(0x8C042874, 0x2509, 0x6503, "patch#39 scanout-off kill: applier site 2 FB_R_CTRL and->mov (pr=8c04287a)")
+insn16(0x8C04287C, 0x4E0B, 0x0009, "patch#39 scanout-off kill: applier site 2 FB_R_SIZE=0 jsr->nop (pr=8c042880)")
+# The display on/off helper FUN_8c03e520 (patch#38 site 3) clears bit 0 on BOTH
+# paths -- `mov #-2,r3; mov.l @shadow,r5; and r3,r5` -- before the final
+# FB_R_CTRL=shadow restore at 8c03e55c. `and r3,r5`->`nop` writes the full
+# shadow value instead; off-path (8c03e532, pr=8c03e538) is blink cluster B,
+# on-path (8c03e548, pr=8c03e54e) is the post-bar sub-ms toggle (window D --
+# proven invisible on HW, but same idiom, kill the whole class).
+insn16(0x8C03E532, 0x2539, 0x0009, "patch#39 scanout-off kill: helper off-path and r3,r5 -> nop (pr=8c03e538)")
+insn16(0x8C03E548, 0x2539, 0x0009, "patch#39 scanout-off kill: helper on-path and r3,r5 -> nop (pr=8c03e54e)")
+# 7th site, surfaced by the first patched capture (the #38 lesson repeats: with
+# the clusters killed, FB_R_CTRL was 1 when the output-setup applier's OWN
+# `and r3,r5` disable at 8c041ee0 fired -> a fresh 1->0 drop at pr=8c041ee6,
+# previously invisible because cluster A had already zeroed the register).
+# Static full-image scan closes the family: `and r3,r5 / and r0,r5; jsr
+# reg-writer; mov #68,r4` = exactly 5 hits, `mov #0,r5; jsr; mov #92,r4` = 2;
+# all 7 patched, nothing else feeds FB_R_CTRL/FB_R_SIZE from the off ritual.
+insn16(0x8C041EE0, 0x2539, 0x0009, "patch#39 scanout-off kill: output-setup applier and r3,r5 -> nop (pr=8c041ee6)")
+
 # NOTE (Task 14b history, RESOLVED by Task 14f above): FUN_8c03c2c6 is reached via
 # BOTH pool[0x8c02ed6c] (Mode A) and pool[0x8c02ee88] (Mode B, DC takes this); Task
 # 14 swapped only the first, and swapping the second to shim_maple_entry regressed
