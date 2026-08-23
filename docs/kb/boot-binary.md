@@ -208,6 +208,27 @@ the game expects. The minor site `FUN_8c03c2c6` may need the same shim.
 > and the input shim must serve sub 0x33 (see `phase4-conversion.md` §V4
 > for reply templates and the per-sub site table).
 
+> **Addendum 2026-08-23 (cross-game finding, from the senkosp port) — the
+> logged boot-phase PC `0x8c03161e` is the Naomi BIOS, not this routine.**
+> The senkosp Naomi→DC port proved with a handoff-aware capture that the
+> boot-phase maple events this section attributed to `0x8c0315ce` (subs
+> `0x15` ×369, `0x27` ×360, `0x01`/`0x03` ×1 each at `pc=0c03161e`, recv
+> buffer `0x0c296220`) are the **Naomi BIOS's own maple/JVS driver**, running
+> from RAM *before* the game image is loaded over it — and that this game
+> and senkosp log the identical PC, identical per-sub counts and identical
+> buffer, which only shared BIOS code produces. The decode above (store at
+> `0x8c031618`, `rts` at `0x8c03161a`, "`0x8c03161e` is the return address")
+> was performed on game-image bytes that were not yet in RAM when those PCs
+> executed — the same `+2`-rule trap senkosp diagnosed in its own Phase 3.
+> This applies equally to §6's boot-time `0x01`/`0x03` events at the same
+> PC. **What stands:** the fn-ptr table refs are static reads of this image;
+> the steady-state attribution (`FUN_8c03c2c6`, sub `0x33`, P1-form PCs) is
+> post-handoff game code and unaffected; and the shipped shim is
+> functionally correct either way — on DC the shim replaces the BIOS's role.
+> Full evidence: `../senkosp2dreamcast/docs/kb/phase4-conversion.md` §R5;
+> local consequences: `phase4-conversion.md` §Issuing sites per sub,
+> addendum 2026-08-23.
+
 ---
 
 ## 6. EEPROM/settings-parse function — Phase 4 shim target

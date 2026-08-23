@@ -854,6 +854,35 @@ entries — `FUN_8c027584` dispatches `0x8c0315ce` as a fn-ptr callback,
 `boot-binary.md` §5 — of the same interpreter-exact site `0c03161e`. Both
 `8c03c3d6` and `8c03c3e4` fall inside `FUN_8c03c2c6`.)
 
+> **Addendum 2026-08-23 (cross-game finding, from the senkosp port) — the
+> `0c03161e` PCs are the Naomi BIOS, not `0x8c0315ce`.** The senkosp Naomi→DC
+> port re-measured this exact PC family with a handoff-aware capture and
+> proved that the interpreter-exact boot-phase events above (sub `0x15` ×369,
+> `0x27` ×360, `0x01`/`0x03` ×1 each, all `pc=0c03161e`, reply buffer
+> `0x0c296220`) are issued by the **Naomi BIOS's own maple/JVS driver**,
+> executing out of RAM *before* the BIOS loads the game image over that same
+> RAM: every such event precedes the first bulk cart→RAM transfer, runs on
+> the BIOS stack (`sp=0x0cbffdc4`–`0x0cbfff9c`), and — the clincher — this
+> game and senkosp, two unrelated 2006-era titles, log the **identical PC,
+> identical per-sub counts (369/360/1/1) and identical reply buffer**, which
+> only shared BIOS code can produce. Full evidence (four independent proof
+> lines plus this cross-game one):
+> `../senkosp2dreamcast/docs/kb/phase4-conversion.md` §R5 and
+> `../senkosp2dreamcast/docs/kb/boot-binary.md` §Addendum 2026-08-22.
+> **What this corrects here:** the "issuing site" column's `0x8c0315ce`
+> attribution for the 369×/360×/1×/1× interpreter rows, and the paragraph
+> above reading the dynarec `0c0227a8`/`0c02283c` block PCs as caller-side
+> entries of that dispatch — those captured PCs are BIOS-era. **What
+> stands:** `0x8c0315ce` is still a real routine of this game's image (the
+> pool-word/fn-ptr static analysis in §input-ABI is read from
+> `tools/boot.bin` and is unaffected), and the shipped shim is functionally
+> unchanged — on the DC target the shim replaces the BIOS's role, so serving
+> those boot subs was and remains correct regardless of which agent issued
+> them on Naomi. **Not re-verified here:** whether this game ever runs its
+> `0x8c0315ce` routine post-handoff (the 7× dynarec `0c0315ca` events are
+> P0-form and by the senkosp P0/P1 = BIOS/game split rule are likely
+> BIOS-era too — this capture has not been re-parsed).
+
 **Primary/secondary inversion (supersedes the framing in `boot-binary.md` §5;
 dated addendum added there):** Phase 3's "primary 369× / minor 7×" counted
 only sub-0x15 traffic. The steady-state per-frame input poll is **sub 0x33
@@ -895,6 +924,14 @@ Pool words were read from `tools/boot.bin` (file offset = VA − `0x8c020000`,
 little-endian; a pool that is an in-image pointer is dereferenced one level).
 Reply templates are `build/mie_subXX.bin` (V4). Full evidence chain:
 `.superpowers/sdd/task-5-report.md`.
+
+> **Note 2026-08-23:** the "Boot site `0x8c0315ce`" column below is a static
+> characterization read out of `tools/boot.bin` — that analysis stands — but
+> the captured boot-phase traffic it was matched against (`pc=0c03161e`,
+> recv `0x0c296220`) has since been identified as the **Naomi BIOS's own
+> maple/JVS driver**, not this routine executing; see the addendum in
+> §Issuing sites per sub above. The shim contract is unchanged: on Dreamcast
+> the shim owns those subs either way.
 
 ### Headline
 
