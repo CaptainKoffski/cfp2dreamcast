@@ -280,6 +280,24 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    even, x bits odd) confirmed from Flycast `core/rend/texconv.cpp`
    `twiddle_slow()`; verified by detwiddle round-trip + region hashes
    (only IP.BIN fields and the art pixels differ from donor).
+   **SEGA TM-screen logo (2026-09-23)** (`make_gdi.py patch_iplogo`):
+   the licence screen the boot ROM draws before the game showed no logo
+   — the donor carries IP.BIN's MR-logo slot blank (an exactly 8192-byte
+   zero run at track03 0x3820). IP.BIN 0x3800–0x5FFF is the modifiable
+   bootstrap-1 region (Marcus Comstedt, mc.pp.se/dc/ip.bin.html) and the
+   community insertion point is 0x3820 (makeip `src/mr.c`
+   `#define MR_OFFSET 0x3820`, bounds ≤320×90 / <128 colours / <8192 B);
+   the licence code holds the literal `0x8c00b820` at IP.BIN 0x083c —
+   static proof it reads the slot when populated. Gitignored `iplogo.mr`
+   at repo root (NAOMI GD-ROM SYSTEM logo, dreamcast-talk file 18794 —
+   SEGA trademark artwork, same rule as 0GDTEX.*) is asserted (MR
+   signature, header size == file size, ≤8192 B, slot still the donor's
+   zero run) and written zero-padded to 8192 B. Optional like the disc
+   art: file absent → build byte-identical to before. Same patch passed
+   a hardware round in the sister senkosp2dreamcast port (logo shows +
+   no boot regression); **hardware verdict owed here** — only
+   `track03.iso` changes.
+
    Top-level **Makefile** added: `make` (full
    disc), `make release` (GDMENUCardManager zip — embeds the ROM, local
    only), `make deploy` (card copy + dot_clean guard). Flycast
