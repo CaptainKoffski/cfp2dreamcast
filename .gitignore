@@ -33,3 +33,4 @@ naomi_boot*.png
 # disc cover art (third-party fan art, optional build input)
 0GDTEX.png
 *.pvr
+/iplogo.mr
