@@ -294,9 +294,9 @@ Spec: `docs/superpowers/specs/2026-07-17-phase1-foundation-design.md`.
    signature, header size == file size, ≤8192 B, slot still the donor's
    zero run) and written zero-padded to 8192 B. Optional like the disc
    art: file absent → build byte-identical to before. Same patch passed
-   a hardware round in the sister senkosp2dreamcast port (logo shows +
-   no boot regression); **hardware verdict owed here** — only
-   `track03.iso` changes.
+   a hardware round in the sister senkosp2dreamcast port; **hardware
+   verdict here: PASS** (user, 2026-09-23 — logo shows, no boot
+   regression). Only `track03.iso` changes.
 
    Top-level **Makefile** added: `make` (full
    disc), `make release` (GDMENUCardManager zip — embeds the ROM, local
