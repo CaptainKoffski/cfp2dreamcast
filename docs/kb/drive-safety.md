@@ -18,7 +18,7 @@ citation; where only a wiki carries a claim it is flagged as such.
 ## 1. GD-EMU / SD-card ODE — solid-state, cannot be damaged by software
 
 A GDEMU-class ODE (how the converted disc is loaded onto real Dreamcast
-hardware — see `00-status.md`, `port-playbook.md` Phase 5) is an SD card plus
+hardware — see `00-status.md`, `../../../naomi2dreamcast/docs/kb/port-playbook.md` Phase 5) is an SD card plus
 a microcontroller that answers the Dreamcast's GD-ROM bus commands. The
 mechanical failure modes of an optical drive simply do not exist:
 
@@ -28,7 +28,7 @@ mechanical failure modes of an optical drive simply do not exist:
   game data back to the GD-ROM; settings/saves go to the console flash and the
   VMU, not the disc (`naomi-vs-dreamcast.md` §5, flash syscalls cited there;
   our own VMU-safety tripwires exist precisely because writes go elsewhere —
-  `port-playbook.md` Phase 6). NAND/SD flash cells are degraded by the
+  `../../../naomi2dreamcast/docs/kb/port-playbook.md` Phase 6). NAND/SD flash cells are degraded by the
   program/erase cycle of a *write*; read operations do not consume endurance
   ([Kingston, eMMC life-cycle](https://www.kingston.com/en/blog/embedded-and-industrial/emmc-lifecycle);
   [TechTarget, write endurance](https://www.techtarget.com/searchstorage/definition/write-endurance)).
