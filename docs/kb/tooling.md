@@ -351,7 +351,7 @@ tracks at build time (cached in `build/donor/`). Not committed (ROM/commercial
 data); keep the archives in the repo root and extract with
 `/opt/homebrew/bin/7zz` (brew `sevenzip`).
 
-- `[GDI] Dolphin Blue.7z`, `[GDI] Sushi Bar.7z` — **Atomiswave→DC fan ports**, the
+- `[GDI] Dolphin Blue.7z`, `[GDI] Sushi Bar/` (held extracted only — no `.7z`) — **Atomiswave→DC fan ports**, the
   same porting technique as this project. The closest analog: 2048-byte data
   tracks, 4-track geometry (track3 @45000, track4 @450000), lead-out FAD 550068,
   fully-populated `TOC1`, and `GD-ROM1/1` device info. Both share one IP.BIN
