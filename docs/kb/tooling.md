@@ -90,7 +90,11 @@ input, and serial pokes. Distinct from the release Flycast above.
 - **Output:** `tools/flycast-src/build/Flycast.app/Contents/MacOS/Flycast` (Mach-O arm64).
 - **Capturing:** use `scripts/capture.sh <attract|play|input> [seconds]`. It sets
   `FLYCAST_CARTLOG=<repo>/capture-<pass>.log` (the cartlog helper writes there,
-  flushed per line) and handles two macOS gotchas:
+  flushed per line). Logs captured through 2026-10-04 (all `capture-*.log`,
+  `flycast-*.txt` cited in the KB) are archived in `capture-archive.log.tar.zst`
+  (gitignored); restore one with
+  `tar -xf capture-archive.log.tar.zst --use-compress-program=unzstd <name>`.
+  The script handles two macOS gotchas:
   - `-config config:rend.vsync=no` — required, or the emu thread deadlocks past
     boot when the window is unfocused (transient flag; `emu.cfg` untouched).
   - `defaults write com.flyinghead.Flycast ApplePersistenceIgnoreState -bool YES`

@@ -17,6 +17,8 @@ loader/*.elf
 # ROM/commercial disc data — reference GDIs, dumps, mastered images (never commit)
 *.zip
 *.7z
+# extracted reference GDI folders
+/\[GDI\]*/
 *.gdi
 *.cdi
 track*.bin
