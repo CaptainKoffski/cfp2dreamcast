@@ -17,6 +17,14 @@ unsigned short dc_to_jvs(unsigned short dc) {
     return j;
 }
 
+/* The retail DC reset combo, A+B+X+Y+Start all held (KOS dc/maple/
+ * controller.h CONT_RESET_BUTTONS: A bit2, B bit1, X bit10, Y bit9, Start
+ * bit3). Takes the raw ACTIVE-LOW word, like dc_to_jvs. */
+int dc_reset_combo(unsigned short dc) {
+    unsigned short m = (1u << 2) | (1u << 1) | (1u << 10) | (1u << 9) | (1u << 3);
+    return ((unsigned short)~dc & m) == m;
+}
+
 /* JVS checksum = (sum of frame bytes [0x1b..0x39]) & 0xff, stored at [0x3a].
  * Mirrors the Flycast emitter's calc_crc (maple_jvs.cpp:2476-2478): the sum runs
  * over everything after the E0 sync. Must be recomputed whenever a button byte
