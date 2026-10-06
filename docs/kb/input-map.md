@@ -65,5 +65,5 @@ Code: `dc_reset_combo()` in `shims/src/jvs.c` (host-tested), checked in
 `jvs_digital` right after each `maple_getcond` pair (`shims/src/main.c`).
 The same mechanism is hardware-verified on the senkosp port (reboot →
 GDMenu, both ports; `../senkosp2dreamcast/docs/kb/input-map.md` §Pad reset
-combo). Status here: host test + SH-4 build; **not yet hardware-verified on
-this port**.
+combo). **Hardware-verified on this port 2026-10-06** (operator, real DC +
+GDEmu): it reboots cleanly to GDMenu.
