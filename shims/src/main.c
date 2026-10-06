@@ -31,6 +31,7 @@ static u32 reply_ticks = 0x10000;    /* total maple_reply invocations */
 
 unsigned short maple_getcond(unsigned int port);   /* DC Maple GetCondition: port A=0, B=1 */
 unsigned short dc_to_jvs(unsigned short);
+int            dc_reset_combo(unsigned short);          /* src/jvs.c */
 unsigned char  jvs_checksum(const unsigned char *);
 extern const unsigned char jvs_hasdata[];               /* src/jvs.c */
 void scif_puts(const char *); void scif_puthex(unsigned int); void scif_putc(char);  /* src/scif.c */
@@ -153,6 +154,19 @@ static void la_tick(void) {                 /* once per maple frame */
 #define la_tick()    ((void)0)
 #endif
 
+/* Pad reset combo -> cold boot through the BIOS reset vector, exactly as KOS
+ * arch_reboot does (kernel/arch/dreamcast/kernel/init.c: IRQs masked per
+ * arch_irq_disable, then call P2 0xa0000000). Chosen over arch_menu (BIOS-menu
+ * syscall) because a cold boot makes GDEmu load its first image = GDMenu --
+ * hardware-verified on the senkosp port, same mechanism (senkosp
+ * docs/kb/input-map.md §Pad reset combo, 2026-10-05). */
+static void __attribute__((noreturn)) pad_reboot(void) {
+    u32 sr; __asm__ volatile ("stc sr,%0" : "=r"(sr));
+    __asm__ volatile ("ldc %0,sr" : : "r"((sr & 0xefffff0fu) | 0xf0u));
+    ((void (*)(void))0xa0000000u)();
+    __builtin_unreachable();
+}
+
 static void jvs_digital(u32 sub, void *rx) {
     HUD_ONCE(0x08, 3, 0xffe0);                           /* slot3 yellow: input poll live */
     if (pad_thresh == 1) {
@@ -165,6 +179,8 @@ static void jvs_digital(u32 sub, void *rx) {
         getcond_total += 2;
         raw_cache_a = maple_getcond(0);                  /* port A -> P1 */
         raw_cache_b = maple_getcond(1);                  /* port B -> P2 (0xffff=no pad -> idle) */
+        if (dc_reset_combo((unsigned short)raw_cache_a) ||
+            dc_reset_combo((unsigned short)raw_cache_b)) pad_reboot();  /* either pad, as retail */
     }
     unsigned short raw  = (unsigned short)raw_cache_a;
     unsigned short j    = dc_to_jvs(raw);

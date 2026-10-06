@@ -51,3 +51,19 @@ viable port is single-player. Recorded here so it is not forgotten.
 
 This resolves `naomi-vs-dreamcast.md §8-2` for the 7 gameplay controls —
 bit layout derived from source and confirmed empirically by single-press capture.
+
+## Pad reset combo — A+B+X+Y+Start reboots (2026-10-05)
+
+Tester request (GDEmu users): the retail DC soft-reset combo. Holding
+A+B+X+Y+Start on either port cold-boots the console the same way KOS
+`arch_reboot` does: mask IRQs, then call the BIOS reset vector at P2
+`0xa0000000` (KOS `kernel/arch/dreamcast/kernel/init.c` `arch_reboot`; combo
+= `CONT_RESET_BUTTONS`, `dc/maple/controller.h`). This port's BIOS syscalls
+are still alive, so `arch_menu` would also work, but it lands in the DC
+system menu. A cold boot makes GDEmu load its first image, which is GDMenu.
+Code: `dc_reset_combo()` in `shims/src/jvs.c` (host-tested), checked in
+`jvs_digital` right after each `maple_getcond` pair (`shims/src/main.c`).
+The same mechanism is hardware-verified on the senkosp port (reboot →
+GDMenu, both ports; `../senkosp2dreamcast/docs/kb/input-map.md` §Pad reset
+combo). **Hardware-verified on this port 2026-10-06** (operator, real DC +
+GDEmu): it reboots cleanly to GDMenu.

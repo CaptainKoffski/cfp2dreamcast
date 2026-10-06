@@ -78,6 +78,16 @@ int main(void) {
     assert(RGB565_TO_0555(0x001fu) == 0x001fu);                      /* blue  */
     assert(RGB565_TO_0555(0x39e7u) == 0x1ce7u);                      /* the round-1 olive gray */
 
-    printf("PASS test_host cart_split + dc_to_jvs + jvs_checksum + p2 + rgb repack\n");
+    /* dc_reset_combo: A+B+X+Y+Start all held, raw ACTIVE-LOW word like dc_to_jvs. */
+    {
+        unsigned short all = (1u << 2) | (1u << 1) | (1u << 10) | (1u << 9) | (1u << 3);
+        assert(dc_reset_combo((unsigned short)~all));
+        assert(dc_reset_combo((unsigned short)~(all | (1u << 4))));   /* extras don't block it */
+        assert(!dc_reset_combo((unsigned short)~(all & ~(1u << 9)))); /* Y missing: no reset */
+        assert(!dc_reset_combo((unsigned short)~(all & ~(1u << 3)))); /* Start missing */
+        assert(!dc_reset_combo(0xffff));                              /* idle / no pad */
+    }
+
+    printf("PASS test_host cart_split + dc_to_jvs + jvs_checksum + p2 + rgb repack + reset combo\n");
     return 0;
 }
