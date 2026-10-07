@@ -87,13 +87,19 @@ Then, and on every rebuild after:
 ```sh
 make            # shim -> patch table -> loader -> mastered GDI in build/
 make test       # host-runnable unit tests (split math, JVS, memory map)
-make release    # build/[GDI] Cleopatra Fortune Plus.zip for GDMENUCardManager
+make cdi        # build/cdi/cleopatra.cdi: burnable CD-R image (+ burn README)
+make release    # [GDI] zip for GDMENUCardManager + [CDI] zip for CD-R testers
 make deploy     # copy to SD card (CARD=/Volumes/GDEMU/NN) + dot_clean guard
 ```
 
 `build/disc.gdi` runs directly in Flycast. On real hardware, feed the
 release zip to GDMENUCardManager (the disc identifies as `T-CFP001M`,
 "CLEOPATRA FORTUNE PLUS").
+
+**CD-R:** burn `cleopatra.cdi` as a disc image (DiscJuggler, Alcohol 120%)
+at 8x or lower; needs a MIL-CD-capable console. `make cdi` additionally
+needs cdi4dc and mkdcdisc (`docs/kb/tooling.md` §CDI mastering). The CDI is
+emulator-verified only so far.
 
 **DreamShell / serial-SD users (isoldr):** default ISO Loader settings work
 (HW-verified; the measured-clean alternative is Memory = `0x8cfe8000` with

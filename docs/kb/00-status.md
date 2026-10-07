@@ -23,6 +23,11 @@ writes above 8 MB (write-truth remeasures). Loadbar-on-composite bug fixed
 lines 0..236) and HW-verified on both cable types. Remaining: release
 packaging.)
 
+**2026-10-07: CD-R build added** — `make cdi` → `build/cdi/cleopatra.cdi`;
+`make release` now ships `[GDI]` + `[CDI]` zips. Emulator-verified (real
+BIOS → attract); GDEMU / burned-disc verdict pending. `tooling.md` §CDI
+mastering.
+
 ## What this is
 
 Static binary conversion of *Cleopatra Fortune Plus* (Sega Naomi) to Sega

@@ -2,6 +2,7 @@
 TARGET = loader.elf
 OBJS = main.o handoff.o shim_blob.o bios_data.o splash_blob.o
 CFLAGS += -I../shims/include -I../build
+CFLAGS += $(CDI_DEFS)   # make cdi: CD-R cart FAD + SHIM_CDXA (top Makefile)
 BIOS = ../bios/naomi/epr-21576h.ic27   # Flycast default Japan bios0 (gitignored ROM)
 all: ../build/1ST_READ.BIN
 include $(KOS_BASE)/Makefile.rules

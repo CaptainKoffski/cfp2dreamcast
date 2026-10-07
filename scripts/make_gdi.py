@@ -193,6 +193,19 @@ assert _csz == CART_SIZE, f"CART_SIZE mismatch: gdi {CART_SIZE:#x} vs shim {_csz
 def run(cmd): subprocess.run(cmd, check=True)
 
 
+def cdi_marks(ldr: bytes):
+    """CART_FADs of every {0x0FADC0DE, CART_FAD} mark a `make cdi` build bakes
+    into the shim (shims/src/gd.c gd_cdi_mark), which the loader embeds. A
+    GDI loader has none -- CART_FAD is a compile-line knob make can't see, so this is
+    the only thing that catches stale CDI objects mastered into the GDI."""
+    magic = (0x0FADC0DE).to_bytes(4, "little")
+    fads, i = [], ldr.find(magic)
+    while i != -1:
+        fads.append(int.from_bytes(ldr[i + 4:i + 8], "little"))
+        i = ldr.find(magic, i + 1)
+    return fads
+
+
 def donor_tracks(out: pathlib.Path) -> pathlib.Path:
     """Extract the donor image from the AW-port 7z (cached in build/donor/)."""
     dest = out / "donor" / DONOR_SUB
@@ -219,6 +232,7 @@ def main():
     assert len(rom) == CART_SIZE, f"cart size {len(rom):#x} != {CART_SIZE:#x}"
     ldr = pathlib.Path(a.loader).read_bytes()
     assert len(ldr) <= BOOT_FILE_SIZE, "loader outgrew the donor boot region"
+    assert not cdi_marks(ldr), "loader is a CDI build (CD cart FAD) -- make clean && make disc"
 
     for f in ("track01.iso", "track02.raw", "track03.iso", "disc.gdi"):
         shutil.copyfile(donor / f, out / f)
