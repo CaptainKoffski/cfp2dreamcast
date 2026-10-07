@@ -105,6 +105,31 @@ static void gd_init_drive(void) {
 #define GD_SYSINIT 3
 static void gd_sys_reinit(void) { GD_PHASE(6); GDC(0, 0, 0, GD_SYSINIT); GD_RET(6); }
 
+#if SHIM_CDXA
+/* CDI build (make cdi). gdGdcInitSystem + CMD_INIT drop the BIOS back to its
+ * default read type -- right for a GD's HD area, wrong for the CD-R's Mode 2
+ * Form 1 data track: the Tetris Kiwamemichi CDI hung on GDEMU in exactly this
+ * state (../tetkiwam2dreamcast/make_cdi.py, its disc-type-check comment;
+ * Flycast ignores the field). Round 11 above runs this recovery on every real-
+ * HW session, so re-apply what the loader's KOS cdrom_reinit set for a CD-XA
+ * disc: FUNC_GDROM_SECTOR_MODE r7=10 (syscalls.c:72) with {set,
+ * CDROM_READ_DATA_AREA 0x2000, track type 2048, sector 2048} (cdrom.c
+ * cdrom_change_datatype, syscalls.h:530). */
+#define GD_SECTOR_MODE 10
+static void gd_recover(void) {
+    u32 mode[4] = { 0, 0x2000, 2048, 2048 };
+    gd_sys_reinit(); gd_init_drive();
+    GDC((u32)mode, 0, 0, GD_SECTOR_MODE);
+}
+/* make_cdi.py checks the loader (which embeds this shim) carries it with the
+ * CD FAD; make_gdi.py refuses any loader that carries it at all (CART_FAD is
+ * a compile-line knob make can't see -- a stale CDI object in a GDI is
+ * otherwise silent). */
+const u32 __attribute__((used)) gd_cdi_mark[2] = { 0x0FADC0DEu, CART_FAD };
+#else   /* macro, not a function: keeps the HW-verified GDI shim byte-identical */
+#define gd_recover() (gd_sys_reinit(), gd_init_drive())
+#endif
+
 int gd_read_sectors(void *dst, u32 fad, u32 n) {
     /* Real-HW round 9: first in-game stream died red with an instant error.
      * Two hardening changes vs the loader-rehearsed happy path:
@@ -116,7 +141,7 @@ int gd_read_sectors(void *dst, u32 fad, u32 n) {
      *   - the whole read is retried 3x before reporting failure (KOS
      *     re-inits+retries on real drives; reads are idempotent). */
     for (u32 attempt = 0; attempt < 4; attempt++) {
-        if (attempt) { gd_sys_reinit(); gd_init_drive(); }  /* rebuild state, then drive */
+        if (attempt) gd_recover();   /* rebuild state, then drive */
         u32 param[4], stat[4], guard = 0;
         param[0] = fad; param[1] = n; param[2] = (u32)dst; param[3] = 0;
         GD_DIAG(120, 134, fad);
@@ -178,7 +203,7 @@ int gd_read_sectors_dma(u32 phys, u32 fad, u32 n) {
     *(volatile u32 *)0xa05f6920 &= ~(1u << 14);
     *(volatile u32 *)0xa05f6930 &= ~(1u << 14);
     for (u32 attempt = 0; attempt < 4; attempt++) {
-        if (attempt) { gd_sys_reinit(); gd_init_drive(); }
+        if (attempt) gd_recover();
         dcache_inval(phys, n * 2048u);
         u32 param[4], stat[4], guard = 0;
         param[0] = fad; param[1] = n; param[2] = phys; param[3] = 0;

@@ -346,6 +346,81 @@ environment every Phase 4 build task sources.
   populated IP.BIN track-TOC, which `make_gdi.py` `patch_toc()` writes after
   `makeip` — see `phase4-conversion.md` B1.
 
+### CDI mastering — `make cdi` (2026-10-07)
+
+Burnable audio/data MIL-CD for testers with CD-Rs. A port of
+`../senkosp2dreamcast`'s chain, which took five GDEMU rounds to get right
+(its `docs/kb/tooling.md` §CDI mastering — read that for the dead ends);
+`../tetkiwam2dreamcast/make_cdi.py` is the file-based sibling. A generic
+GDI→CDI converter can't work here: the shim reads the cart from a baked
+absolute FAD as raw sectors past the FS, not a file.
+
+**Installs** (all gitignored under `tools/`, pinned to the commits the
+senko CDI was hardware-verified with):
+
+- **img4dc / cdi4dc 0.5b** — `git clone https://github.com/Kazade/img4dc
+  tools/img4dc && git -C tools/img4dc checkout d28df15` (Unix-portable fork
+  of SiZiOUS's original, which needs `windows.h`). Build: `mkdir
+  tools/img4dc/build && cd tools/img4dc/build && cmake ..
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && make
+  cdi4dc` (Homebrew cmake 4.4.0 refuses the project's
+  `cmake_minimum_required(3.0)` without the policy flag) →
+  `tools/img4dc/build/cdi4dc/cdi4dc`.
+- **mkdcdisc v0.0.4** — `git clone https://gitlab.com/simulant/mkdcdisc.git
+  tools/mkdcdisc && git -C tools/mkdcdisc checkout 2b98b0d`, then `cd
+  tools/mkdcdisc && meson setup build && ninja -C build` →
+  `tools/mkdcdisc/build/mkdcdisc`. Deps were already present via Homebrew:
+  meson 1.12.1, ninja 1.13.2, libisofs 1.5.8.pl02. Used ONLY to generate the
+  CD IP.BIN (`-b <loader> -I`, first 16 sectors of the dumped data track).
+- **mkisofs** — the existing cdrtools 3.02a09 (above).
+- **scramble** — Marcus Comstedt's 1ST_READ scrambler, prebuilt in the KOS
+  checkout: `tools/kos/utils/scramble/scramble`.
+
+**Layout** (`scripts/make_cdi.py`): session 1 = cdi4dc's silent audio
+track; session 2 = one Mode 2 data track at LBA 11702: IP.BIN (16 sectors),
+ISO9660 (`mkisofs -C 0,11702 -G ip.bin`, scrambled `1ST_READ.BIN` only),
+zero-padded to 1792 sectors, then the raw 109 MB cart. **CD cart FAD = 150 +
+11702 + 1792 = 13644** — same geometry as senko's CDI. The three senko
+lessons baked in: (1) CD-native IP from mkdcdisc, never the GD donor's (the
+retail GD IP dies on a real CD boot, emulator lets it through — senko HW
+round 4 A/B); (2) `1ST_READ.BIN` scrambled — the boot ROM descrambles on CD
+media only (senko `cdi/boot-smoke` A/B); (3) audio/data, not cdi4dc's beta
+data/data mode.
+
+**Code delta (CDI build only; the GDI build is byte-identical to before —
+shim.bin, 1ST_READ.BIN, track03, track04 md5s A/B-checked 2026-10-07):**
+`make cdi` compiles shim + loader with `-DCART_FAD=13644 -DSHIM_CDXA=1`
+(`CDI_DEFS`, bracketed by `make clean` on both sides). `SHIM_CDXA` adds one
+cleopatra-specific fix senko didn't need (its shim reads via raw ATA with
+"any data type" in the CD_READ packet; ours goes through BIOS syscalls): the
+GD recovery path (gdGdcInitSystem + CMD_INIT, which runs on every real-HW
+session — round 11) resets the BIOS read type to its GD default, wrong for
+a Mode 2 Form 1 CD track (the Tetris CDI hung on GDEMU in exactly that
+state, `../tetkiwam2dreamcast/make_cdi.py`). `gd_recover()` re-applies
+KOS's CD-XA sector mode afterwards: syscall r7=10 with {set, 0x2000, 2048,
+2048} (KOS `cdrom.c` `cdrom_change_datatype`). Tripwire: the CDI shim bakes
+`{0x0FADC0DE, CART_FAD}`; `make_cdi.py` requires it at 13644, `make_gdi.py`
+refuses any loader carrying it.
+
+**KOS gotcha:** KOS links with `-Wl,--gc-sections` +
+`-fdata-sections` (`tools/kos/environ_dreamcast.sh:32-34`), so an
+unreferenced `__attribute__((used))` const in loader code is still dropped
+at link — a mark there never reached the binary. The shim (own linker
+script, no gc) keeps it.
+
+| leg | build | verdict |
+|-----|-------|---------|
+| `cdi-leg2` (scratchpad, 150 s) | `make cdi`, instrumented Flycast + real `dc_boot.bin` (`UseReios = no`) | BIOS boots the CD → loader → game: how-to-play demo + title, FREE PLAY; 995 GDDMA cart reads to FAD 0x94e7 (cart +50 MB) |
+| `cdi-force` (scratchpad, 150 s) | throwaway: `gd_recover()` forced before EVERY read | identical attract + 995 GDDMA reads — the recovery + CD sector-mode syscall is non-fatal on the real BIOS (Flycast ignores the read-type field, so this proves no crash, not the HW fix) |
+
+Byte checks on the image: IP device `CD-ROM1/1`, area `JUE`, peripherals
+`0619810` (donor's), title/serial = the GDI's; PVD at data-track sector 16;
+cart first/middle/last sectors byte-equal to the ROM at sector 1792.
+
+**Status: emulator-verified only.** Not yet booted on GDEMU or a burned
+CD-R. The `.cdi` md5 moves on every remaster (mkisofs stamps PVD times —
+senko §Status); payload geometry doesn't.
+
 ### Reference self-boot GDIs (gitignored — never commit)
 
 Oracles for the real-HW boot format — and `[GDI] Dolphin Blue.7z` is now a

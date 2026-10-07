@@ -3,6 +3,7 @@ NM = /opt/toolchains/dc/sh-elf/bin/sh-elf-nm
 OBJCOPY = /opt/toolchains/dc/sh-elf/bin/sh-elf-objcopy
 CFLAGS = -ml -m4-single-only -ffreestanding -nostdlib -Os -Wall -Wextra -fno-tree-loop-distribute-patterns -Iinclude
 CFLAGS += $(DEFS)   # debug toggles, e.g. make DEFS='-DSHIM_SERIAL=1 -DSHIM_TRACE=1'
+CFLAGS += $(CDI_DEFS)   # make cdi: CD-R cart FAD + SHIM_CDXA (top Makefile)
 B = build
 # Embedded data: free-play EEPROM + verbatim MIE ACK templates + JVS I/O-board
 # enumeration replies (mie_jvsXX, harvested by scripts/extract_jvs_replies.py).
