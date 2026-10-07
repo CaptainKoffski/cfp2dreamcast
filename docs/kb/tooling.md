@@ -189,9 +189,12 @@ file. No behaviour change unless enabled.
   ```
   A black PNG just means the frame sampled was a load/transition — grab a few
   frames across a few seconds to catch the title/attract (title shows the
-  credit/FREE-PLAY corner). Kill leftover Flycast instances before relaunching
-  (`pkill -9 -f "flycast-src.*Flycast"`): a stale instance makes the new one
-  fail the SH4 vmem `Verify Failed` (driver.cpp:349) and never boot.
+  credit/FREE-PLAY corner). Stop your own instance by PID (`$!`), never by
+  name (`pkill -f`/`-x` also kills other projects' instances — parallel runs
+  are normal since 2026-10-04). Old note: a stale instance made the next one
+  fail the SH4 vmem `Verify Failed` (driver.cpp:349); two healthy instances
+  side by side did not reproduce it (2026-10-04), and the splash script keeps
+  its `Verify Failed` retry loop.
 
 #### VMU-canary harness (2026-07-26)
 

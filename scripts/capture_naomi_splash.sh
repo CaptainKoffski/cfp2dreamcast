@@ -6,8 +6,10 @@ LOG="${TMPDIR:-/tmp}/naomi_boot.log"
 # stale $PNG from a prior run would be re-served as "this run's frames" if
 # Flycast dies before writing its first dump (final review)
 rm -f naomi_boot_s*.png "$PNG"
+# kill by PID only: a name match would also kill other projects' instances
+FPID=
 for try in 1 2 3 4; do
-  pkill -9 -f "flycast-src.*Flycast" 2>/dev/null; sleep 10
+  [ -n "$FPID" ] && { kill -9 "$FPID" 2>/dev/null; sleep 10; }
   FLYCAST_SHOT="$PNG" FLYCAST_SHOT_EVERY=15 \
     "$BIN" "$REPO/Cleopatra Fortune Plus.dat" -config config:rend.vsync=no > "$LOG" 2>&1 &
   FPID=$!
@@ -20,5 +22,5 @@ while [ $i -lt 45 ]; do
   i=$((i+1)); sleep 1
   cp "$PNG" "naomi_boot_s$i.png" 2>/dev/null
 done
-pkill -9 -f "flycast-src.*Flycast" 2>/dev/null
+kill -9 "$FPID" 2>/dev/null
 md5 naomi_boot_s*.png | awk '{print $NF, $4}' | sort -k2 | uniq -f1 | sort -V
